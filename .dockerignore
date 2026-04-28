@@ -1,0 +1,7 @@
+.git
+.venv
+__pycache__
+*.pyc
+data/state.json
+BetSignal-Cloud.zip
+

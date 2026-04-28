@@ -1,0 +1,804 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+import base64
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import secrets
+import smtplib
+import sqlite3
+from typing import Any
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _hash_password(password: str) -> str:
+    iterations = 200_000
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2${iterations}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    try:
+        scheme, iter_raw, salt_hex, digest_hex = password_hash.split("$", 3)
+    except ValueError:
+        return False
+    if scheme != "pbkdf2":
+        return False
+    try:
+        iterations = int(iter_raw)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except ValueError:
+        return False
+    current = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(current, expected)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def issue_session_token(user_id: int, secret: str, hours: int) -> str:
+    payload = {
+        "uid": int(user_id),
+        "exp": int((datetime.now(timezone.utc) + timedelta(hours=hours)).timestamp()),
+    }
+    body = _b64url(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
+    sig = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
+    return f"{body}.{_b64url(sig)}"
+
+
+def read_session_token(token: str | None, secret: str) -> int | None:
+    if not token or "." not in token:
+        return None
+    body, sig = token.split(".", 1)
+    expected = _b64url(hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest())
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+        if int(payload.get("exp", 0)) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        return int(payload.get("uid"))
+    except Exception:
+        return None
+
+
+@dataclass
+class PasswordResetDelivery:
+    ok: bool
+    message: str
+
+
+class PortalStore:
+    def __init__(self, db_path: str):
+        self.path = Path(db_path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path.as_posix(), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                create table if not exists users (
+                  id integer primary key autoincrement,
+                  email text not null unique,
+                  name text not null,
+                  avatar_url text,
+                  password_hash text not null,
+                  is_admin integer not null default 0,
+                  plan text not null default 'starter',
+                  status text not null default 'trial',
+                  monthly_price_brl real not null default 97,
+                  trial_started_at text,
+                  trial_ends_at text,
+                  gateway text,
+                  gateway_subscription_id text,
+                  created_at text not null,
+                  updated_at text not null,
+                  last_payment_at text,
+                  next_due_at text,
+                  cancel_reason text
+                );
+                create table if not exists password_resets (
+                  token text primary key,
+                  user_id integer not null,
+                  expires_at text not null,
+                  used integer not null default 0,
+                  created_at text not null,
+                  foreign key(user_id) references users(id) on delete cascade
+                );
+                create table if not exists support_logs (
+                  id integer primary key autoincrement,
+                  user_id integer not null,
+                  role text not null,
+                  message text not null,
+                  created_at text not null,
+                  foreign key(user_id) references users(id) on delete cascade
+                );
+                create table if not exists payment_logs (
+                  id integer primary key autoincrement,
+                  user_id integer not null,
+                  gateway text not null,
+                  amount_brl real not null default 0,
+                  status text not null,
+                  payment_id text,
+                  checkout_url text,
+                  created_at text not null,
+                  paid_at text,
+                  foreign key(user_id) references users(id) on delete cascade
+                );
+                create table if not exists user_preferences (
+                  user_id integer primary key,
+                  scan_enabled integer not null default 1,
+                  idle_scan_seconds integer not null default 60,
+                  active_scan_seconds integer not null default 300,
+                  telegram_enabled integer not null default 0,
+                  telegram_chat_id text,
+                  updated_at text not null,
+                  foreign key(user_id) references users(id) on delete cascade
+                );
+                create table if not exists pricing_config (
+                  plan text primary key,
+                  monthly_price_brl real not null,
+                  updated_at text not null
+                );
+                """
+            )
+            self._ensure_column(conn, "users", "is_admin", "integer not null default 0")
+            self._ensure_column(conn, "users", "avatar_url", "text")
+            self._ensure_column(conn, "users", "trial_started_at", "text")
+            self._ensure_column(conn, "users", "trial_ends_at", "text")
+            self._ensure_column(conn, "users", "gateway", "text")
+            self._ensure_column(conn, "users", "gateway_subscription_id", "text")
+            self._ensure_column(conn, "user_preferences", "scan_enabled", "integer not null default 1")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
+        rows = conn.execute(f"pragma table_info({table})").fetchall()
+        current = {str(row["name"]) for row in rows}
+        if column in current:
+            return
+        conn.execute(f"alter table {table} add column {column} {ddl_type}")
+
+    def create_user(
+        self,
+        name: str,
+        email: str,
+        password: str,
+        plan: str,
+        monthly_price_brl: float,
+        trial_days: int,
+    ) -> dict[str, Any]:
+        clean_email = email.strip().lower()
+        clean_name = " ".join(name.strip().split())[:120]
+        if not clean_name or "@" not in clean_email or len(password) < 8:
+            raise ValueError("Dados invalidos para cadastro.")
+        now = _now_iso()
+        trial_end = (datetime.now(timezone.utc) + timedelta(days=max(1, int(trial_days)))).isoformat()
+        password_hash = _hash_password(password)
+        with self._connect() as conn:
+            try:
+                cursor = conn.execute(
+                    """
+                    insert into users (
+                        email, name, password_hash, plan, status, monthly_price_brl,
+                        trial_started_at, trial_ends_at, created_at, updated_at
+                    )
+                    values (?, ?, ?, ?, 'trial', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        clean_email,
+                        clean_name,
+                        password_hash,
+                        plan,
+                        float(monthly_price_brl),
+                        now,
+                        trial_end,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("Email ja cadastrado.") from exc
+            user_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                insert into user_preferences (
+                    user_id, scan_enabled, idle_scan_seconds, active_scan_seconds, telegram_enabled, telegram_chat_id, updated_at
+                ) values (?, 1, 60, 300, 0, null, ?)
+                """,
+                (user_id, now),
+            )
+        return self.get_user(user_id) or {}
+
+    def authenticate(self, email: str, password: str) -> dict[str, Any] | None:
+        clean_email = email.strip().lower()
+        with self._connect() as conn:
+            row = conn.execute("select * from users where email = ?", (clean_email,)).fetchone()
+        if not row:
+            return None
+        if not _verify_password(password, str(row["password_hash"])):
+            return None
+        return self._row_to_dict(row)
+
+    def get_user(self, user_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("select * from users where id = ?", (int(user_id),)).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def find_user_by_email(self, email: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("select * from users where email = ?", (email.strip().lower(),)).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("select * from users order by created_at desc").fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def ensure_admin(self, email: str, name: str, password: str) -> dict[str, Any]:
+        existing = self.find_user_by_email(email)
+        if existing:
+            with self._connect() as conn:
+                conn.execute(
+                    "update users set is_admin = 1, password_hash = ?, updated_at = ? where id = ?",
+                    (_hash_password(password), _now_iso(), int(existing["id"])),
+                )
+            return self.get_user(int(existing["id"])) or existing
+        created = self.create_user(
+            name=name,
+            email=email,
+            password=password,
+            plan="team",
+            monthly_price_brl=0,
+            trial_days=30,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "update users set is_admin = 1, status = 'active', trial_ends_at = null, updated_at = ? where id = ?",
+                (_now_iso(), int(created["id"])),
+            )
+        return self.get_user(int(created["id"])) or created
+
+    def update_user(
+        self,
+        user_id: int,
+        plan: str | None = None,
+        status: str | None = None,
+        monthly_price_brl: float | None = None,
+        next_due_at: str | None = None,
+        cancel_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        next_plan = plan[:50] if plan else str(user.get("plan") or "starter")
+        next_status = status[:30] if status else str(user.get("status") or "trial")
+        next_price = float(monthly_price_brl) if monthly_price_brl is not None else float(user.get("monthly_price_brl") or 0)
+        next_due = next_due_at if next_due_at is not None else user.get("next_due_at")
+        if cancel_reason is None:
+            next_cancel_reason = user.get("cancel_reason")
+        else:
+            next_cancel_reason = cancel_reason[:300]
+        updated_at = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update users
+                   set plan = ?,
+                       status = ?,
+                       monthly_price_brl = ?,
+                       next_due_at = ?,
+                       cancel_reason = ?,
+                       updated_at = ?
+                 where id = ?
+                """,
+                (
+                    next_plan,
+                    next_status,
+                    next_price,
+                    next_due,
+                    next_cancel_reason,
+                    updated_at,
+                    int(user_id),
+                ),
+            )
+        return self.get_user(user_id)
+
+    def update_profile(
+        self,
+        user_id: int,
+        name: str | None = None,
+        email: str | None = None,
+        avatar_url: str | None = None,
+        new_password: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            current = conn.execute("select * from users where id = ?", (int(user_id),)).fetchone()
+        if not current:
+            return None
+        current_data = dict(current)
+        next_name = str(current_data.get("name") or "")
+        next_email = str(current_data.get("email") or "")
+        next_avatar = current_data.get("avatar_url")
+        next_password_hash = str(current_data.get("password_hash") or "")
+        if name is not None:
+            clean_name = " ".join(name.strip().split())[:120]
+            if not clean_name:
+                raise ValueError("Nome invalido.")
+            next_name = clean_name
+        if email is not None:
+            clean_email = email.strip().lower()
+            if "@" not in clean_email:
+                raise ValueError("Email invalido.")
+            next_email = clean_email
+        if avatar_url is not None:
+            clean_avatar = avatar_url.strip()[:600]
+            next_avatar = clean_avatar or None
+        if new_password is not None:
+            if len(new_password.strip()) < 8:
+                raise ValueError("Senha deve ter no minimo 8 caracteres.")
+            next_password_hash = _hash_password(new_password.strip())
+        updated_at = _now_iso()
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    update users
+                       set name = ?,
+                           email = ?,
+                           avatar_url = ?,
+                           password_hash = ?,
+                           updated_at = ?
+                     where id = ?
+                    """,
+                    (
+                        next_name,
+                        next_email,
+                        next_avatar,
+                        next_password_hash,
+                        updated_at,
+                        int(user_id),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("Email ja cadastrado.") from exc
+        return self.get_user(user_id)
+
+    def cancel_user(self, user_id: int, reason: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update users
+                   set status = 'canceled',
+                       cancel_reason = ?,
+                       updated_at = ?
+                 where id = ?
+                """,
+                (reason[:300], _now_iso(), int(user_id)),
+            )
+        return self.get_user(user_id)
+
+    def mark_charge(self, user_id: int, cycle_days: int = 30) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
+        next_due = now + timedelta(days=max(1, int(cycle_days)))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update users
+                   set last_payment_at = ?, next_due_at = ?, status = 'active', cancel_reason = null, updated_at = ?
+                 where id = ?
+                """,
+                (now.isoformat(), next_due.isoformat(), now.isoformat(), int(user_id)),
+            )
+        return self.get_user(user_id)
+
+    def log_payment(
+        self,
+        user_id: int,
+        gateway: str,
+        amount_brl: float,
+        status: str,
+        payment_id: str | None = None,
+        checkout_url: str | None = None,
+        paid_at: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into payment_logs (
+                    user_id, gateway, amount_brl, status, payment_id, checkout_url, created_at, paid_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(user_id),
+                    (gateway or "manual")[:32],
+                    float(amount_brl or 0),
+                    (status or "created")[:32],
+                    (payment_id or "")[:160] or None,
+                    (checkout_url or "")[:1200] or None,
+                    _now_iso(),
+                    paid_at,
+                ),
+            )
+
+    def list_payments(self, user_id: int, limit: int = 25) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select gateway, amount_brl, status, payment_id, checkout_url, created_at, paid_at
+                  from payment_logs
+                 where user_id = ?
+                 order by id desc
+                 limit ?
+                """,
+                (int(user_id), max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_preferences(self, user_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select user_id, scan_enabled, idle_scan_seconds, active_scan_seconds, telegram_enabled, telegram_chat_id, updated_at
+                  from user_preferences
+                where user_id = ?
+                """,
+                (int(user_id),),
+            ).fetchone()
+            if row:
+                return dict(row)
+            now = _now_iso()
+            conn.execute(
+                """
+                insert into user_preferences (
+                    user_id, scan_enabled, idle_scan_seconds, active_scan_seconds, telegram_enabled, telegram_chat_id, updated_at
+                ) values (?, 1, 60, 300, 0, null, ?)
+                """,
+                (int(user_id), now),
+            )
+        return {
+            "user_id": int(user_id),
+            "scan_enabled": 1,
+            "idle_scan_seconds": 60,
+            "active_scan_seconds": 300,
+            "telegram_enabled": 0,
+            "telegram_chat_id": None,
+            "updated_at": now,
+        }
+
+    def update_preferences(
+        self,
+        user_id: int,
+        scan_enabled: bool | None = None,
+        idle_scan_seconds: int | None = None,
+        active_scan_seconds: int | None = None,
+        telegram_enabled: bool | None = None,
+        telegram_chat_id: str | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_preferences(user_id)
+        updates = {
+            "scan_enabled": 1 if scan_enabled else 0 if scan_enabled is not None else int(current.get("scan_enabled", 1)),
+            "idle_scan_seconds": int(idle_scan_seconds) if idle_scan_seconds is not None else int(current["idle_scan_seconds"]),
+            "active_scan_seconds": int(active_scan_seconds) if active_scan_seconds is not None else int(current["active_scan_seconds"]),
+            "telegram_enabled": 1 if telegram_enabled else 0 if telegram_enabled is not None else int(current["telegram_enabled"]),
+            "telegram_chat_id": (telegram_chat_id or current.get("telegram_chat_id") or None),
+            "updated_at": _now_iso(),
+        }
+        updates["idle_scan_seconds"] = max(30, min(1800, updates["idle_scan_seconds"]))
+        updates["active_scan_seconds"] = max(60, min(1800, updates["active_scan_seconds"]))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update user_preferences
+                   set scan_enabled = ?,
+                       idle_scan_seconds = ?,
+                       active_scan_seconds = ?,
+                       telegram_enabled = ?,
+                       telegram_chat_id = ?,
+                       updated_at = ?
+                 where user_id = ?
+                """,
+                (
+                    updates["scan_enabled"],
+                    updates["idle_scan_seconds"],
+                    updates["active_scan_seconds"],
+                    updates["telegram_enabled"],
+                    updates["telegram_chat_id"],
+                    updates["updated_at"],
+                    int(user_id),
+                ),
+            )
+        return self.get_preferences(user_id)
+
+    def telegram_enabled_chat_ids(self) -> list[int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select telegram_chat_id
+                  from user_preferences
+                 where scan_enabled = 1
+                   and telegram_enabled = 1
+                   and telegram_chat_id is not null
+                   and trim(telegram_chat_id) <> ''
+                """
+            ).fetchall()
+        result: list[int] = []
+        for row in rows:
+            raw = str(row["telegram_chat_id"]).strip()
+            try:
+                result.append(int(raw))
+            except ValueError:
+                continue
+        return result
+
+    def registered_chat_ids(self) -> list[int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select telegram_chat_id
+                  from user_preferences
+                 where telegram_chat_id is not null
+                   and trim(telegram_chat_id) <> ''
+                """
+            ).fetchall()
+        result: list[int] = []
+        for row in rows:
+            raw = str(row["telegram_chat_id"]).strip()
+            try:
+                result.append(int(raw))
+            except ValueError:
+                continue
+        return result
+
+    def notification_scan_preferences(
+        self,
+        default_idle_scan_seconds: int,
+        default_active_scan_seconds: int,
+    ) -> tuple[int, int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select idle_scan_seconds, active_scan_seconds
+                  from user_preferences
+                 where scan_enabled = 1
+                   and telegram_enabled = 1
+                """
+            ).fetchall()
+        if not rows:
+            return int(default_idle_scan_seconds), int(default_active_scan_seconds)
+        idle_values = [max(30, min(1800, int(row["idle_scan_seconds"] or default_idle_scan_seconds))) for row in rows]
+        active_values = [max(60, min(1800, int(row["active_scan_seconds"] or default_active_scan_seconds))) for row in rows]
+        return min(idle_values), min(active_values)
+
+    def seed_pricing(self, defaults: dict[str, float]) -> None:
+        now = _now_iso()
+        with self._connect() as conn:
+            for plan, price in defaults.items():
+                conn.execute(
+                    """
+                    insert into pricing_config (plan, monthly_price_brl, updated_at)
+                    values (?, ?, ?)
+                    on conflict(plan) do nothing
+                    """,
+                    (plan, float(price), now),
+                )
+
+    def pricing_map(self, defaults: dict[str, float]) -> dict[str, float]:
+        self.seed_pricing(defaults)
+        with self._connect() as conn:
+            rows = conn.execute("select plan, monthly_price_brl from pricing_config").fetchall()
+        result = dict(defaults)
+        for row in rows:
+            result[str(row["plan"])] = float(row["monthly_price_brl"])
+        return result
+
+    def update_plan_price(self, plan: str, price: float) -> None:
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into pricing_config (plan, monthly_price_brl, updated_at)
+                values (?, ?, ?)
+                on conflict(plan) do update
+                  set monthly_price_brl = excluded.monthly_price_brl,
+                      updated_at = excluded.updated_at
+                """,
+                (plan[:20], float(price), now),
+            )
+
+    def system_snapshot(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            users_total = int(conn.execute("select count(*) from users").fetchone()[0])
+            users_active = int(conn.execute("select count(*) from users where status = 'active'").fetchone()[0])
+            users_trial = int(conn.execute("select count(*) from users where status = 'trial'").fetchone()[0])
+            users_canceled = int(conn.execute("select count(*) from users where status = 'canceled'").fetchone()[0])
+            payments_total = int(conn.execute("select count(*) from payment_logs").fetchone()[0])
+            payments_paid = int(conn.execute("select count(*) from payment_logs where status = 'paid'").fetchone()[0])
+            support_total = int(conn.execute("select count(*) from support_logs").fetchone()[0])
+            telegram_linked = int(
+                conn.execute(
+                    """
+                    select count(*) from user_preferences
+                     where telegram_chat_id is not null
+                       and trim(telegram_chat_id) <> ''
+                    """
+                ).fetchone()[0]
+            )
+            scan_enabled = int(conn.execute("select count(*) from user_preferences where scan_enabled = 1").fetchone()[0])
+
+        db_size = self.path.stat().st_size if self.path.exists() else 0
+        return {
+            "db_file": self.path.as_posix(),
+            "db_size_bytes": db_size,
+            "users_total": users_total,
+            "users_active": users_active,
+            "users_trial": users_trial,
+            "users_canceled": users_canceled,
+            "payments_total": payments_total,
+            "payments_paid": payments_paid,
+            "support_total": support_total,
+            "telegram_linked": telegram_linked,
+            "scan_enabled_users": scan_enabled,
+        }
+
+    def create_reset_token(self, email: str, ttl_minutes: int) -> str | None:
+        user = self.find_user_by_email(email)
+        if not user:
+            return None
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(minutes=max(5, int(ttl_minutes)))
+        with self._connect() as conn:
+            conn.execute(
+                "insert into password_resets (token, user_id, expires_at, used, created_at) values (?, ?, ?, 0, ?)",
+                (token, int(user["id"]), expires.isoformat(), now.isoformat()),
+            )
+        return token
+
+    def reset_password_with_token(self, token: str, new_password: str) -> bool:
+        if len(new_password) < 8:
+            return False
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from password_resets where token = ? and used = 0",
+                (token,),
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                expires_at = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+            except ValueError:
+                return False
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < now:
+                return False
+            conn.execute(
+                "update users set password_hash = ?, updated_at = ? where id = ?",
+                (_hash_password(new_password), now.isoformat(), int(row["user_id"])),
+            )
+            conn.execute(
+                "update password_resets set used = 1 where token = ?",
+                (token,),
+            )
+        return True
+
+    def log_support(self, user_id: int, role: str, message: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "insert into support_logs (user_id, role, message, created_at) values (?, ?, ?, ?)",
+                (int(user_id), role[:20], message[:2000], _now_iso()),
+            )
+
+    def list_support_logs(self, user_id: int, limit: int = 25) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select role, message, created_at
+                  from support_logs
+                 where user_id = ?
+                 order by id desc
+                 limit ?
+                """,
+                (int(user_id), max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows][::-1]
+
+    @staticmethod
+    def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        data = dict(row)
+        data.pop("password_hash", None)
+        return data
+
+
+def send_password_reset_email(settings, to_email: str, token: str) -> PasswordResetDelivery:
+    if not settings.smtp_host or not settings.smtp_from:
+        return PasswordResetDelivery(False, "SMTP nao configurado.")
+    reset_url = f"{(settings.website_url or '').rstrip('/')}/reset-password?token={token}"
+    message = EmailMessage()
+    message["Subject"] = f"{settings.product_name}: redefinicao de senha"
+    message["From"] = settings.smtp_from
+    message["To"] = to_email
+    message.set_content(
+        "\n".join(
+            [
+                f"Ola, voce solicitou redefinicao de senha no {settings.product_name}.",
+                "",
+                f"Use este link: {reset_url}",
+                "",
+                "Se voce nao solicitou, ignore este email.",
+            ]
+        )
+    )
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as server:
+            if settings.smtp_starttls:
+                server.starttls()
+            if settings.smtp_user:
+                server.login(settings.smtp_user, settings.smtp_password or "")
+            server.send_message(message)
+        return PasswordResetDelivery(True, "Email enviado.")
+    except Exception as exc:
+        return PasswordResetDelivery(False, f"Falha ao enviar email: {exc}")
+
+
+def support_agent_reply(message: str, context: dict[str, Any]) -> str:
+    text = message.lower()
+    if any(token in text for token in ("senha", "login", "entrar")):
+        return (
+            "Para acesso: use seu email e senha em /login. "
+            "Se esqueceu a senha, clique em 'Esqueci a senha' e confirme o link no email."
+        )
+    if any(token in text for token in ("scanner", "nao chega", "nao envia", "sem jogos")):
+        lock = context.get("red_lock")
+        if lock and lock.get("discipline_alert"):
+            return (
+                "A IA marcou alerta de disciplina por sequencia de reds. "
+                f"Janela de controle: {lock.get('unlock_at')}. O scanner segue ativo."
+            )
+        return (
+            "Verifique se o jogo ativo esta selecionado. Sem jogo ativo o ciclo e 1 min; "
+            "com jogo ativo fica 5 min. Use /checkout para diagnostico completo."
+        )
+    if any(token in text for token in ("importar", "bet365", "historico")):
+        return (
+            "No menu Importar, cole o texto bruto da aposta com valor e odd. "
+            "Depois confira no historico se ficou Green/Red e ajuste em 'Editar' se necessario."
+        )
+    if any(token in text for token in ("cancelar", "plano", "cobrar", "fatura")):
+        return (
+            "Assuntos de plano, cobranca e cancelamento sao feitos pelo admin em /admin/users. "
+            "Se precisar, informe seu email e o motivo para suporte agil."
+        )
+    if any(token in text for token in ("dashboard", "dominio", "site")):
+        return (
+            "A dashboard fica no dominio configurado. "
+            "Se nao abrir, valide DNS A para o IP do servidor e execute /checkout."
+        )
+    return (
+        "Posso ajudar com login, senha, scanner, importacao, plano/cobranca e dashboard. "
+        "Me diga em uma frase o problema e o que voce esperava que acontecesse."
+    )

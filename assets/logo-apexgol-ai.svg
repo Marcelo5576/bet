@@ -1,0 +1,37 @@
+<svg width="1280" height="320" viewBox="0 0 1280 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="24" y1="24" x2="296" y2="296" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0D1728"/>
+      <stop offset="1" stop-color="#0A1220"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="72" y1="66" x2="224" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6D66B"/>
+      <stop offset="1" stop-color="#E5A42B"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="84" y1="102" x2="252" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#62E2FF"/>
+      <stop offset="1" stop-color="#2B8CFF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="24" y="24" width="272" height="272" rx="56" fill="url(#bg)" stroke="#2A3A53" stroke-width="2"/>
+
+  <path d="M92 222L152 76L213 222H181L171 197H134L124 222H92Z" fill="url(#gold)"/>
+  <path d="M141 176H164L153 146L141 176Z" fill="#0D1728"/>
+  <path d="M220 209C238 192 248 169 248 145C248 95 208 55 158 55C138 55 119 62 104 73" stroke="url(#blue)" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="234" cy="84" r="16" fill="#0B1525" stroke="#52D0FF" stroke-width="5"/>
+
+  <g>
+    <rect x="90" y="236" width="136" height="8" rx="4" fill="#22324B"/>
+    <rect x="106" y="201" width="12" height="35" rx="4" fill="#F6465D"/>
+    <rect x="127" y="190" width="12" height="46" rx="4" fill="#FCD535"/>
+    <rect x="148" y="172" width="12" height="64" rx="4" fill="#0ECB81"/>
+    <rect x="169" y="154" width="12" height="82" rx="4" fill="#0ECB81"/>
+    <rect x="190" y="142" width="12" height="94" rx="4" fill="#0ECB81"/>
+  </g>
+
+  <text x="340" y="140" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="92" font-weight="900" letter-spacing="0.5" fill="#F6D66B">APEXGOL</text>
+  <text x="850" y="140" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="92" font-weight="900" letter-spacing="0.5" fill="#52D0FF">AI</text>
+  <text x="342" y="192" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="29" font-weight="600" letter-spacing="3.5" fill="#C9D8EC">INTELIGENCIA DE OPERACAO AO VIVO</text>
+  <text x="342" y="236" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24" font-weight="600" fill="#8EA4C4">Futebol | Odds | Risco | Decisao</text>
+</svg>
