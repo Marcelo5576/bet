@@ -90,6 +90,9 @@ class FantasyLineupPayload(BaseModel):
 class FantasyRoomPayload(BaseModel):
     room_url: str
     players_text: str | None = None
+    formation: str | None = None
+    budget: float | None = None
+    stats_text: str | None = None
 
 
 @app.middleware("http")
@@ -1809,6 +1812,9 @@ def dashboard(request: Request) -> str:
     const result = document.getElementById('fantasy-result');
     const rawRoomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
     const rawPlayersText = (document.getElementById('fantasy-players')?.value || '').trim();
+    const statsText = (document.getElementById('fantasy-stats')?.value || '').trim();
+    const formation = document.getElementById('fantasy-formation')?.value || '4-4-2';
+    const budget = Number(document.getElementById('fantasy-budget')?.value || '120');
     const looksLikeRoom = (value) => /roomid=|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(value || '');
     const roomUrl = rawRoomUrl || (looksLikeRoom(rawPlayersText) ? rawPlayersText : '');
     const playersText = roomUrl && rawPlayersText === roomUrl ? '' : rawPlayersText;
@@ -1830,7 +1836,10 @@ def dashboard(request: Request) -> str:
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{
           room_url: roomUrl,
-          players_text: playersText
+          players_text: playersText,
+          formation,
+          budget,
+          stats_text: statsText
         }})
       }});
       const data = await response.json();
@@ -1843,9 +1852,15 @@ def dashboard(request: Request) -> str:
         const budgetInput = document.getElementById('fantasy-budget');
         if (budgetInput) budgetInput.value = String(data.budget);
       }}
-      if (result && data.html) result.innerHTML = data.html;
-      if (note) note.textContent = data.message || 'Sala analisada.';
-      if (data.auto_ready) {{
+      if (result) {{
+        if (data.lineup_html) {{
+          result.innerHTML = data.lineup_html;
+        }} else if (data.html) {{
+          result.innerHTML = data.html;
+        }}
+      }}
+      if (note) note.textContent = data.lineup_message || data.message || 'Sala analisada.';
+      if (data.auto_ready && !data.lineup_html) {{
         await buildFantasyLineup();
       }}
     }} catch (error) {{
@@ -2319,8 +2334,23 @@ async def api_fantasy_room_import(
         )
     report = await _fetch_rei_room_report(room_id)
     imported_text = str(report.get("players_text") or payload.players_text or "")
-    imported_players = _parse_fantasy_players(imported_text)
+    imported_players = _parse_fantasy_players(imported_text, payload.stats_text)
     auto_ready = len(imported_players) >= 11
+    lineup_result: dict[str, Any] | None = None
+    lineup_html = ""
+    lineup_message = ""
+    budget = _safe_float(report.get("budget"), 0.0)
+    if budget <= 0 and payload.budget is not None:
+        budget = max(0.0, _safe_float(payload.budget))
+    if auto_ready:
+        lineup_result = _optimize_fantasy_lineup(
+            imported_players,
+            formation=str(payload.formation or "4-4-2"),
+            budget=budget or 120.0,
+        )
+        if lineup_result.get("ok"):
+            lineup_html = _fantasy_result_panel(lineup_result)
+            lineup_message = str(lineup_result.get("message") or "")
     return JSONResponse(
         {
             "ok": True,
@@ -2331,6 +2361,9 @@ async def api_fantasy_room_import(
             "budget": report.get("budget"),
             "message": report.get("message"),
             "html": _fantasy_room_report_panel(report, imported_players),
+            "lineup_message": lineup_message,
+            "lineup_html": lineup_html,
+            "lineup": lineup_result,
         }
     )
 
