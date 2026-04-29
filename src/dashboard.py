@@ -1758,11 +1758,24 @@ def dashboard(request: Request) -> str:
   async function buildFantasyLineup() {{
     const note = document.getElementById('fantasy-note');
     const result = document.getElementById('fantasy-result');
-    const roomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
-    const playersText = (document.getElementById('fantasy-players')?.value || '').trim();
+    const rawRoomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
+    const rawPlayersText = (document.getElementById('fantasy-players')?.value || '').trim();
     const statsText = (document.getElementById('fantasy-stats')?.value || '').trim();
     const formation = document.getElementById('fantasy-formation')?.value || '4-4-2';
     const budget = Number(document.getElementById('fantasy-budget')?.value || '120');
+    const looksLikeRoom = (value) => /roomid=|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(value || '');
+    const roomUrl = rawRoomUrl || (looksLikeRoom(rawPlayersText) ? rawPlayersText : '');
+    const playersText = roomUrl && rawPlayersText === roomUrl ? '' : rawPlayersText;
+    if (roomUrl && !rawRoomUrl) {{
+      const roomInput = document.getElementById('fantasy-room-url');
+      if (roomInput) roomInput.value = roomUrl;
+      const playersBox = document.getElementById('fantasy-players');
+      if (playersBox && rawPlayersText === roomUrl) playersBox.value = '';
+    }}
+    if (!playersText && roomUrl) {{
+      await importFantasyRoom();
+      return;
+    }}
     if (!playersText) {{
       if (note) note.textContent = 'Cole os jogadores ou use o campo da sala do Pitaco para gerar a escalação.';
       return;
@@ -1794,11 +1807,20 @@ def dashboard(request: Request) -> str:
   async function importFantasyRoom() {{
     const note = document.getElementById('fantasy-note');
     const result = document.getElementById('fantasy-result');
-    const roomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
-    const playersText = (document.getElementById('fantasy-players')?.value || '').trim();
+    const rawRoomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
+    const rawPlayersText = (document.getElementById('fantasy-players')?.value || '').trim();
+    const looksLikeRoom = (value) => /roomid=|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(value || '');
+    const roomUrl = rawRoomUrl || (looksLikeRoom(rawPlayersText) ? rawPlayersText : '');
+    const playersText = roomUrl && rawPlayersText === roomUrl ? '' : rawPlayersText;
     if (!roomUrl) {{
       if (note) note.textContent = 'Cole a URL da sala ou ao menos o roomId.';
       return;
+    }}
+    if (!rawRoomUrl) {{
+      const roomInput = document.getElementById('fantasy-room-url');
+      if (roomInput) roomInput.value = roomUrl;
+      const playersBox = document.getElementById('fantasy-players');
+      if (playersBox && rawPlayersText === roomUrl) playersBox.value = '';
     }}
     if (note) note.textContent = 'Lendo sala do Rei do Pitaco...';
     if (result) result.innerHTML = '<p class=\"muted\">Tentando localizar a sala e o pool de jogadores...</p>';
@@ -2246,11 +2268,22 @@ async def api_simulator_session(
 
 
 @app.post("/api/fantasy-lineup")
-def api_fantasy_lineup(
+async def api_fantasy_lineup(
     payload: FantasyLineupPayload,
     _: None = Depends(_auth),
 ) -> JSONResponse:
-    players = _parse_fantasy_players(payload.players_text, payload.stats_text)
+    room_url = str(payload.room_url or "").strip()
+    players_text = str(payload.players_text or "").strip()
+    budget = float(payload.budget)
+    room_id = _extract_room_id(room_url or players_text)
+    if room_id and not players_text_has_fantasy_rows(players_text):
+        report = await _fetch_rei_room_report(room_id)
+        if report.get("players_text"):
+            players_text = str(report.get("players_text") or "")
+        imported_budget = _safe_float(report.get("budget"), 0.0)
+        if imported_budget > 0:
+            budget = imported_budget
+    players = _parse_fantasy_players(players_text, payload.stats_text)
     if len(players) < 11:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2259,7 +2292,7 @@ def api_fantasy_lineup(
     result = _optimize_fantasy_lineup(
         players,
         formation=payload.formation,
-        budget=float(payload.budget),
+        budget=budget,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(result.get("message") or "Falha"))
@@ -4111,6 +4144,18 @@ def _header_key(value: str) -> str | None:
         if normalized in {_normalize_fantasy_name(item) for item in aliases}:
             return key
     return None
+
+
+def players_text_has_fantasy_rows(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if ";" not in text and "\t" not in text and "|" not in text:
+        return False
+    sample = [line.strip() for line in text.splitlines() if line.strip()][:3]
+    if not sample:
+        return False
+    return any(len([part for part in re.split(r"[;\t|]+", line) if part.strip()]) >= 4 for line in sample)
 
 
 def _parse_fantasy_stats_table(stats_text: str) -> dict[tuple[str, str], dict[str, Any]]:
