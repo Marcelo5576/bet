@@ -185,7 +185,7 @@ def dashboard(request: Request) -> str:
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     history = state.history or []
     visible_history = _green_red(history)
-    scanner = _scanner_status(state)
+    scanner = _scanner_status(state, settings)
     stats = _stats(state, visible_history)
     rows = "\n".join(_row(item) for item in visible_history[:120])
     active_entries = _active_entries(history, state.active_signal)
@@ -1331,14 +1331,14 @@ def dashboard(request: Request) -> str:
     <section class="card section" id="scanner">
       <h2>Scanner Mundial</h2>
       <div class="active-line">
-        <div class="mini"><div class="muted">Modo</div><strong>{scanner["mode"]}</strong></div>
-        <div class="mini"><div class="muted">Perfil scan</div><strong>{scanner["scan_profile"]}</strong></div>
-        <div class="mini"><div class="muted">Ultimo ciclo</div><strong>{scanner["last_scan"]}</strong></div>
-        <div class="mini"><div class="muted">Candidatos</div><strong>{scanner["candidates"]}</strong></div>
-        <div class="mini"><div class="muted">Jogos do dia</div><strong>{scanner["today_games"]}</strong></div>
+        <div class="mini"><div class="muted">Modo</div><strong id="scan-mode-current">{scanner["mode"]}</strong></div>
+        <div class="mini"><div class="muted">Perfil scan</div><strong id="scan-profile-current">{scanner["scan_profile"]}</strong></div>
+        <div class="mini"><div class="muted">Ultimo ciclo</div><strong id="scan-last-current">{scanner["last_scan"]}</strong></div>
+        <div class="mini"><div class="muted">Candidatos</div><strong id="scan-candidates-current">{scanner["candidates"]}</strong></div>
+        <div class="mini"><div class="muted">Jogos do dia</div><strong id="scan-today-current">{scanner["today_games"]}</strong></div>
         <div class="mini"><div class="muted">Cobertura</div><strong>Brasil primeiro + ligas globais ESPN</strong></div>
         <div class="mini"><div class="muted">Seguranca</div><strong>HTTPS, Basic Auth, headers anti-frame</strong></div>
-        <div class="mini"><div class="muted">Status</div><strong>{scanner["status"]}</strong></div>
+        <div class="mini"><div class="muted">Status</div><strong id="scan-status-current">{scanner["status"]}</strong></div>
       </div>
       <div class="scan-toolbar">
         <div class="scan-mode" id="scan-mode">
@@ -1638,16 +1638,64 @@ def dashboard(request: Request) -> str:
     }}
   }}
 
-  async function requestScanNow() {{
+  function applyScannerSnapshot(data) {{
+    const scanner = (data && data.scanner) || {{}};
+    const mappings = [
+      ['scan-mode-current', scanner.mode],
+      ['scan-profile-current', scanner.scan_profile],
+      ['scan-last-current', scanner.last_scan],
+      ['scan-candidates-current', scanner.candidates],
+      ['scan-today-current', scanner.today_games],
+      ['scan-status-current', scanner.status],
+    ];
+    mappings.forEach(([id, value]) => {{
+      const el = document.getElementById(id);
+      if (el && value !== undefined && value !== null) el.textContent = String(value);
+    }});
+  }}
+
+  async function refreshRuntimeState() {{
+    const response = await fetch('/api/state', {{cache: 'no-store'}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Falha ao atualizar estado');
+    applyScannerSnapshot(data);
+    return data;
+  }}
+
+  async function requestScanNow(options = {{}}) {{
     const note = document.getElementById('scan-control-note');
-    if (note) note.textContent = 'Executando scanner agora...';
+    const silent = Boolean(options.silent);
+    if (window.__scanInFlight) return;
+    window.__scanInFlight = true;
+    if (note) note.textContent = silent ? 'Executando scanner automatico...' : 'Executando scanner agora...';
     try {{
       const response = await fetch('/api/scanner-run', {{method: 'POST'}});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Falha ao solicitar scan');
       if (note) note.textContent = `${{data.message}} (${{data.candidates}} candidatos)`;
       await loadScanConfig();
+      await refreshRuntimeState();
       window.setTimeout(refreshSimulator, 800);
+    }} catch (error) {{
+      if (note) note.textContent = error.message;
+    }} finally {{
+      window.__scanInFlight = false;
+    }}
+  }}
+
+  async function autoScanTick() {{
+    const note = document.getElementById('scan-control-note');
+    try {{
+      const data = await refreshRuntimeState();
+      const scanner = data.scanner || {{}};
+      const lastScanIso = scanner.last_scan_iso ? Date.parse(scanner.last_scan_iso) : 0;
+      const intervalSeconds = Number(scanner.auto_scan_interval_seconds || 1800);
+      const overdue = !lastScanIso || ((Date.now() - lastScanIso) >= intervalSeconds * 1000);
+      if (!overdue || window.__scanInFlight) return;
+      if (note) note.textContent = `Scanner em atraso, novo ciclo automatico (${{
+        Math.round(intervalSeconds / 60)
+      }} min)...`;
+      await requestScanNow({{silent: true}});
     }} catch (error) {{
       if (note) note.textContent = error.message;
     }}
@@ -1843,6 +1891,7 @@ def dashboard(request: Request) -> str:
   }}
 
   window.setInterval(refreshSimulator, 60 * 1000);
+  window.setInterval(autoScanTick, 60 * 1000);
   window.setInterval(() => {{
     const active = document.activeElement;
     const typing = active && ['TEXTAREA', 'INPUT'].includes(active.tagName);
@@ -1873,8 +1922,11 @@ def dashboard(request: Request) -> str:
     }}
   }}
   window.selectedGameId = null;
+  window.__scanInFlight = false;
   initTheme();
   loadScanConfig();
+  refreshRuntimeState().catch(() => null);
+  autoScanTick().catch(() => null);
 
   function switchStatsTab(button, paneId) {{
     const panel = button.closest('.stats-panel');
@@ -1902,7 +1954,7 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
             "history": visible_history,
             "stats": _stats(state, visible_history),
             "learning": _learning_context(state, visible_history),
-            "scanner": _scanner_status(state),
+            "scanner": _scanner_status(state, settings),
             "paper_opportunities": paper_opportunities(_simulation_signals(state)),
             "best_paper_entry": best_paper_entry(_simulation_signals(state)),
             "simulation_sessions": state.simulation_sessions or [],
@@ -2910,18 +2962,29 @@ def _action_badge(action: Any) -> str:
     return f"<span class='action-pill {cls}'>{_esc(text)}</span>"
 
 
-def _scanner_status(state) -> dict[str, Any]:
+def _scanner_status(state, settings=None) -> dict[str, Any]:
     candidates = len(state.candidate_signals or [])
     has_active = bool(state.active_signal)
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
+    idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
+    active_seconds = int(getattr(settings, "active_scan_interval_seconds", 300) or 300)
+    current_seconds = active_seconds if has_active else idle_seconds
     return {
-        "mode": "5 min com jogo ativo" if has_active else "1 min aguardando escolha",
+        "mode": (
+            f"{max(1, round(active_seconds / 60))} min com jogo ativo"
+            if has_active
+            else f"{max(1, round(idle_seconds / 60))} min aguardando escolha"
+        ),
         "last_scan": _short_datetime(state.last_scan_at),
+        "last_scan_iso": state.last_scan_at,
         "candidates": candidates,
         "today_games": len(state.last_games or []),
         "status": "monitorando entrada" if has_active else "scanner livre",
         "scan_preference": scan_mode,
         "scan_profile": _scan_mode_label(scan_mode),
+        "idle_scan_interval_seconds": idle_seconds,
+        "active_scan_interval_seconds": active_seconds,
+        "auto_scan_interval_seconds": current_seconds,
     }
 
 
