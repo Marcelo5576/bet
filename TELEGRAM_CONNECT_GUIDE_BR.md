@@ -26,7 +26,9 @@ O bot vai responder com um numero (chat_id).
 
 ## 3) Como funciona
 
-- Sem jogo ativo: ciclo padrao de 1 em 1 minuto.
+- O scanner agora envia apenas **jogos ao vivo reais**.
+- Se a fonte nao tiver jogo ao vivo naquele instante, o bot nao inventa pre-live, grade do dia ou resultado fake.
+- Sem jogo ativo: ciclo padrao definido no painel.
 - Com jogo escolhido: ciclo de 5 em 5 minutos.
 - Cada usuario pode ajustar seus proprios tempos dentro dos limites permitidos.
 
@@ -37,4 +39,6 @@ Se nao chegar mensagem:
 1. no Telegram, envie `/suporte`;
 2. no painel, confira se o `chat_id` foi salvo sem espacos;
 3. valide se a opcao de notificacao esta ativada;
-4. veja se o bot esta online no servidor.
+4. veja se o bot esta online no servidor;
+5. confirme se `TELEGRAM_BOT_TOKEN` existe no `.env` da VPS;
+6. confirme se o processo `python -m src.main` ou o container `betsignal` esta rodando.

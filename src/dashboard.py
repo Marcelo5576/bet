@@ -184,6 +184,7 @@ def dashboard(request: Request) -> str:
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     history = state.history or []
+    live_games = _live_games_only(state.last_games or [])
     visible_history = _green_red(history)
     scanner = _scanner_status(state, settings)
     stats = _stats(state, visible_history)
@@ -192,19 +193,30 @@ def dashboard(request: Request) -> str:
     active_entry_rows = "\n".join(_active_entry_row(item) for item in active_entries)
     simulation_signals = _simulation_signals(state)
     opportunities = paper_opportunities(simulation_signals)
-    simulated_session = _simulate_live_session(
-        opportunities,
-        total_games=30,
-        bankroll_units=100.0,
-        stake_percent=10.0,
-    )
     simulation_history_panel = _simulation_history_panel(state.simulation_sessions or [])
     simulation_rows = "\n".join(_simulation_row(item) for item in opportunities)
     thermometer_rows = _thermometer_rows(opportunities)
     default_signal = simulation_signals[0] if simulation_signals else None
     match_stats = _match_stats_panel(default_signal, visible_history)
     best_simulation = _best_simulation(best_paper_entry(simulation_signals))
-    sim_session_panel = _simulation_session_panel(simulated_session)
+    latest_real_session = next(
+        (
+            session
+            for session in (state.simulation_sessions or [])
+            if _safe_int(session.get("source_games")) > 0
+        ),
+        None,
+    )
+    sim_session_panel = _simulation_session_panel(
+        latest_real_session
+        or {
+            "note": (
+                "Laboratorio pronto. Quando voce clicar em Rodar 30 jogos ou "
+                "Rodar 45 jogos, a IA vai usar somente jogos ao vivo reais "
+                "disponiveis nesse momento."
+            )
+        }
+    )
     simulator_updated_at = _short_datetime(state.last_scan_at)
     active = _active(state.active_signal)
     advice = _advice(visible_history)
@@ -218,10 +230,10 @@ def dashboard(request: Request) -> str:
     source_panel = _source_catalog_panel()
     commercial_panel = _commercial_panel(settings)
     fantasy_help = _fantasy_help_panel()
-    championship_rows = _championship_rows(state.last_games or [])
-    leadership_rows = _leadership_rows(state.last_games or [])
-    market_tape = _market_tape(state.last_games or [])
-    league_radar = _league_radar_panel(state.last_games or [])
+    championship_rows = _championship_rows(live_games)
+    leadership_rows = _leadership_rows(live_games)
+    market_tape = _market_tape(live_games)
+    league_radar = _league_radar_panel(live_games)
     domains = _domains(settings.dashboard_domains)
     support = _esc(settings.support_note)
     product_name = _esc(settings.product_name)
@@ -1279,14 +1291,14 @@ def dashboard(request: Request) -> str:
       <div>REDS <span class="neg">{stats["losses"]}</span></div>
       <div>HIT RATE <span>{stats["hit_rate"]}%</span></div>
       <div>ROI <span class="{_value_class(stats["roi_units"])}">{stats["roi_units"]}%</span></div>
-      <div>LUCRO <span class="{_value_class(stats["profit_units"])}">{stats["profit_units"]}u</span></div>
+      <div>LUCRO <span class="{_value_class(stats["profit_units"])}">{_format_brl(stats["profit_units"])}</span></div>
       <div>IA <span>{stats["readiness"]}</span></div>
     </div>
   </header>
   <nav class="mobile-nav">
     <a class="nav-link" href="#scanner">Scanner</a>
     <a class="nav-link" href="#mercado">Mercado</a>
-    <a class="nav-link" href="#simulador">Simulador</a>
+    <a class="nav-link" href="#simulador">Ao vivo</a>
     <a class="nav-link" href="#fantasy">Fantasy</a>
     <a class="nav-link" href="#entradas">Entradas</a>
     <a class="nav-link" href="#importar">Resultados</a>
@@ -1299,7 +1311,7 @@ def dashboard(request: Request) -> str:
     <p class="nav-title">Operacao</p>
     <a class="nav-link" href="#scanner">Scanner</a>
     <a class="nav-link" href="#mercado">Mercado</a>
-    <a class="nav-link" href="#simulador">Simulador</a>
+    <a class="nav-link" href="#simulador">Ao vivo</a>
     <a class="nav-link" href="#fantasy">Fantasy campeao</a>
     <a class="nav-link" href="#ativo">Jogo ativo</a>
     <a class="nav-link" href="#entradas">Entradas</a>
@@ -1315,16 +1327,16 @@ def dashboard(request: Request) -> str:
       <div class="card"><div class="metric green">{stats["wins"]}</div><div class="muted">Greens</div></div>
       <div class="card"><div class="metric red">{stats["losses"]}</div><div class="muted">Reds</div></div>
       <div class="card"><div class="metric">{stats["hit_rate"]}%</div><div class="muted">Taxa de acerto</div></div>
-      <div class="card"><div class="metric {_value_class(manual_stats["profit_currency"])}">R$ {manual_stats["profit_currency"]}</div><div class="muted">Resultado manual</div></div>
+      <div class="card"><div class="metric {_value_class(manual_stats["profit_currency"])}">{_format_brl(manual_stats["profit_currency"])}</div><div class="muted">Resultado manual</div></div>
       <div class="card"><div class="metric">{manual_stats["total"]}</div><div class="muted">Apostas importadas</div></div>
-      <div class="card"><div class="metric {_value_class(stats["profit_units"])}">{stats["profit_units"]}u</div><div class="muted">Lucro em unidades</div></div>
-      <div class="card"><div class="metric {_value_class(stats["roi_units"])}">{stats["roi_units"]}%</div><div class="muted">ROI por unidade</div></div>
+      <div class="card"><div class="metric {_value_class(stats["profit_units"])}">{_format_brl(stats["profit_units"])}</div><div class="muted">Lucro acumulado</div></div>
+      <div class="card"><div class="metric {_value_class(stats["roi_units"])}">{stats["roi_units"]}%</div><div class="muted">ROI acumulado</div></div>
       <div class="card"><div class="metric amber">{stats["brier_score"]}</div><div class="muted">Brier score</div></div>
       <div class="card"><div class="metric">{stats["readiness"]}</div><div class="muted">Maturidade IA</div></div>
       <div class="card"><div class="metric">{_esc(fast_learning.get("mode", "neutro"))}</div><div class="muted">Modo rapido</div></div>
       <div class="card"><div class="metric">{_esc(fast_learning.get("momentum_score", 50))}/100</div><div class="muted">Momentum IA</div></div>
-      <div class="card"><div class="metric {_value_class(backtest.get("profit_units"))}">{backtest.get("profit_units", 0)}u</div><div class="muted">Backtest lucro</div></div>
-      <div class="card"><div class="metric red">{backtest.get("max_drawdown_units", 0)}u</div><div class="muted">Drawdown max</div></div>
+      <div class="card"><div class="metric {_value_class(backtest.get("profit_units"))}">{_format_brl(backtest.get("profit_units", 0))}</div><div class="muted">Backtest lucro</div></div>
+      <div class="card"><div class="metric red">{_format_brl(backtest.get("max_drawdown_units", 0))}</div><div class="muted">Drawdown max</div></div>
       <div class="card"><div class="metric">{_best_name(learning.get("by_market"))}</div><div class="muted">Melhor mercado</div></div>
       <div class="card"><div class="metric">{_best_name(learning.get("by_team"))}</div><div class="muted">Melhor time</div></div>
     </section>
@@ -1335,7 +1347,7 @@ def dashboard(request: Request) -> str:
         <div class="mini"><div class="muted">Perfil scan</div><strong id="scan-profile-current">{scanner["scan_profile"]}</strong></div>
         <div class="mini"><div class="muted">Ultimo ciclo</div><strong id="scan-last-current">{scanner["last_scan"]}</strong></div>
         <div class="mini"><div class="muted">Candidatos</div><strong id="scan-candidates-current">{scanner["candidates"]}</strong></div>
-        <div class="mini"><div class="muted">Jogos do dia</div><strong id="scan-today-current">{scanner["today_games"]}</strong></div>
+        <div class="mini"><div class="muted">Jogos ao vivo</div><strong id="scan-today-current">{scanner["today_games"]}</strong></div>
         <div class="mini"><div class="muted">Cobertura</div><strong>Brasil primeiro + ligas globais ESPN</strong></div>
         <div class="mini"><div class="muted">Seguranca</div><strong>HTTPS, Basic Auth, headers anti-frame</strong></div>
         <div class="mini"><div class="muted">Status</div><strong id="scan-status-current">{scanner["status"]}</strong></div>
@@ -1380,13 +1392,13 @@ def dashboard(request: Request) -> str:
     </section>
     <section class="card section" id="simulador">
       <div class="section-head">
-        <h2>Simulador Em Tempo Real</h2>
-        <span id="simulator-status" class="muted">Atualizado: {simulator_updated_at} | auto 60 min</span>
+        <h2>Mercados Ao Vivo</h2>
+        <span id="simulator-status" class="muted">Atualizado: {simulator_updated_at} | leitura de jogos ao vivo reais</span>
       </div>
       <div id="simulator-best">{best_simulation}</div>
       <section class="card section" id="sim-lab">
         <div class="sim-lab-head">
-          <h2>Laboratorio IA Ao Vivo</h2>
+          <h2>Laboratorio Paper Com Jogos Ao Vivo</h2>
           <div class="sim-lab-actions">
             <button class="ghost" type="button" onclick="runSimulationSession(30)">Rodar 30 jogos</button>
             <button class="ghost" type="button" onclick="runSimulationSession(45)">Rodar 45 jogos</button>
@@ -1509,7 +1521,7 @@ def dashboard(request: Request) -> str:
     <div class="fab-links">
       <a class="fab-link" href="#scanner">Scanner</a>
       <a class="fab-link" href="#mercado">Mercado</a>
-      <a class="fab-link" href="#simulador">Simulador</a>
+    <a class="fab-link" href="#simulador">Ao vivo</a>
       <a class="fab-link" href="#fantasy">Fantasy</a>
       <a class="fab-link" href="#ativo">Jogo ativo</a>
       <a class="fab-link" href="#entradas">Entradas</a>
@@ -1704,7 +1716,7 @@ def dashboard(request: Request) -> str:
   async function runSimulationSession(totalGames = 30) {{
     const panel = document.getElementById('sim-session-panel');
     if (!panel) return;
-    panel.innerHTML = '<p class="muted">Rodando simulacao ao vivo com banca fake...</p>';
+  panel.innerHTML = '<p class="muted">Rodando laboratorio paper com jogos ao vivo reais...</p>';
     try {{
       const response = await fetch('/api/simulator-session', {{
         method: 'POST',
@@ -1861,7 +1873,7 @@ def dashboard(request: Request) -> str:
     const rows = document.getElementById('simulator-rows');
     if (!status || !best || !rows) return;
     try {{
-      status.textContent = 'Atualizando simulador...';
+      status.textContent = 'Atualizando mercados ao vivo...';
       const response = await fetch('/api/simulator', {{cache: 'no-store'}});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Falha ao atualizar simulador');
@@ -1884,7 +1896,7 @@ def dashboard(request: Request) -> str:
         stats.innerHTML = data.match_stats_html;
         window.selectedGameId = data.default_game_id || null;
       }}
-      status.textContent = `Atualizado: ${{data.updated_at}} | auto 60 min`;
+      status.textContent = `Atualizado: ${{data.updated_at}} | feed ao vivo real`;
     }} catch (error) {{
       status.textContent = `Falha ao atualizar: ${{error.message}}`;
     }}
@@ -2064,6 +2076,7 @@ async def api_scanner_run(_: None = Depends(_auth)) -> JSONResponse:
 @app.get("/api/simulator")
 def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    live_games = _live_games_only(state.last_games or [])
     simulation_signals = _simulation_signals(state)
     opportunities = paper_opportunities(simulation_signals)
     default_signal = simulation_signals[0] if simulation_signals else None
@@ -2075,9 +2088,9 @@ def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
             "best_html": _best_simulation(best_paper_entry(simulation_signals)),
             "rows_html": simulation_rows,
             "thermometer_html": _thermometer_rows(opportunities),
-            "championship_rows_html": _championship_rows(state.last_games or []),
-            "leadership_rows_html": _leadership_rows(state.last_games or []),
-            "market_tape_html": _market_tape(state.last_games or []),
+            "championship_rows_html": _championship_rows(live_games),
+            "leadership_rows_html": _leadership_rows(live_games),
+            "market_tape_html": _market_tape(live_games),
             "match_stats_html": _match_stats_panel(default_signal, _green_red(state.history or [])),
             "default_game_id": (default_signal.get("game") or {}).get("game_id") if default_signal else None,
             "updated_at": _short_datetime(state.last_scan_at),
@@ -2384,6 +2397,8 @@ def _simulation_signals(state) -> list[dict[str, Any]]:
         game_id = (signal.get("game") or {}).get("game_id")
         if not game_id or game_id in seen:
             continue
+        if not _is_live_game(signal.get("game") or {}):
+            continue
         seen.add(game_id)
         deduped.append(signal)
     return deduped
@@ -2391,10 +2406,10 @@ def _simulation_signals(state) -> list[dict[str, Any]]:
 
 def _best_simulation(item: dict[str, Any] | None) -> str:
     if not item:
-        return "<p class='muted'>Nenhuma oportunidade simulada no momento.</p>"
+        return "<p class='muted'>Nenhuma oportunidade ao vivo real no momento. Use Somente ao vivo ou aguarde o proximo ciclo.</p>"
     return (
         "<div class='active-line'>"
-        f"<div class='mini'><div class='muted'>Melhor jogo</div><strong>{_esc(item.get('match'))}</strong></div>"
+        f"<div class='mini'><div class='muted'>Melhor jogo ao vivo</div><strong>{_esc(item.get('match'))}</strong></div>"
         f"<div class='mini'><div class='muted'>Mercado</div><strong>{_esc(item.get('market'))}</strong></div>"
         f"<div class='mini'><div class='muted'>Entrada</div><strong>{_esc(item.get('selection'))} {_esc(item.get('line'))}</strong></div>"
         f"<div class='mini'><div class='muted'>Odd</div><strong>{_esc(item.get('odds') or 'sem odd')}</strong></div>"
@@ -2966,6 +2981,7 @@ def _scanner_status(state, settings=None) -> dict[str, Any]:
     candidates = len(state.candidate_signals or [])
     has_active = bool(state.active_signal)
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
+    live_games = _live_games_only(state.last_games or [])
     idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
     active_seconds = int(getattr(settings, "active_scan_interval_seconds", 300) or 300)
     current_seconds = active_seconds if has_active else idle_seconds
@@ -2978,7 +2994,7 @@ def _scanner_status(state, settings=None) -> dict[str, Any]:
         "last_scan": _short_datetime(state.last_scan_at),
         "last_scan_iso": state.last_scan_at,
         "candidates": candidates,
-        "today_games": len(state.last_games or []),
+        "today_games": len(live_games),
         "status": "monitorando entrada" if has_active else "scanner livre",
         "scan_preference": scan_mode,
         "scan_profile": _scan_mode_label(scan_mode),
@@ -3041,6 +3057,20 @@ def _short_datetime(value: Any) -> str:
     return str(value).replace("T", " ")[:16]
 
 
+def _is_live_game(game: dict[str, Any] | None) -> bool:
+    if not isinstance(game, dict):
+        return False
+    minute = _safe_int(game.get("minute"))
+    if minute > 0:
+        return True
+    status_text = str(game.get("status") or game.get("state") or "").strip().lower()
+    return status_text in {"live", "inplay", "1h", "2h", "ht", "intervalo"}
+
+
+def _live_games_only(games: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [game for game in games if _is_live_game(game)]
+
+
 def _equity_curve(backtest: dict[str, Any]) -> str:
     points = backtest.get("last_equity_units") or []
     if not points:
@@ -3051,7 +3081,7 @@ def _equity_curve(backtest: dict[str, Any]) -> str:
         value = float(point)
         height = max(8, int((abs(value) / max_abs) * 62))
         klass = "bar neg" if value < 0 else "bar"
-        bars.append(f"<span class='{klass}' style='height:{height}px' title='{_esc(value)}u'></span>")
+        bars.append(f"<span class='{klass}' style='height:{height}px' title='{_esc(_format_brl(value))}'></span>")
     return "<div class='sparkline'>" + "".join(bars) + "</div>"
 
 
@@ -3074,7 +3104,7 @@ def _row(item: dict[str, Any]) -> str:
         f"<td data-label='Valor real'>{real_value}</td>"
         f"<td data-label='Conf.'>{_esc(item.get('confidence', '-'))}%</td>"
         f"<td data-label='Edge' class='{_value_class(item.get('value_edge'), multiplier=100)}'>{_edge(item.get('value_edge'))}</td>"
-        f"<td data-label='Stake'>{_esc(item.get('stake_units', 0))}u</td>"
+        f"<td data-label='Stake'>{_esc(_format_brl(item.get('entry_value') if item.get('entry_value') is not None else item.get('stake_value', 0)))}</td>"
         f"<td data-label='Resultado' class='{_esc(outcome)}'>{_label(outcome)}</td>"
         "<td data-label='Acao'>"
         "<div class='action-buttons'>"
@@ -3156,7 +3186,7 @@ def _active(signal: dict[str, Any] | None) -> str:
         f"<div class='mini'><div class='muted'>Confianca</div><strong>{_esc(signal.get('confidence'))}%</strong></div>"
         f"<div class='mini'><div class='muted'>Edge</div><strong class='{edge_class}'>{edge}</strong></div>"
         f"<div class='mini'><div class='muted'>Entrada</div>{entry}</div>"
-        f"<div class='mini'><div class='muted'>Stake</div><strong>{_esc(signal.get('stake_value', 0))} / {_esc(signal.get('stake_units', 0))}u</strong></div>"
+        f"<div class='mini'><div class='muted'>Stake</div><strong>{_esc(_format_brl(signal.get('stake_value', 0)))}</strong></div>"
         f"<div class='mini'><div class='muted'>Dados</div><strong>{_esc(signal.get('data_quality', '-'))}%</strong></div>"
         "</div>"
         f"<p class='subtle'>{_esc(signal.get('reason'))}</p>"
@@ -3180,7 +3210,7 @@ def _rankings(learning: dict[str, Any]) -> str:
                 "<tr>"
                 f"<td>{_esc(row.get('name'))}</td>"
                 f"<td>{_esc(row.get('hit_rate'))}%</td>"
-                f"<td class='{_value_class(row.get('profit_units'))}'>{_esc(row.get('profit_units'))}u</td>"
+                f"<td class='{_value_class(row.get('profit_units'))}'>{_esc(_format_brl(row.get('profit_units')))}</td>"
                 f"<td>{_esc(row.get('total'))}</td>"
                 "</tr>"
             )
@@ -3218,7 +3248,7 @@ def _fast_learning_panel(fast: dict[str, Any]) -> str:
                 "<tr>"
                 f"<td>{_esc(row.get('name'))}</td>"
                 f"<td>{_esc(row.get('wins'))}G / {_esc(row.get('losses'))}R</td>"
-                f"<td class='{_value_class(row.get('profit_units'))}'>{_esc(row.get('profit_units'))}u</td>"
+                f"<td class='{_value_class(row.get('profit_units'))}'>{_esc(_format_brl(row.get('profit_units')))}</td>"
                 f"<td>{_esc(row.get('confidence'))}</td>"
                 "</tr>"
             )

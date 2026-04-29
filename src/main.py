@@ -1012,9 +1012,9 @@ async def run_scan(
                 + candidate_list_text(watchlist)
             )
         return (
-            "Nenhum jogo passou nos filtros agora.\n\n"
+            "Nenhum jogo ao vivo real passou nos filtros agora.\n\n"
             f"Busca usada: {scan_scope}.\n"
-            "O scanner tentou Brasil primeiro e depois abriu para o mundo."
+            "Nenhum pre-live, grade do dia ou resultado fake foi usado neste ciclo."
         )
 
     signals = [
@@ -1069,30 +1069,9 @@ async def scan_games(
         if live_games:
             return live_games, "Mundo ao vivo"
 
-    get_today = getattr(provider, "get_today_games", None)
-    if callable(get_today):
-        today_games = await get_today()
-        if block_esports:
-            today_games = [
-                game
-                for game in today_games
-                if not is_forbidden_esports_game(_to_dict(game))
-            ]
-        brazil_today = [game for game in today_games if _is_brazil_priority(game) and _has_odds_or_markets(game)]
-        world_today = [game for game in today_games if _has_odds_or_markets(game)]
-        if mode == "world_first":
-            if world_today:
-                return world_today, "Mundo pre-live/com odds"
-            if brazil_today:
-                return brazil_today, "Brasil pre-live/com odds"
-        else:
-            if brazil_today:
-                return brazil_today, "Brasil pre-live/com odds"
-            if world_today:
-                return world_today, "Mundo pre-live/com odds"
-        if today_games:
-            return today_games, "Mundo grade do dia"
-    return [], "sem jogos na fonte"
+    if mode == "world_first":
+        return [], "mundo ao vivo sem jogos"
+    return [], "brasil -> mundo sem jogos ao vivo"
 
 
 def _is_brazil_priority(game) -> bool:
@@ -1219,17 +1198,7 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
 
 async def update_last_games(context: ContextTypes.DEFAULT_TYPE, live_games: list) -> None:
     store: StateStore = context.application.bot_data["store"]
-    provider: LiveProvider = context.application.bot_data["provider"]
-    games = live_games
-    get_today = getattr(provider, "get_today_games", None)
-    if callable(get_today):
-        try:
-            today_games = await get_today()
-            if today_games:
-                games = today_games
-        except Exception as exc:
-            logger.info("Nao consegui atualizar grade do dia: %s", exc)
-    store.set_last_games([_to_dict(game) for game in games])
+    store.set_last_games([_to_dict(game) for game in live_games])
 
 
 def _to_dict(item) -> dict:
@@ -1440,21 +1409,17 @@ def _scan_age_minutes(value: str | None) -> int | None:
 
 def _notification_chat_ids(settings: Settings | None, state) -> set[int]:
     chats = {int(chat_id) for chat_id in (state.chat_ids or [])}
-    if not chats or not settings:
+    if not settings:
         return chats
     try:
         portal = PortalStore(settings.portal_db_file)
         enabled = set(portal.telegram_enabled_chat_ids())
-        registered = set(portal.registered_chat_ids())
     except Exception as exc:
         logger.info("Nao consegui carregar preferencias de notificacao: %s", exc)
         return chats
-    if registered:
-        return chats & enabled
-    if not enabled:
-        return chats
-    selected = chats & enabled
-    return selected if selected else chats
+    if enabled:
+        chats |= enabled
+    return chats
 
 
 def _simulation_learning_summary(sessions: list[dict]) -> dict:
