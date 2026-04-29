@@ -3959,7 +3959,8 @@ def _normalize_pitaco_players(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         if not pos:
             continue
         status = str(item.get("status") or "").strip()
-        if status and status.lower() in {"lesionado", "suspenso", "cortado"}:
+        status_norm = _normalize_fantasy_name(status)
+        if status_norm in {"lesionado", "suspenso", "cortado", "nulo", "fora"}:
             continue
         normalized.append(
             {
@@ -4168,7 +4169,7 @@ def _project_fantasy_player(player: dict[str, Any]) -> tuple[float, str]:
     red = _safe_stat(player, "red")
     team_form = _safe_stat(player, "team_form")
     base = {"GOL": 4.3, "ZAG": 4.0, "LAT": 4.2, "MEI": 4.8, "ATA": 5.1, "TEC": 3.8}.get(pos, 4.0)
-    salary_curve = price * {"GOL": 0.26, "ZAG": 0.28, "LAT": 0.31, "MEI": 0.35, "ATA": 0.38, "TEC": 0.22}.get(pos, 0.28)
+    salary_curve = price * {"GOL": 0.038, "ZAG": 0.042, "LAT": 0.046, "MEI": 0.05, "ATA": 0.052, "TEC": 0.03}.get(pos, 0.04)
     attack = (goals * 2.9) + (assists * 2.2) + (xg * 2.4) + (xa * 1.7) + (shots_on * 0.75) + (shots * 0.18) + (key_passes * 0.3)
     defense = (clean_sheets * 1.9) + (saves * 0.42) + (tackles * 0.16) + (interceptions * 0.14)
     discipline = (yellow * -0.18) + (red * -0.85)
