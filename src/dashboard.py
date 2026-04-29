@@ -13,6 +13,7 @@ import random
 import re
 import secrets
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -79,9 +80,16 @@ class SimulationRunPayload(BaseModel):
 
 
 class FantasyLineupPayload(BaseModel):
-    players_text: str
+    players_text: str = ""
     budget: float = 120.0
     formation: str = "4-4-2"
+    room_url: str | None = None
+    stats_text: str | None = None
+
+
+class FantasyRoomPayload(BaseModel):
+    room_url: str
+    players_text: str | None = None
 
 
 @app.middleware("http")
@@ -1462,7 +1470,9 @@ def dashboard(request: Request) -> str:
         </section>
         <section class="card section" id="fantasy">
           <h2>Fantasy Campeao</h2>
-          <p class="muted">Cole jogadores no formato <code>Nome;Posicao;Time;Preco;Projecao</code>. Ex.: <code>Yuri Alberto;ATA;Corinthians;16.5;8.2</code>.</p>
+          <p class="muted">Cole a URL da sala do Rei do Pitaco, tente ler o pool automaticamente e, se a pagina estiver protegida, cole o texto exportado da sala ou estatisticas dos jogadores. O motor aceita <code>Nome;Posicao;Time;Preco;Projecao</code> e tambem linhas com colunas extras como <code>xG</code>, <code>xA</code>, gols, assists, finalizacoes e minutos.</p>
+          <label>URL da sala / roomId</label>
+          <input id="fantasy-room-url" type="text" placeholder="https://fantasy.reidopitaco.com.br/fantasy/dfs/lineup?roomId=..." />
           <label>Formacao</label>
           <select id="fantasy-formation">
             <option value="4-4-2">4-4-2</option>
@@ -1475,8 +1485,14 @@ def dashboard(request: Request) -> str:
           </select>
           <label>Orcamento</label>
           <input id="fantasy-budget" type="number" step="0.1" min="20" value="120" />
+          <label>Texto bruto da sala / pool de jogadores</label>
           <textarea id="fantasy-players" placeholder="Nome;Posicao;Time;Preco;Projecao&#10;Cacá;ZAG;Corinthians;9.8;5.1&#10;Hugo;LAT;Corinthians;11.3;5.9"></textarea>
-          <button type="button" class="ghost" onclick="buildFantasyLineup()">Montar escalação campea</button>
+          <label>Estatisticas extras (opcional)</label>
+          <textarea id="fantasy-stats" placeholder="Nome;Time;xG;xA;Gols;Assistencias;Finalizacoes;Minutos&#10;Yuri Alberto;Corinthians;0.48;0.11;8;2;31;1620"></textarea>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button type="button" class="ghost" onclick="importFantasyRoom()">Ler sala do Pitaco</button>
+            <button type="button" class="ghost" onclick="buildFantasyLineup()">Montar escalação campea</button>
+          </div>
           <div id="fantasy-note" class="notice muted"></div>
           <div id="fantasy-result">{fantasy_help}</div>
         </section>
@@ -1742,11 +1758,13 @@ def dashboard(request: Request) -> str:
   async function buildFantasyLineup() {{
     const note = document.getElementById('fantasy-note');
     const result = document.getElementById('fantasy-result');
+    const roomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
     const playersText = (document.getElementById('fantasy-players')?.value || '').trim();
+    const statsText = (document.getElementById('fantasy-stats')?.value || '').trim();
     const formation = document.getElementById('fantasy-formation')?.value || '4-4-2';
     const budget = Number(document.getElementById('fantasy-budget')?.value || '120');
     if (!playersText) {{
-      if (note) note.textContent = 'Cole os jogadores para gerar a escalação.';
+      if (note) note.textContent = 'Cole os jogadores ou use o campo da sala do Pitaco para gerar a escalação.';
       return;
     }}
     if (note) note.textContent = 'Calculando melhor escalação...';
@@ -1757,6 +1775,8 @@ def dashboard(request: Request) -> str:
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{
           players_text: playersText,
+          room_url: roomUrl,
+          stats_text: statsText,
           formation,
           budget
         }})
@@ -1768,6 +1788,47 @@ def dashboard(request: Request) -> str:
     }} catch (error) {{
       if (result) result.innerHTML = '';
       if (note) note.textContent = error.message;
+    }}
+  }}
+
+  async function importFantasyRoom() {{
+    const note = document.getElementById('fantasy-note');
+    const result = document.getElementById('fantasy-result');
+    const roomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
+    const playersText = (document.getElementById('fantasy-players')?.value || '').trim();
+    if (!roomUrl) {{
+      if (note) note.textContent = 'Cole a URL da sala ou ao menos o roomId.';
+      return;
+    }}
+    if (note) note.textContent = 'Lendo sala do Rei do Pitaco...';
+    if (result) result.innerHTML = '<p class=\"muted\">Tentando localizar a sala e o pool de jogadores...</p>';
+    try {{
+      const response = await fetch('/api/fantasy-room-import', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          room_url: roomUrl,
+          players_text: playersText
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao ler sala.');
+      if (data.players_text) {{
+        const box = document.getElementById('fantasy-players');
+        if (box) box.value = data.players_text;
+      }}
+      if (data.budget) {{
+        const budgetInput = document.getElementById('fantasy-budget');
+        if (budgetInput) budgetInput.value = String(data.budget);
+      }}
+      if (result && data.html) result.innerHTML = data.html;
+      if (note) note.textContent = data.message || 'Sala analisada.';
+      if (data.auto_ready) {{
+        await buildFantasyLineup();
+      }}
+    }} catch (error) {{
+      if (note) note.textContent = error.message;
+      if (result) result.innerHTML = '';
     }}
   }}
 
@@ -2189,7 +2250,7 @@ def api_fantasy_lineup(
     payload: FantasyLineupPayload,
     _: None = Depends(_auth),
 ) -> JSONResponse:
-    players = _parse_fantasy_players(payload.players_text)
+    players = _parse_fantasy_players(payload.players_text, payload.stats_text)
     if len(players) < 11:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2208,6 +2269,35 @@ def api_fantasy_lineup(
             "message": result.get("message"),
             "html": _fantasy_result_panel(result),
             "lineup": result,
+        }
+    )
+
+
+@app.post("/api/fantasy-room-import")
+async def api_fantasy_room_import(
+    payload: FantasyRoomPayload,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    room_id = _extract_room_id(payload.room_url)
+    if not room_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nao consegui identificar o roomId nessa URL.",
+        )
+    report = await _fetch_rei_room_report(room_id)
+    imported_text = str(report.get("players_text") or payload.players_text or "")
+    imported_players = _parse_fantasy_players(imported_text)
+    auto_ready = len(imported_players) >= 11
+    return JSONResponse(
+        {
+            "ok": True,
+            "room_id": room_id,
+            "players_text": imported_text,
+            "players_detected": len(imported_players),
+            "auto_ready": auto_ready,
+            "budget": report.get("budget"),
+            "message": report.get("message"),
+            "html": _fantasy_room_report_panel(report, imported_players),
         }
     )
 
@@ -3698,18 +3788,279 @@ FANTASY_FORMATIONS: dict[str, dict[str, int]] = {
     "5-4-1": {"GOL": 1, "ZAG": 3, "LAT": 2, "MEI": 4, "ATA": 1},
 }
 
+FANTASY_SOURCE_LINKS: list[tuple[str, str, str]] = [
+    (
+        "Rei do Pitaco Fantasy",
+        "https://fantasy.reidopitaco.com.br/fantasy?tab=dfs",
+        "pool e preço dos atletas quando a sala/conta libera os dados",
+    ),
+    (
+        "FBref",
+        "https://fbref.com/",
+        "minutos, gols, assists, finalizações e estatísticas padrão por jogador",
+    ),
+    (
+        "Understat",
+        "https://understat.com/",
+        "xG e xA para refinar teto ofensivo de atacantes e meias",
+    ),
+    (
+        "Football-Data.co.uk",
+        "https://www.football-data.co.uk/",
+        "histórico de resultados por liga e força recente dos times",
+    ),
+]
+
+FANTASY_HEADER_ALIASES: dict[str, set[str]] = {
+    "name": {"nome", "jogador", "player", "atleta"},
+    "pos": {"pos", "posicao", "posição", "position"},
+    "team": {"time", "clube", "team", "equipe"},
+    "price": {"preco", "preço", "price", "salario", "salary", "custo"},
+    "proj": {"proj", "projecao", "projeção", "projection", "pts", "pontos", "points"},
+    "minutes": {"min", "mins", "minutes", "minutos"},
+    "goals": {"gols", "goals"},
+    "assists": {"assistencias", "assistências", "assists", "assist"},
+    "xg": {"xg"},
+    "xa": {"xa", "x_a"},
+    "shots": {"shots", "finalizacoes", "finalizações", "chutes"},
+    "shots_on": {"shots_on", "sot", "no_alvo", "chutes_no_gol"},
+    "key_passes": {"key_passes", "passes_chave", "keypasses"},
+    "clean_sheets": {"clean_sheets", "saldo", "sg", "cs"},
+    "saves": {"saves", "defesas"},
+    "tackles": {"tackles", "desarmes"},
+    "interceptions": {"interceptions", "interceptacoes", "interceptações"},
+    "yellow": {"yellow", "amarelos", "cartoes_amarelos"},
+    "red": {"red", "vermelhos", "cartoes_vermelhos"},
+    "team_form": {"team_form", "forma_time", "form"},
+}
+
+
+def _fantasy_source_links_html() -> str:
+    chips = []
+    for name, url, role in FANTASY_SOURCE_LINKS:
+        chips.append(
+            f"<span class='tape-chip mid'><a href='{_esc(url)}' target='_blank' rel='noopener'>{_esc(name)}</a> | {_esc(role)}</span>"
+        )
+    return "".join(chips)
+
+
+def _extract_room_id(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    room_match = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", raw, re.I)
+    if room_match:
+        return room_match.group(1)
+    parsed = urlparse(raw)
+    room_qs = parse_qs(parsed.query or "")
+    room_id = (room_qs.get("roomId") or room_qs.get("roomid") or [None])[0]
+    return str(room_id).strip() if room_id else None
+
+
+async def _fetch_rei_room_report(room_id: str) -> dict[str, Any]:
+    room_url = f"https://fantasy.reidopitaco.com.br/fantasy/dfs/lineup?roomId={room_id}"
+    headers = {
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    report: dict[str, Any] = {
+        "room_id": room_id,
+        "room_url": room_url,
+        "status": "unknown",
+        "message": "",
+        "public_title": "",
+        "public_preview": "",
+        "players_found": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            page = await client.get(room_url, headers=headers)
+            report["html_status"] = page.status_code
+            html_text = page.text or ""
+            report["public_title"] = _first_group(r"<title>(.*?)</title>", html_text)
+            preview = _collapse_space(_strip_html(html_text))[:520]
+            report["public_preview"] = preview
+            if "Jogar Agora" in preview and "Legal" in preview and "Suporte" in preview:
+                report["status"] = "protected"
+                report["message"] = (
+                    "A sala abriu apenas a vitrine pública do Rei do Pitaco. "
+                    "Sem sessão/autorização, o pool de jogadores não ficou exposto para raspagem direta."
+                )
+            else:
+                report["status"] = "public_partial"
+                report["message"] = (
+                    "Consegui acessar a página pública, mas o pool completo ainda depende do conteúdo visível/exportado da sala."
+                )
+            api_url = f"https://eiger.reidopitaco.io/api/rooms/public/deeplink_info?roomId={room_id}"
+            api_response = await client.get(api_url, headers={**headers, "accept": "application/json,text/plain,*/*"})
+            report["api_status"] = api_response.status_code
+            if api_response.headers.get("content-type", "").startswith("application/json"):
+                data = api_response.json()
+                if isinstance(data, dict):
+                    report["api_payload"] = data
+                    report["status"] = "public_api"
+                    report["message"] = "A sala respondeu pela API pública e já pode servir como base de importação."
+                    championship_id = str(data.get("championshipId") or "").strip()
+                    round_id = str(data.get("roundId") or "").strip()
+                    if championship_id and round_id:
+                        players_url = (
+                            f"https://eiger.reidopitaco.io/api/championships/{championship_id}/players"
+                            f"?roundId={round_id}&page=1&limit=1000"
+                        )
+                        players_response = await client.get(
+                            players_url,
+                            headers={**headers, "accept": "application/json,text/plain,*/*"},
+                        )
+                        report["players_api_status"] = players_response.status_code
+                        if players_response.headers.get("content-type", "").startswith("application/json"):
+                            raw_players = players_response.json()
+                            if isinstance(raw_players, list):
+                                normalized_players = _normalize_pitaco_players(raw_players)
+                                report["players"] = normalized_players
+                                report["players_found"] = len(normalized_players)
+                                report["players_text"] = "\n".join(
+                                    _pitaco_player_line(item) for item in normalized_players
+                                )
+                                report["budget"] = _pitaco_money(data.get("salary"))
+                                report["bench_budget"] = _pitaco_money(data.get("benchPlayerSalary"))
+                        matches_url = f"https://eiger.reidopitaco.io/api/matches/round/{round_id}"
+                        matches_response = await client.get(
+                            matches_url,
+                            headers={**headers, "accept": "application/json,text/plain,*/*"},
+                        )
+                        report["matches_api_status"] = matches_response.status_code
+                        if matches_response.headers.get("content-type", "").startswith("application/json"):
+                            matches_payload = matches_response.json()
+                            if isinstance(matches_payload, list):
+                                report["matches"] = matches_payload
+            elif api_response.status_code in {401, 403}:
+                report["api_blocked"] = True
+    except Exception as exc:
+        report["status"] = "error"
+        report["message"] = f"Falha ao consultar a sala: {type(exc).__name__}."
+    return report
+
+
+def _pitaco_money(value: Any) -> float:
+    amount = _safe_float(value)
+    if amount >= 1000:
+        return round(amount / 100.0, 2)
+    return round(amount, 2)
+
+
+def _normalize_pitaco_players(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in rows:
+        pos = _normalize_fantasy_position(item.get("position"))
+        if not pos:
+            continue
+        status = str(item.get("status") or "").strip()
+        if status and status.lower() in {"lesionado", "suspenso", "cortado"}:
+            continue
+        normalized.append(
+            {
+                "name": str(item.get("name") or item.get("fullName") or "").strip(),
+                "full_name": str(item.get("fullName") or item.get("name") or "").strip(),
+                "pos": pos,
+                "team": str(item.get("teamName") or item.get("teamShortName") or "-").strip(),
+                "price": _pitaco_money(item.get("price")),
+                "proj": round(max(0.0, _safe_float(item.get("average"))), 2),
+                "status": status or "-",
+                "average": round(max(0.0, _safe_float(item.get("average"))), 2),
+                "match_id": str(item.get("matchId") or "").strip(),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            item.get("pos"),
+            -float(item.get("proj") or 0),
+            float(item.get("price") or 0),
+            item.get("name") or "",
+        )
+    )
+    return normalized
+
+
+def _pitaco_player_line(item: dict[str, Any]) -> str:
+    return ";".join(
+        [
+            str(item.get("name") or ""),
+            str(item.get("pos") or ""),
+            str(item.get("team") or "-"),
+            str(item.get("price") or 0),
+            str(item.get("proj") or 0),
+        ]
+    )
+
+
+def _strip_html(value: str) -> str:
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", str(value or ""))
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return html.unescape(text)
+
+
+def _collapse_space(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _first_group(pattern: str, text: str) -> str:
+    match = re.search(pattern, text or "", re.I | re.S)
+    return _collapse_space(match.group(1)) if match else ""
+
+
+def _fantasy_room_report_panel(report: dict[str, Any], imported_players: list[dict[str, Any]]) -> str:
+    preview = _esc(report.get("public_preview") or "Sem texto público legível.")
+    title = _esc(report.get("public_title") or "Sem título")
+    status = _esc(report.get("status") or "-")
+    msg = _esc(report.get("message") or "Sem diagnóstico.")
+    html_status = _esc(report.get("html_status") or "-")
+    api_status = _esc(report.get("api_status") or "-")
+    players_api_status = _esc(report.get("players_api_status") or "-")
+    budget = report.get("budget")
+    championship = _esc((report.get("api_payload") or {}).get("championshipName") or "-")
+    match_names = []
+    for match in report.get("matches") or []:
+        home = str(match.get("firstTeamLongName") or match.get("firstTeamName") or "").strip()
+        away = str(match.get("secondTeamLongName") or match.get("secondTeamName") or "").strip()
+        if home and away:
+            match_names.append(f"{home} x {away}")
+    return (
+        "<div class='active-line'>"
+        f"<div class='mini'><div class='muted'>roomId</div><strong>{_esc(report.get('room_id'))}</strong></div>"
+        f"<div class='mini'><div class='muted'>HTML</div><strong>{html_status}</strong></div>"
+        f"<div class='mini'><div class='muted'>API publica</div><strong>{api_status}</strong></div>"
+        f"<div class='mini'><div class='muted'>Pool players</div><strong>{players_api_status}</strong></div>"
+        f"<div class='mini'><div class='muted'>Status</div><strong>{status}</strong></div>"
+        f"<div class='mini'><div class='muted'>Jogadores lidos</div><strong>{_esc(len(imported_players))}</strong></div>"
+        f"<div class='mini'><div class='muted'>Teto</div><strong>{_esc(_format_brl(budget)) if budget else '-'}</strong></div>"
+        "</div>"
+        f"<p class='muted'><strong>{title}</strong> — {msg}</p>"
+        f"<p class='muted'>Competição: {championship} | Jogos: {_esc(' | '.join(match_names) or '-')}</p>"
+        f"<p class='muted'>Prévia pública: {preview}</p>"
+        "<p class='muted'>Quando o pool responde, a caixa de jogadores é preenchida automaticamente com nome, posição, time, preço e média histórica. Se a sala estiver protegida, abra a sala logada no navegador, copie a grade de jogadores e cole no campo de texto. O motor usa o preço do fantasy, a média do lobby e, quando você colar estatísticas extras, refina a projeção com o blend de fontes globais. Em ligas sem cobertura aberta ampla, ele cai para o combo preço + média + posição.</p>"
+        f"<div class='ticker'>{_fantasy_source_links_html()}</div>"
+    )
+
 
 def _fantasy_help_panel() -> str:
     return (
-        "<p class='muted'>Motor de escalação por orçamento e projeção. Use dados próprios/permitidos para jogadores "
-        "e gere a melhor combinação para o fantasy.</p>"
+        "<p class='muted'>Motor de escalação por orçamento, preço do fantasy e blend de estatísticas globais. "
+        "Ele tenta ler a sala do Rei do Pitaco, aceita export manual da grade e cruza preço com projeção informada ou calculada via xG/xA, minutos, gols, assists, finalizações e forma do time.</p>"
         "<table><thead><tr><th>Campo</th><th>Formato</th></tr></thead><tbody>"
+        "<tr><td>URL da sala</td><td>Link completo do Rei do Pitaco ou roomId</td></tr>"
         "<tr><td>Nome</td><td>Texto livre</td></tr>"
         "<tr><td>Posição</td><td>GOL, ZAG, LAT, MEI, ATA, TEC</td></tr>"
         "<tr><td>Time</td><td>Clube do atleta</td></tr>"
         "<tr><td>Preço</td><td>Número (ex: 12.5)</td></tr>"
-        "<tr><td>Projeção</td><td>Pontos esperados (ex: 6.7)</td></tr>"
+        "<tr><td>Projeção</td><td>Pontos esperados (ex: 6.7). Se faltar, a IA calcula uma proxy.</td></tr>"
+        "<tr><td>Extras</td><td>xG, xA, gols, assists, finalizações, minutos, SG, defesas, desarmes</td></tr>"
         "</tbody></table>"
+        f"<div class='ticker'>{_fantasy_source_links_html()}</div>"
     )
 
 
@@ -3736,13 +4087,102 @@ def _normalize_fantasy_position(value: Any) -> str | None:
         "TÉCNICO": "TEC",
         "COACH": "TEC",
         "TEC": "TEC",
+        "DEF": "ZAG",
+        "DEFENSOR": "ZAG",
+        "VOL": "MEI",
+        "VOLANTE": "MEI",
+        "M": "MEI",
+        "A": "ATA",
+        "Z": "ZAG",
+        "L": "LAT",
+        "G": "GOL",
     }
     return mapping.get(raw)
 
 
-def _parse_fantasy_players(players_text: str) -> list[dict[str, Any]]:
+def _normalize_fantasy_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _header_key(value: str) -> str | None:
+    normalized = _normalize_fantasy_name(value)
+    for key, aliases in FANTASY_HEADER_ALIASES.items():
+        if normalized in {_normalize_fantasy_name(item) for item in aliases}:
+            return key
+    return None
+
+
+def _parse_fantasy_stats_table(stats_text: str) -> dict[tuple[str, str], dict[str, Any]]:
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    header_map: dict[int, str] = {}
+    for raw_line in str(stats_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in re.split(r"[;\t|]+", line) if part.strip()]
+        if not parts:
+            continue
+        mapped = {idx: _header_key(part) for idx, part in enumerate(parts)}
+        if not header_map and any(mapped.values()):
+            header_map = {idx: key for idx, key in mapped.items() if key}
+            continue
+        if not header_map:
+            continue
+        item: dict[str, Any] = {}
+        for idx, value in enumerate(parts):
+            key = header_map.get(idx)
+            if not key:
+                continue
+            item[key] = value
+        name = item.get("name")
+        team = item.get("team")
+        if not name:
+            continue
+        key = (_normalize_fantasy_name(name), _normalize_fantasy_name(team or ""))
+        rows[key] = item
+    return rows
+
+
+def _safe_stat(item: dict[str, Any], key: str) -> float:
+    return _safe_float(item.get(key), 0.0)
+
+
+def _project_fantasy_player(player: dict[str, Any]) -> tuple[float, str]:
+    if _safe_float(player.get("proj"), 0.0) > 0:
+        return round(_safe_float(player.get("proj")), 2), "manual"
+    pos = str(player.get("pos") or "")
+    price = _safe_float(player.get("price"), 0.0)
+    minutes = min(1.0, _safe_stat(player, "minutes") / 90.0) * 1.4
+    goals = _safe_stat(player, "goals")
+    assists = _safe_stat(player, "assists")
+    xg = _safe_stat(player, "xg")
+    xa = _safe_stat(player, "xa")
+    shots = _safe_stat(player, "shots")
+    shots_on = _safe_stat(player, "shots_on")
+    key_passes = _safe_stat(player, "key_passes")
+    clean_sheets = _safe_stat(player, "clean_sheets")
+    saves = _safe_stat(player, "saves")
+    tackles = _safe_stat(player, "tackles")
+    interceptions = _safe_stat(player, "interceptions")
+    yellow = _safe_stat(player, "yellow")
+    red = _safe_stat(player, "red")
+    team_form = _safe_stat(player, "team_form")
+    base = {"GOL": 4.3, "ZAG": 4.0, "LAT": 4.2, "MEI": 4.8, "ATA": 5.1, "TEC": 3.8}.get(pos, 4.0)
+    salary_curve = price * {"GOL": 0.26, "ZAG": 0.28, "LAT": 0.31, "MEI": 0.35, "ATA": 0.38, "TEC": 0.22}.get(pos, 0.28)
+    attack = (goals * 2.9) + (assists * 2.2) + (xg * 2.4) + (xa * 1.7) + (shots_on * 0.75) + (shots * 0.18) + (key_passes * 0.3)
+    defense = (clean_sheets * 1.9) + (saves * 0.42) + (tackles * 0.16) + (interceptions * 0.14)
+    discipline = (yellow * -0.18) + (red * -0.85)
+    form_bonus = team_form * 0.45
+    if minutes <= 0:
+        minutes = 0.8
+    proj = base + salary_curve + minutes + attack + defense + discipline + form_bonus
+    return round(max(2.5, proj), 2), "blend"
+
+
+def _parse_fantasy_players(players_text: str, stats_text: str | None = None) -> list[dict[str, Any]]:
     parsed: list[dict[str, Any]] = []
     dedupe: dict[tuple[str, str, str], dict[str, Any]] = {}
+    stats_table = _parse_fantasy_stats_table(stats_text or "")
     for raw_line in str(players_text or "").splitlines():
         line = raw_line.strip()
         if not line:
@@ -3750,15 +4190,19 @@ def _parse_fantasy_players(players_text: str) -> list[dict[str, Any]]:
         low = line.lower()
         if low.startswith("nome;") or low.startswith("jogador;") or low.startswith("player;"):
             continue
-        parts = [part.strip() for part in re.split(r"[;\t|,]+", line) if part.strip()]
-        if len(parts) < 5:
+        parts = [part.strip() for part in re.split(r"[;\t|]+", line) if part.strip()]
+        if len(parts) < 4:
             continue
         name = parts[0][:80]
         pos = _normalize_fantasy_position(parts[1])
         team = parts[2][:80] if len(parts) >= 3 else "-"
-        price = _safe_float(str(parts[3]).replace("R$", "").replace(",", "."))
-        proj = _safe_float(str(parts[4]).replace(",", "."))
-        if not name or not pos or price <= 0 or proj <= 0:
+        price = _safe_float(
+            str(parts[3]).replace("R$", "").replace("C$", "").replace(".", "").replace(",", ".")
+            if "," in str(parts[3]) and "." in str(parts[3])
+            else str(parts[3]).replace("R$", "").replace("C$", "").replace(",", ".")
+        )
+        proj = _safe_float(str(parts[4]).replace(",", ".")) if len(parts) >= 5 else 0.0
+        if not name or not pos or price <= 0:
             continue
         player = {
             "name": name,
@@ -3766,8 +4210,33 @@ def _parse_fantasy_players(players_text: str) -> list[dict[str, Any]]:
             "team": team or "-",
             "price": round(price, 2),
             "proj": round(proj, 2),
-            "value": round(proj / max(price, 0.01), 4),
         }
+        stats_key = (_normalize_fantasy_name(name), _normalize_fantasy_name(team or ""))
+        stats_item = stats_table.get(stats_key)
+        if stats_item is None:
+            stats_item = stats_table.get((_normalize_fantasy_name(name), ""))
+        if stats_item:
+            for stat_name in (
+                "minutes",
+                "goals",
+                "assists",
+                "xg",
+                "xa",
+                "shots",
+                "shots_on",
+                "key_passes",
+                "clean_sheets",
+                "saves",
+                "tackles",
+                "interceptions",
+                "yellow",
+                "red",
+                "team_form",
+            ):
+                if stat_name in stats_item:
+                    player[stat_name] = _safe_float(str(stats_item[stat_name]).replace(",", "."))
+        player["proj"], player["projection_source"] = _project_fantasy_player(player)
+        player["value"] = round(float(player["proj"]) / max(price, 0.01), 4)
         key = (player["name"].lower(), player["pos"], player["team"].lower())
         current = dedupe.get(key)
         if current is None or float(player["proj"]) > float(current["proj"]):
@@ -3938,6 +4407,7 @@ def _optimize_fantasy_lineup(
         "projected_points": round(float(best_lineup["proj"]), 2),
         "players": ordered_players,
         "has_coach": bool(best_lineup.get("coach")),
+        "sources_html": _fantasy_source_links_html(),
         "message": f"Escalação otimizada em {chosen_formation} com projeção de {round(float(best_lineup['proj']), 2)} pts.",
     }
 
@@ -3953,7 +4423,7 @@ def _fantasy_result_panel(result: dict[str, Any]) -> str:
             f"<td>{_esc(player.get('pos'))}</td>"
             f"<td>{_esc(player.get('name'))}</td>"
             f"<td>{_esc(player.get('team'))}</td>"
-            f"<td>{_esc(player.get('price'))}</td>"
+            f"<td>{_esc(_format_brl(player.get('price')))}</td>"
             f"<td>{_esc(player.get('proj'))}</td>"
             "</tr>"
         )
@@ -3961,11 +4431,12 @@ def _fantasy_result_panel(result: dict[str, Any]) -> str:
     return (
         "<div class='active-line'>"
         f"<div class='mini'><div class='muted'>Formação</div><strong>{_esc(result.get('formation'))}{coach_note}</strong></div>"
-        f"<div class='mini'><div class='muted'>Orçamento</div><strong>{_esc(result.get('budget'))}</strong></div>"
-        f"<div class='mini'><div class='muted'>Usado</div><strong>{_esc(result.get('used_budget'))}</strong></div>"
-        f"<div class='mini'><div class='muted'>Saldo</div><strong>{_esc(result.get('remaining_budget'))}</strong></div>"
+        f"<div class='mini'><div class='muted'>Orçamento</div><strong>{_esc(_format_brl(result.get('budget')))}</strong></div>"
+        f"<div class='mini'><div class='muted'>Usado</div><strong>{_esc(_format_brl(result.get('used_budget')))}</strong></div>"
+        f"<div class='mini'><div class='muted'>Saldo</div><strong>{_esc(_format_brl(result.get('remaining_budget')))}</strong></div>"
         f"<div class='mini'><div class='muted'>Projeção</div><strong>{_esc(result.get('projected_points'))} pts</strong></div>"
         "</div>"
+        f"<div class='ticker'>{result.get('sources_html') or _fantasy_source_links_html()}</div>"
         "<div class='table-wrap'><table class='responsive'>"
         "<thead><tr><th>Pos</th><th>Jogador</th><th>Time</th><th>Preço</th><th>Proj.</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"

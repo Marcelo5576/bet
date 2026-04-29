@@ -609,7 +609,7 @@ def landing() -> str:
   <section class='section grid g3'>
     <div class='card'><div class='muted'>Scanner em tempo real</div><div class='kpi'>24/7</div><div class='muted'>Cobertura global com priorizacao Brasil.</div></div>
     <div class='card'><div class='muted'>Ciclo de monitoramento</div><div class='kpi'>5m / 1m</div><div class='muted'>5 min com jogo ativo, 1 min sem selecao ativa.</div></div>
-    <div class='card'><div class='muted'>Gestao de risco</div><div class='kpi'>Alerta IA</div><div class='muted'>Sem trava forcada: a IA alerta disciplina quando a sequencia piora.</div></div>
+    <div class='card'><div class='muted'>Fantasy Campeao</div><div class='kpi'>Scout IA</div><div class='muted'>Leitura de sala, pool de jogadores e montagem otimizada por preco, projecao e historico.</div></div>
   </section>
   <section class='section'>
     <h2 class='title'>Planos viaveis para operacao individual e equipe</h2>
@@ -618,7 +618,7 @@ def landing() -> str:
   <section class='section grid g2'>
     <div class='card'>
       <h3 class='title'>Como funciona</h3>
-      <p class='muted'>1) Cria conta e ativa teste de 7 dias. 2) Escolhe os jogos no scanner. 3) Registra entrada real no Telegram/site. 4) IA acompanha manter/sair e aprende com Green/Red.</p>
+      <p class='muted'>1) Cria conta e ativa teste de 7 dias. 2) Escolhe os jogos no scanner. 3) Registra entrada real no Telegram/site. 4) IA acompanha manter/sair e aprende com Green/Red. 5) No Fantasy Campeao, cruza preco do lobby com estatisticas globais para sugerir a melhor escalação.</p>
     </div>
     <div class='card'>
       <h3 class='title'>Suporte inteligente</h3>
