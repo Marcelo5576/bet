@@ -23,8 +23,12 @@ SYNC_ITEMS = [
     "Dockerfile",
     "docker-compose.yml",
     "requirements.txt",
+    "README.md",
+    "REBUILD_APEXGOL_BR.md",
+    "TELEGRAM_CONNECT_GUIDE_BR.md",
     "supabase_schema.sql",
     "assets",
+    "scripts",
     "src",
 ]
 
