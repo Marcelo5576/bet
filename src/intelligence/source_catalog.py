@@ -79,8 +79,19 @@ FOOTBALL_DATA_SOURCES: list[dict[str, Any]] = [
         "role": "fixtures_tables_scores",
         "coverage": "scores, fixtures, tabelas, elencos e substituicoes/lineups conforme plano",
         "best_for": "fallback barato para calendario, competicoes e classificacao.",
-        "integration": "adicionar provider de fixtures/classificacao",
+        "integration": "suportado via FOOTBALL_DATA_ORG_TOKEN como fallback oficial",
         "priority": 7,
+    },
+    {
+        "source_id": "flashscore",
+        "name": "Flashscore",
+        "url": "https://www.flashscore.com/",
+        "tier": "sem_api_publica",
+        "role": "nao_integrar_sem_licenca",
+        "coverage": "placares, odds e estatisticas exibidos no site/produto da Livesport",
+        "best_for": "somente avaliacao comercial; nao usar scraping ou endpoint interno sem autorizacao/licenca.",
+        "integration": "bloqueado no app ate existir contrato/API publica",
+        "priority": 8,
     },
     {
         "source_id": "openfootball_json",
@@ -91,7 +102,7 @@ FOOTBALL_DATA_SOURCES: list[dict[str, Any]] = [
         "coverage": "dados publicos em JSON com fixtures e resultados historicos de varias ligas",
         "best_for": "fallback gratuito para nomes de times, calendario e historico simples.",
         "integration": "adicionar ingestao leve por JSON",
-        "priority": 8,
+        "priority": 9,
     },
     {
         "source_id": "sportradar",
@@ -102,7 +113,7 @@ FOOTBALL_DATA_SOURCES: list[dict[str, Any]] = [
         "coverage": "API soccer e extended API com estatisticas profundas, dados ao vivo e produtos de odds via Sportradar/Betradar",
         "best_for": "caminho enterprise se o projeto crescer e precisar de SLA forte.",
         "integration": "avaliar apenas se custo fizer sentido",
-        "priority": 9,
+        "priority": 10,
     },
 ]
 

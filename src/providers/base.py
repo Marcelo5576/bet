@@ -25,5 +25,17 @@ class LiveGame:
 
 
 class LiveProvider:
+    label: str = "LiveProvider"
+
     async def get_live_games(self) -> list[LiveGame]:
         raise NotImplementedError
+
+    async def get_today_games(self) -> list[LiveGame]:
+        return await self.get_live_games()
+
+
+def provider_label(provider: LiveProvider) -> str:
+    label = str(getattr(provider, "label", "") or "").strip()
+    if label and label != "LiveProvider":
+        return label
+    return type(provider).__name__

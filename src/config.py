@@ -36,6 +36,7 @@ class Settings:
     test_mode: bool
     api_football_key: str | None
     api_football_base_url: str
+    football_data_org_token: str | None
     gemini_api_key: str | None
     gemini_model: str
     state_file: str
@@ -106,6 +107,7 @@ def load_settings() -> Settings:
         api_football_base_url=os.getenv(
             "API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io"
         ).rstrip("/"),
+        football_data_org_token=(os.getenv("FOOTBALL_DATA_ORG_TOKEN") or "").strip() or None,
         gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         state_file=os.getenv("STATE_FILE", "data/state.json"),

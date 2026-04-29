@@ -37,8 +37,10 @@ from src.intelligence.risk import (
 from src.intelligence.rules import analyze_game, position_management, ranked_signals
 from src.intelligence.scoring import entry_score
 from src.providers.api_football import ApiFootballProvider
-from src.providers.base import LiveProvider
+from src.providers.base import LiveProvider, provider_label
 from src.providers.espn import EspnProvider
+from src.providers.fallback import FallbackLiveProvider
+from src.providers.football_data_org import FootballDataOrgProvider
 from src.providers.mock_provider import MockProvider
 from src.portal import PortalStore
 from src.storage import StateStore
@@ -65,9 +67,13 @@ TELEGRAM_DICE = {
 def build_provider(settings: Settings) -> LiveProvider:
     if settings.test_mode:
         return MockProvider()
-    if not settings.api_football_key:
-        return EspnProvider()
-    return ApiFootballProvider(settings.api_football_key, settings.api_football_base_url)
+    providers: list[LiveProvider] = []
+    if settings.api_football_key:
+        providers.append(ApiFootballProvider(settings.api_football_key, settings.api_football_base_url))
+    providers.append(EspnProvider())
+    if settings.football_data_org_token:
+        providers.append(FootballDataOrgProvider(settings.football_data_org_token))
+    return FallbackLiveProvider(*providers)
 
 
 def supabase_sink(context: ContextTypes.DEFAULT_TYPE) -> SupabaseSink:
@@ -1267,7 +1273,7 @@ async def run_system_checkout(
     warnings: list[str] = []
     details: list[str] = []
 
-    details.append(f"Provider: {type(provider).__name__}")
+    details.append(f"Provider: {provider_label(provider)}")
     details.append(f"Supabase: {_supabase_status(supabase_sink(context))}")
     details.append(f"Chats Telegram: {len(state.chat_ids or [])}")
     details.append(f"Jogo ativo: {'sim' if state.active_signal else 'nao'}")
@@ -2123,7 +2129,7 @@ def _health_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     return "\n".join(
         [
             "Menu Saude do Sistema",
-            f"Provider: {type(context.application.bot_data['provider']).__name__}",
+            f"Provider: {provider_label(context.application.bot_data['provider'])}",
             f"Supabase: {_supabase_status(supabase)}",
             f"Chats registrados: {len(state.chat_ids or [])}",
             f"Jogo ativo: {'sim' if state.active_signal else 'nao'}",
@@ -2148,7 +2154,7 @@ def _support_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     return "\n".join(
         [
             "Diagnostico BetSignal Cloud",
-            f"Provider: {type(context.application.bot_data['provider']).__name__}",
+            f"Provider: {provider_label(context.application.bot_data['provider'])}",
             f"Supabase: {_supabase_status(supabase)}",
             f"Chats salvos: {len(state.chat_ids or [])}",
             f"Jogo ativo: {'sim' if state.active_signal else 'nao'}",

@@ -77,6 +77,8 @@ DEFAULT_SOCCER_LEAGUES = (
 
 
 class EspnProvider(LiveProvider):
+    label = "ESPN Scoreboard"
+
     def __init__(
         self,
         url: str = "https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard",

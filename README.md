@@ -137,5 +137,8 @@ Comandos uteis no Telegram:
 Preencha `TELEGRAM_BOT_TOKEN` no `.env` para o bot conectar ao Telegram.
 Preencha `API_FOOTBALL_KEY` para jogos ao vivo reais e odds ao vivo via
 API-Football. Sem essa chave, o bot usa o provider publico da ESPN como
-fallback real para placares, estatisticas e odds quando disponiveis. Use
+fallback real para placares, estatisticas e odds quando disponiveis.
+Preencha `FOOTBALL_DATA_ORG_TOKEN` para adicionar `football-data.org` ao
+provider chain oficial como fallback de fixtures, jogos do dia e
+classificacao. O app nao integra Flashscore sem API publica/licenca. Use
 `TEST_MODE=true` somente quando quiser dados mockados.

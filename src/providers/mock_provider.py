@@ -6,6 +6,8 @@ from .base import LiveGame, LiveProvider
 
 
 class MockProvider(LiveProvider):
+    label = "MockProvider"
+
     async def get_live_games(self) -> list[LiveGame]:
         minute = randint(12, 72)
         pressure_boost = randint(0, 18)
@@ -43,4 +45,3 @@ class MockProvider(LiveProvider):
                 odds_away=3.0,
             ),
         ]
-

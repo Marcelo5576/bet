@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from src.config import load_settings
+from src.config import Settings, load_settings
 from src.integrations.supabase import SupabaseSink
 from src.intelligence.learning import summarize_history_with_simulation
 from src.intelligence.manual_import import parse_manual_bets
@@ -235,7 +235,7 @@ def dashboard(request: Request) -> str:
     fast_panel = _fast_learning_panel(fast_learning)
     manual_stats = _manual_stats(visible_history)
     supabase_info = _supabase_info(settings)
-    source_panel = _source_catalog_panel()
+    source_panel = _source_catalog_panel(settings)
     commercial_panel = _commercial_panel(settings)
     fantasy_help = _fantasy_help_panel()
     championship_rows = _championship_rows(live_games)
@@ -3770,7 +3770,18 @@ def _team_momentum(game: dict[str, Any], side: str) -> int:
     return max(0, int(round(raw)))
 
 
-def _source_catalog_panel() -> str:
+def _source_status(source: dict[str, Any], settings: Settings) -> str:
+    source_id = str(source.get("source_id") or "")
+    if source_id == "api_football":
+        return "ativo no provider chain" if settings.api_football_key else "pronto quando preencher API_FOOTBALL_KEY"
+    if source_id == "football_data_org":
+        return "ativo no provider chain" if settings.football_data_org_token else "pronto quando preencher FOOTBALL_DATA_ORG_TOKEN"
+    if source_id == "flashscore":
+        return "bloqueado por licenca/API publica ausente"
+    return str(source.get("integration") or "planejado")
+
+
+def _source_catalog_panel(settings: Settings) -> str:
     rows = []
     for source in FOOTBALL_DATA_SOURCES[:8]:
         rows.append(
@@ -3778,11 +3789,11 @@ def _source_catalog_panel() -> str:
             f"<td><a href='{_esc(source['url'])}' target='_blank' rel='noopener'>{_esc(source['name'])}</a></td>"
             f"<td>{_esc(source['role'])}</td>"
             f"<td>{_esc(source['tier'])}</td>"
-            f"<td>{_esc(source['integration'])}</td>"
+            f"<td>{_esc(_source_status(source, settings))}</td>"
             "</tr>"
         )
     return (
-        "<p class='muted'>Prioridade: API/CSV estavel primeiro; scraping de casa de aposta fica fora do caminho principal.</p>"
+        "<p class='muted'>Prioridade: API/CSV estavel primeiro; scraping de casa de aposta e sites sem API publica ficam fora do caminho principal.</p>"
         "<table><thead><tr><th>Fonte</th><th>Uso</th><th>Tipo</th><th>Status</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
