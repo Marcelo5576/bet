@@ -92,6 +92,22 @@ Se o helper existir na VPS:
 deploy-apexgol.sh
 ```
 
+## 3.1. Religar modo real e semear o runtime
+
+Depois do reset, rode:
+
+```bash
+python scripts/prime_real_mode.py --seed-state --simulate-now
+```
+
+Esse comando:
+
+- usa o provider real configurado no `.env`;
+- busca jogos do feed ao vivo;
+- repovoa `last_games` e `candidate_signals`;
+- roda uma simulacao imediata com o feed real atual;
+- mostra os bloqueios restantes, como Telegram, Gemini, API-Football e Supabase.
+
 ## 4. Restaurar admin da plataforma
 
 No servidor, o `.env` principal fica em `/opt/.env`. Se o admin perder acesso:

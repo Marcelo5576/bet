@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import load_settings  # noqa: E402
+from src.intelligence.learning import summarize_history_with_simulation  # noqa: E402
 
 
 def _file_meta(path: Path) -> dict[str, Any]:
@@ -90,6 +91,30 @@ def _learning_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _effective_learning(state: dict[str, Any]) -> dict[str, Any]:
+    learning = summarize_history_with_simulation(
+        state.get("history") or [],
+        state.get("simulation_sessions") or [],
+        simulation_weight=0.35,
+        max_simulation_rows=240,
+    )
+    overall = learning.get("overall") or {}
+    fast = learning.get("fast_learning") or {}
+    return {
+        "sample_size": learning.get("sample_size"),
+        "real_sample_size": learning.get("real_sample_size"),
+        "simulation_sample_size": learning.get("simulation_sample_size"),
+        "brier_score": learning.get("brier_score"),
+        "profit_units": learning.get("profit_units"),
+        "roi_units": learning.get("roi_units"),
+        "wins": overall.get("wins"),
+        "losses": overall.get("losses"),
+        "hit_rate": overall.get("hit_rate"),
+        "fast_mode": fast.get("mode"),
+        "momentum_score": fast.get("momentum_score"),
+    }
+
+
 def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
     history = state.get("history") or []
     outcomes = Counter(
@@ -119,6 +144,7 @@ def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
             "created_at": latest_sim.get("created_at"),
         } if latest_sim else {},
         "learning_snapshot": _learning_snapshot(state),
+        "effective_learning": _effective_learning(state),
     }
 
 
