@@ -5,6 +5,8 @@ const { chromium } = require("playwright");
 
 const baseURL = process.env.BASE_URL || "http://127.0.0.1:8011";
 const edgePath = process.env.EDGE_PATH || "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe";
+const adminEmail = process.env.ADMIN_EMAIL || "";
+const adminPassword = process.env.ADMIN_PASSWORD || "";
 const outDir = path.resolve(__dirname, "..", "data", "playwright");
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -102,6 +104,30 @@ async function main() {
     const sitemap = await page.request.get(`${baseURL}/sitemap.xml`);
     assert.equal(sitemap.status(), 200);
     assert.match(await sitemap.text(), /<loc>https:\/\/novo\.tickpost\.com\.br\/<\/loc>/);
+    await page.close();
+  });
+
+  await run("fantasy ai authenticated lineup builder", async () => {
+    if (!adminEmail || !adminPassword) {
+      console.log("skip - ADMIN_EMAIL/ADMIN_PASSWORD not set");
+      return;
+    }
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(`${baseURL}/login`, { waitUntil: "networkidle" });
+    await page.locator("input[name='email']").fill(adminEmail);
+    await page.locator("input[name='password']").fill(adminPassword);
+    await page.locator("button[type='submit']").click();
+    await page.waitForURL(/\/app/, { timeout: 15000 });
+    await assert.equal(await page.locator("text=Fantasy IA").first().isVisible(), true);
+    await page.goto(`${baseURL}/fantasy-ia`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => document.querySelectorAll(".fantasy-player").length >= 11, { timeout: 15000 });
+    await assert.equal(await page.locator(".fantasy-player").count(), 11);
+    await assert.match(await page.locator("#fantasy-note").innerText(), /pool|perfis|Usei/i);
+    const costText = await page.locator("#fantasy-cost").innerText();
+    const [used, budget] = costText.split("/").map((part) => Number(part.trim()));
+    await assert.ok(used <= budget, `fantasy lineup exceeds budget: ${costText}`);
+    await checkNoHorizontalOverflow(page, "fantasy");
+    await page.screenshot({ path: path.join(outDir, "fantasy-ai.png"), fullPage: true });
     await page.close();
   });
 

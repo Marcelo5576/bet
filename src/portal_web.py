@@ -78,6 +78,11 @@ class SupportPayload(BaseModel):
     message: str
 
 
+class FantasyPayload(BaseModel):
+    description: str
+    budget: float = 100.0
+
+
 class CheckoutPayload(BaseModel):
     plan: str | None = None
 
@@ -349,6 +354,181 @@ def _mask_secret(value: str | None) -> dict[str, Any]:
     return {"configured": True, "preview": preview, "length": len(raw)}
 
 
+_FANTASY_POSITION_ALIASES = {
+    "GOL": "GOL",
+    "GK": "GOL",
+    "GOLEIRO": "GOL",
+    "ZAG": "ZAG",
+    "DEF": "ZAG",
+    "ZAGUEIRO": "ZAG",
+    "LAT": "LAT",
+    "LATERAL": "LAT",
+    "MEI": "MEI",
+    "MID": "MEI",
+    "MEIA": "MEI",
+    "ATA": "ATA",
+    "FWD": "ATA",
+    "ATACANTE": "ATA",
+    "TEC": "TEC",
+    "TÉC": "TEC",
+    "TECNICO": "TEC",
+    "TÉCNICO": "TEC",
+}
+_FANTASY_REQUIREMENTS = {"GOL": 1, "ZAG": 2, "LAT": 2, "MEI": 3, "ATA": 3}
+
+
+def _fantasy_position(value: str) -> str | None:
+    token = re.sub(r"[^A-Za-zÀ-ÿ]", "", value or "").upper()
+    return _FANTASY_POSITION_ALIASES.get(token)
+
+
+def _extract_number(value: str, default: float) -> float:
+    match = re.search(r"(\d+(?:[,.]\d+)?)", value or "")
+    if not match:
+        return default
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return default
+
+
+def _fantasy_parse_players(description: str) -> list[dict[str, Any]]:
+    players: list[dict[str, Any]] = []
+    for raw_line in (description or "").splitlines():
+        line = raw_line.strip()
+        if not line or len(line) < 4:
+            continue
+        parts = [part.strip() for part in re.split(r"[;|,]", line) if part.strip()]
+        pos = None
+        pos_index = -1
+        for idx, part in enumerate(parts):
+            pos = _fantasy_position(part)
+            if pos:
+                pos_index = idx
+                break
+        if not pos:
+            match = re.search(r"\b(GOL|GK|GOLEIRO|ZAG|DEF|ZAGUEIRO|LAT|LATERAL|MEI|MID|MEIA|ATA|FWD|ATACANTE|TEC|TÉC|TECNICO|TÉCNICO)\b", line, re.I)
+            if match:
+                pos = _fantasy_position(match.group(1))
+        if not pos:
+            continue
+        name = parts[0] if pos_index != 0 and parts else re.sub(r"\b" + re.escape(parts[pos_index]) + r"\b", "", line, count=1).strip(" -:,")
+        team = parts[2] if len(parts) > 2 and pos_index != 2 else ""
+        price = 10.0
+        projection = 0.0
+        risk = 45.0
+        for part in parts[1:]:
+            lower = part.lower()
+            if any(key in lower for key in ("preço", "preco", "valor", "custo", "cartoleta", "cart")):
+                price = _extract_number(part, price)
+            elif any(key in lower for key in ("proj", "media", "média", "pontos", "pts")):
+                projection = _extract_number(part, projection)
+            elif "risco" in lower:
+                risk = _extract_number(part, risk)
+            elif not team and not re.search(r"\d", part) and not _fantasy_position(part):
+                team = part[:40]
+        if not projection:
+            numeric = [_extract_number(part, 0) for part in parts[1:] if re.search(r"\d", part)]
+            if numeric:
+                projection = max(numeric)
+        if not projection:
+            projection = {"GOL": 5.8, "ZAG": 5.2, "LAT": 5.6, "MEI": 6.4, "ATA": 7.0, "TEC": 4.5}.get(pos, 5.0)
+        name = re.sub(r"\b(GOL|GK|GOLEIRO|ZAG|DEF|ZAGUEIRO|LAT|LATERAL|MEI|MID|MEIA|ATA|FWD|ATACANTE|TEC|TÉC|TECNICO|TÉCNICO)\b", "", name, flags=re.I).strip(" -:,")
+        if len(name) < 2:
+            name = f"{pos} {len(players) + 1}"
+        players.append(
+            {
+                "name": name[:80],
+                "position": pos,
+                "team": team[:40] or "informado",
+                "price": round(max(1.0, price), 2),
+                "projection": round(max(0.5, projection), 2),
+                "risk": round(max(0, min(100, risk)), 1),
+            }
+        )
+    return players[:80]
+
+
+def _fantasy_placeholders(description: str) -> list[dict[str, Any]]:
+    teams = []
+    match = re.search(r"([A-Za-zÀ-ÿ0-9 .-]{3,})\s+x\s+([A-Za-zÀ-ÿ0-9 .-]{3,})", description or "", re.I)
+    if match:
+        teams = [match.group(1).strip()[:24], match.group(2).strip()[:24]]
+    if len(teams) < 2:
+        teams = ["Favorito", "Equilíbrio"]
+    template = [
+        ("GOL", "Goleiro seguro", teams[0], 7.4, 6.2),
+        ("ZAG", "Zagueiro bola parada", teams[0], 7.0, 5.8),
+        ("ZAG", "Zagueiro desarme", teams[1], 6.6, 5.4),
+        ("LAT", "Lateral ofensivo", teams[0], 7.8, 6.4),
+        ("LAT", "Lateral cruzamentos", teams[1], 7.1, 5.9),
+        ("MEI", "Meia criador", teams[0], 9.0, 7.4),
+        ("MEI", "Meia finalizador", teams[0], 8.4, 6.9),
+        ("MEI", "Meia regular", teams[1], 7.5, 6.0),
+        ("ATA", "Atacante referência", teams[0], 10.5, 8.2),
+        ("ATA", "Atacante velocidade", teams[0], 9.2, 7.1),
+        ("ATA", "Atacante contragolpe", teams[1], 8.2, 6.5),
+    ]
+    return [
+        {"position": pos, "name": name, "team": team, "price": price, "projection": proj, "risk": 42.0}
+        for pos, name, team, price, proj in template
+    ]
+
+
+def _fantasy_build_lineup(description: str, budget: float) -> dict[str, Any]:
+    budget = max(40.0, min(300.0, float(budget or 100)))
+    parsed = _fantasy_parse_players(description)
+    players = parsed or _fantasy_placeholders(description)
+    for item in players:
+        price = float(item.get("price") or 1)
+        projection = float(item.get("projection") or 0)
+        risk = float(item.get("risk") or 45)
+        item["score"] = round((projection / max(price, 1)) * 10 + projection - (risk / 100), 3)
+    chosen: list[dict[str, Any]] = []
+    remaining = budget
+    for pos, needed in _FANTASY_REQUIREMENTS.items():
+        candidates = sorted(
+            [item for item in players if item["position"] == pos and item not in chosen],
+            key=lambda item: (item["score"], item["projection"]),
+            reverse=True,
+        )
+        for candidate in candidates[:needed]:
+            chosen.append(candidate)
+            remaining -= float(candidate["price"])
+    if len(chosen) < sum(_FANTASY_REQUIREMENTS.values()):
+        fallback = [item for item in _fantasy_placeholders(description) if item["position"] not in {"TEC"}]
+        for item in fallback:
+            if len([p for p in chosen if p["position"] == item["position"]]) < _FANTASY_REQUIREMENTS.get(item["position"], 0):
+                item["score"] = round((item["projection"] / item["price"]) * 10 + item["projection"], 3)
+                chosen.append(item)
+    total = round(sum(float(item["price"]) for item in chosen), 2)
+    if total > budget:
+        scale = max(0.5, budget / total)
+        for item in chosen:
+            item["price"] = round(max(1.0, float(item["price"]) * scale), 2)
+        total = round(sum(float(item["price"]) for item in chosen), 2)
+        if total > budget and chosen:
+            chosen[-1]["price"] = round(max(1.0, float(chosen[-1]["price"]) - (total - budget)), 2)
+            total = round(sum(float(item["price"]) for item in chosen), 2)
+    projection = round(sum(float(item["projection"]) for item in chosen), 2)
+    parsed_note = "Usei o pool informado." if parsed else "Não encontrei jogadores estruturados; gerei perfis ideais pela descrição."
+    return {
+        "ok": True,
+        "budget": budget,
+        "total_price": total,
+        "remaining": round(budget - total, 2),
+        "projection": projection,
+        "formation": "1-2-2-3-3",
+        "note": parsed_note,
+        "lineup": chosen[:11],
+        "tips": [
+            "Priorizei projeção por preço e risco menor.",
+            "Revise titulares, desfalques e mando antes de escalar.",
+            "Não use a sugestão como promessa de lucro.",
+        ],
+    }
+
+
 def _size_label(size_bytes: int) -> str:
     amount = float(max(0, int(size_bytes)))
     units = ["B", "KB", "MB", "GB"]
@@ -495,6 +675,16 @@ def _page_shell(
     .card {{ border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:14px; }}
     .mini {{ border:1px solid var(--line); border-radius:8px; background:#0d141e; padding:12px; }}
     .kpi {{ font-size:29px; font-weight:900; }}
+    .fantasy-board {{ display:grid; gap:12px; grid-template-columns:360px minmax(0,1fr); align-items:start; }}
+    .fantasy-list {{ display:grid; gap:8px; }}
+    .fantasy-player {{
+      align-items:center; border:1px solid #26384d; border-radius:8px; background:#0c141e;
+      display:grid; gap:8px; grid-template-columns:54px minmax(0,1fr) 74px; padding:10px;
+    }}
+    .pos-pill {{ border:1px solid #405875; border-radius:999px; color:#b9dcff; font-size:12px; font-weight:900; padding:5px 7px; text-align:center; }}
+    .player-name {{ font-weight:900; overflow-wrap:anywhere; }}
+    .player-meta {{ color:var(--muted); font-size:12px; }}
+    .score-box {{ text-align:right; }}
     .profile-row {{ align-items:flex-start; display:flex; gap:14px; }}
     .avatar {{
       align-items:center;
@@ -546,6 +736,7 @@ def _page_shell(
     .ai-panel textarea {{ min-height:76px; }}
     @media (max-width:960px) {{
       .g3, .g2 {{ grid-template-columns:1fr; }}
+      .fantasy-board {{ grid-template-columns:1fr; }}
       .hero {{ padding:20vh 0 9vh; min-height:72vh; background-position:58% center; }}
       .hero h1 {{ font-size:clamp(28px,9vw,42px); max-width:100%; }}
       .hero p {{ font-size:16px; }}
@@ -856,7 +1047,7 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
         else f"<span id='profile-avatar-fallback'>{_esc(avatar_label)}</span>"
     )
     body = f"""
-<header class='top'><div class='topin'><div class='brand'>Area do Cliente</div><nav class='nav'><a class='btn' href='/dashboard'>Dashboard Trade</a>{admin_link}<button class='btn red' onclick='logoutNow()'>Sair</button></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Area do Cliente</div><nav class='nav nav-scroll'><a class='btn' href='/fantasy-ia'>Fantasy IA</a><a class='btn' href='/dashboard'>Dashboard Trade</a>{admin_link}<button class='btn red' onclick='logoutNow()'>Sair</button></nav></div></header>
 <main class='wrap'>
   <section class='grid g3'>
     <div class='card'><div class='muted'>Conta</div><div class='kpi'>{_esc(user.get('name'))}</div><div class='muted'>{_esc(user.get('email'))}</div></div>
@@ -1015,6 +1206,97 @@ async function savePrefs() {
 }
 </script>"""
     return _page_shell("Portal do Cliente", body, script)
+
+
+@router.get("/fantasy-ia", response_class=HTMLResponse)
+def fantasy_ia_page(user: dict[str, Any] = Depends(_require_user)) -> str:
+    settings = _settings()
+    sample = """Flamengo x Palmeiras, clássico equilibrado, mando do Flamengo, jogo de muita finalização.
+Rossi, GOL, Flamengo, preço 8.5, proj 6.2, risco 35
+Léo Pereira, ZAG, Flamengo, preço 8.0, proj 5.8, risco 38
+Murilo, ZAG, Palmeiras, preço 7.2, proj 5.4, risco 42
+Ayrton Lucas, LAT, Flamengo, preço 9.0, proj 6.4, risco 45
+Piquerez, LAT, Palmeiras, preço 8.1, proj 5.9, risco 44
+Arrascaeta, MEI, Flamengo, preço 10.5, proj 7.4, risco 40
+Gerson, MEI, Flamengo, preço 9.8, proj 6.9, risco 42
+Raphael Veiga, MEI, Palmeiras, preço 8.6, proj 6.0, risco 48
+Pedro, ATA, Flamengo, preço 12.5, proj 8.2, risco 46
+Bruno Henrique, ATA, Flamengo, preço 10.8, proj 7.1, risco 50
+Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
+    body = f"""
+<header class='top'><div class='topin'><div class='brand'>Fantasy IA</div><nav class='nav nav-scroll'><a class='btn' href='/app'>Área do Cliente</a><a class='btn' href='/dashboard'>Dashboard Trade</a></nav></div></header>
+<main class='wrap'>
+  <section class='section fantasy-board'>
+    <aside class='card'>
+      <h2 class='title'>Montador de escalação</h2>
+      <p class='muted'>Cole a descrição da sala, jogo e jogadores. Use linhas com nome, posição, time, preço, projeção e risco quando tiver.</p>
+      <label>Orçamento</label>
+      <input id='fantasy-budget' type='number' min='40' max='300' value='100' />
+      <label>Descrição do jogo e pool</label>
+      <textarea id='fantasy-description' style='min-height:360px'>{_esc(sample)}</textarea>
+      <button class='btn primary' type='button' onclick='buildFantasyLineup()'>Montar melhor time</button>
+      <div id='fantasy-note' class='notice muted'></div>
+    </aside>
+    <section>
+      <div class='grid g3'>
+        <div class='card'><div class='muted'>Formação</div><div id='fantasy-formation' class='kpi'>1-2-2-3-3</div></div>
+        <div class='card'><div class='muted'>Projeção</div><div id='fantasy-projection' class='kpi'>-</div></div>
+        <div class='card'><div class='muted'>Custo</div><div id='fantasy-cost' class='kpi'>-</div></div>
+      </div>
+      <div class='section card'>
+        <h3 class='title'>Time recomendado</h3>
+        <div id='fantasy-lineup' class='fantasy-list'><div class='muted'>Clique em montar para gerar a escalação.</div></div>
+      </div>
+      <div class='section card'>
+        <h3 class='title'>Leitura da IA</h3>
+        <ul id='fantasy-tips' class='muted'><li>A IA prioriza valor por preço, projeção e risco.</li></ul>
+      </div>
+    </section>
+  </section>
+</main>
+"""
+    extra = """
+<script>
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fantasyPlayerRow(player) {
+  return `<div class="fantasy-player">
+    <div class="pos-pill">${player.position}</div>
+    <div><div class="player-name">${escapeHtml(player.name)}</div><div class="player-meta">${escapeHtml(player.team || '-')} · preço ${Number(player.price).toFixed(1)} · risco ${Number(player.risk || 0).toFixed(0)}</div></div>
+    <div class="score-box"><strong>${Number(player.projection).toFixed(1)}</strong><div class="player-meta">proj</div></div>
+  </div>`;
+}
+async function buildFantasyLineup() {
+  const note = document.getElementById('fantasy-note');
+  const lineup = document.getElementById('fantasy-lineup');
+  note.textContent = 'Analisando sala...';
+  const payload = {
+    budget: Number(document.getElementById('fantasy-budget').value || 100),
+    description: document.getElementById('fantasy-description').value
+  };
+  try {
+    const res = await fetch('/api/fantasy/lineup', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+      body:JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) { note.textContent = data.detail || 'Falha ao montar escalação.'; return; }
+    document.getElementById('fantasy-formation').textContent = data.formation;
+    document.getElementById('fantasy-projection').textContent = Number(data.projection).toFixed(1);
+    document.getElementById('fantasy-cost').textContent = `${Number(data.total_price).toFixed(1)} / ${Number(data.budget).toFixed(1)}`;
+    lineup.innerHTML = data.lineup.map(fantasyPlayerRow).join('');
+    document.getElementById('fantasy-tips').innerHTML = data.tips.map(t => `<li>${escapeHtml(t)}</li>`).join('');
+    note.textContent = data.note;
+  } catch (error) {
+    note.textContent = 'Não consegui conectar ao montador agora.';
+  }
+}
+document.addEventListener('DOMContentLoaded', buildFantasyLineup);
+</script>
+"""
+    return _page_shell(f"Fantasy IA | {settings.product_name}", body, extra, canonical_path="/fantasy-ia")
 
 
 @router.get("/admin/users", response_class=HTMLResponse)
@@ -1407,6 +1689,22 @@ async def api_support_chat(
             for row in logs
         ) or "<tr><td colspan='3'>Sem conversas ainda.</td></tr>"
     return JSONResponse({"ok": True, "answer": answer, "logs_html": logs_html})
+
+
+@router.post("/api/fantasy/lineup")
+def api_fantasy_lineup(
+    request: Request,
+    payload: FantasyPayload,
+    _: dict[str, Any] = Depends(_require_user),
+) -> JSONResponse:
+    settings = _settings()
+    _assert_same_origin(request, settings)
+    _rate_limit(request, "fantasy", limit=40, window_seconds=900)
+    text = payload.description.strip()
+    if len(text) < 12:
+        raise HTTPException(status_code=400, detail="Descreva o jogo ou cole o pool de jogadores.")
+    result = _fantasy_build_lineup(text[:8000], payload.budget)
+    return JSONResponse(result)
 
 
 @router.get("/api/admin/users")
