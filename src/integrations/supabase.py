@@ -92,7 +92,7 @@ class SupabaseSink:
         if not self.available or not skills:
             return
         rows = [_skill_row(skill) for skill in skills]
-        await self._upsert("betsignal_ai_skills", rows, "skill_id")
+        await self._upsert("betsignal_ai_skills", rows, "skill_id", disable_on_missing_table=False)
 
     async def fetch_ai_skills(self) -> list[dict[str, Any]]:
         if not self.available:
@@ -112,7 +112,6 @@ class SupabaseSink:
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPStatusError as exc:
-            self._maybe_disable(exc.response)
             logger.warning("Falha ao consultar skills IA no Supabase: %s", _safe_http_error(exc))
             return []
         except Exception as exc:
@@ -175,6 +174,7 @@ class SupabaseSink:
         table: str,
         rows: list[dict[str, Any]],
         conflict_key: str,
+        disable_on_missing_table: bool = True,
     ) -> None:
         if not rows:
             return
@@ -188,7 +188,8 @@ class SupabaseSink:
                 response = await client.post(url, headers=headers, params=params, json=rows)
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            self._maybe_disable(exc.response)
+            if disable_on_missing_table:
+                self._maybe_disable(exc.response)
             logger.warning("Falha ao sincronizar Supabase/%s: %s", table, _safe_http_error(exc))
         except Exception as exc:
             logger.warning("Falha ao sincronizar Supabase/%s: %s", table, exc)
