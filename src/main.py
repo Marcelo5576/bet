@@ -1587,6 +1587,8 @@ def _simulate_learning_session(
         peak = max(peak, bankroll)
         drawdown = peak - bankroll
         max_drawdown = max(max_drawdown, drawdown)
+        entry_minute = _sim_entry_minute(pick, rng)
+        exit_minute = _sim_exit_minute(entry_minute, won, risk, rng)
 
         rows.append(
             {
@@ -1603,13 +1605,20 @@ def _simulate_learning_session(
                 "profit": round(profit, 2),
                 "bankroll": bankroll,
                 "win_prob_pct": round(win_prob * 100.0, 1),
+                "entry_minute": entry_minute,
+                "exit_minute": exit_minute,
+                "exit_action": _sim_exit_action(won, score, risk),
+                "exit_reason": _sim_exit_reason(won, score, risk, pick),
             }
         )
 
     hit_rate = round((greens / max(1, games_target)) * 100.0, 1)
     profit_units = round(bankroll - bankroll_start, 2)
     roi = round((profit_units / max(1.0, total_staked)) * 100.0, 1)
+    created_at = datetime.now(timezone.utc).isoformat()
     return {
+        "simulation_id": hashlib.sha256(f"{created_at}|{seed_material}".encode("utf-8")).hexdigest()[:24],
+        "created_at": created_at,
         "total_games": games_target,
         "greens": greens,
         "reds": reds,
@@ -1622,9 +1631,41 @@ def _simulate_learning_session(
         "max_win_streak": max_win_streak,
         "max_loss_streak": max_loss_streak,
         "stake_percent": stake_pct,
+        "avg_confidence": round(sum(_safe_int(item.get("confidence"), 0) for item in ranked) / max(1, len(ranked)), 2),
+        "avg_edge": round(sum(_safe_float(item.get("edge") or item.get("value_edge"), 0.0) for item in ranked) / max(1, len(ranked)), 4),
         "rows": rows,
-        "note": "Simulacao diaria automatica (paper/live), sem executar aposta real.",
+        "note": "Simulacao diaria automatica com entrada, acompanhamento e saida dinamica, sem executar aposta real.",
     }
+
+
+def _sim_entry_minute(pick: dict, rng: random.Random) -> int:
+    minute = _safe_int(pick.get("minute"), 1)
+    return max(1, min(89, minute + rng.randint(0, 3)))
+
+
+def _sim_exit_minute(entry_minute: int, won: bool, risk: int, rng: random.Random) -> int:
+    window = rng.randint(6, 18) if won else rng.randint(3, 12)
+    if risk >= 70:
+        window = min(window, rng.randint(3, 7))
+    return max(entry_minute + 1, min(90, entry_minute + window))
+
+
+def _sim_exit_action(won: bool, score: int, risk: int) -> str:
+    if won:
+        return "SAIR COM GREEN" if risk >= 55 else "SEGURAR ATE CONFIRMAR"
+    if risk >= 70 or score < 52:
+        return "SAIR PARA REDUZIR RED"
+    return "SAIR POR PERDA DE EDGE"
+
+
+def _sim_exit_reason(won: bool, score: int, risk: int, pick: dict) -> str:
+    if won:
+        return "Pressao confirmou a leitura; saida simulada apos capturar valor."
+    if risk >= 70:
+        return "Risco subiu durante a dinamica; saida simulada para preservar banca."
+    if score < 52:
+        return "Score caiu abaixo do corte operacional; saida simulada antes de piorar."
+    return f"Mercado {pick.get('market') or '-'} perdeu edge na simulacao."
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -1739,6 +1780,10 @@ async def run_daily_auto_simulation(
     session["scan_scope"] = scan_scope
     session["trigger"] = "manual" if manual else "daily_auto"
     session["source_games"] = len(games)
+    try:
+        await supabase_sink(context).sync_simulation_session(session)
+    except Exception as exc:
+        logger.info("Simulacao diaria: nao consegui salvar sessao no Supabase: %s", exc)
 
     store.add_simulation_session(session)
     store.mark_auto_simulation_run(today_key)

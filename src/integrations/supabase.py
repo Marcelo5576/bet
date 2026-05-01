@@ -94,6 +94,19 @@ class SupabaseSink:
         rows = [_skill_row(skill) for skill in skills]
         await self._upsert("betsignal_ai_skills", rows, "skill_id", disable_on_missing_table=False)
 
+    async def sync_simulation_session(self, session: dict[str, Any] | None) -> None:
+        if not self.available or not session:
+            return
+        row = _simulation_memory_row(session)
+        await self._upsert("betsignal_ai_memory", [row], "memory_id")
+        await self._upsert(
+            "betsignal_simulations",
+            [_simulation_row(session)],
+            "simulation_id",
+            disable_on_missing_table=False,
+            warn_on_error=False,
+        )
+
     async def fetch_ai_skills(self) -> list[dict[str, Any]]:
         if not self.available:
             return []
@@ -175,6 +188,7 @@ class SupabaseSink:
         rows: list[dict[str, Any]],
         conflict_key: str,
         disable_on_missing_table: bool = True,
+        warn_on_error: bool = True,
     ) -> None:
         if not rows:
             return
@@ -190,9 +204,11 @@ class SupabaseSink:
         except httpx.HTTPStatusError as exc:
             if disable_on_missing_table:
                 self._maybe_disable(exc.response)
-            logger.warning("Falha ao sincronizar Supabase/%s: %s", table, _safe_http_error(exc))
+            if warn_on_error:
+                logger.warning("Falha ao sincronizar Supabase/%s: %s", table, _safe_http_error(exc))
         except Exception as exc:
-            logger.warning("Falha ao sincronizar Supabase/%s: %s", table, exc)
+            if warn_on_error:
+                logger.warning("Falha ao sincronizar Supabase/%s: %s", table, exc)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -306,6 +322,58 @@ def _skill_row(skill: dict[str, Any]) -> dict[str, Any]:
         "payload": skill.get("payload") or {},
         "updated_at": _now(),
     }
+
+
+def _simulation_memory_row(session: dict[str, Any]) -> dict[str, Any]:
+    simulation_id = _simulation_id(session)
+    total_games = int(_as_float(session.get("total_games"), 0) or 0)
+    greens = int(_as_float(session.get("greens"), 0) or 0)
+    reds = int(_as_float(session.get("reds"), 0) or 0)
+    profit_units = round(_as_float(session.get("profit_units"), 0.0) or 0.0, 2)
+    trigger = str(session.get("trigger") or "simulation")
+    scope = str(session.get("scan_scope") or "live")
+    return {
+        "memory_id": f"simulation:{simulation_id}",
+        "scope": "simulation_session",
+        "subject": f"{trigger}:{scope}"[:240],
+        "source": "betsignal_simulator",
+        "sample_size": total_games,
+        "hit_rate": session.get("hit_rate"),
+        "roi_units": session.get("roi"),
+        "profit_units": profit_units,
+        "avg_confidence": session.get("avg_confidence"),
+        "avg_edge": session.get("avg_edge"),
+        "notes": (
+            f"Simulacao {trigger}: {total_games} jogos, {greens} green, "
+            f"{reds} red, lucro {profit_units}u. Inclui entrada, saida e dinamica do jogo."
+        ),
+        "payload": session,
+        "updated_at": _now(),
+    }
+
+
+def _simulation_row(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "simulation_id": _simulation_id(session),
+        "trigger": session.get("trigger") or "simulation",
+        "scan_scope": session.get("scan_scope"),
+        "source_games": session.get("source_games"),
+        "total_games": session.get("total_games"),
+        "greens": session.get("greens"),
+        "reds": session.get("reds"),
+        "hit_rate": session.get("hit_rate"),
+        "profit_units": session.get("profit_units"),
+        "roi": session.get("roi"),
+        "max_drawdown": session.get("max_drawdown"),
+        "payload": session,
+        "created_at": session.get("created_at") or _now(),
+        "updated_at": _now(),
+    }
+
+
+def _simulation_id(session: dict[str, Any]) -> str:
+    raw = session.get("simulation_id") or session.get("created_at") or _now()
+    return str(raw).replace(":", "-")[:240]
 
 
 def _memory_row(scope: str, subject: str, items: list[dict[str, Any]]) -> dict[str, Any]:

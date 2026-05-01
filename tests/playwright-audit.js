@@ -122,6 +122,7 @@ async function main() {
     await page.goto(`${baseURL}/dashboard`, { waitUntil: "networkidle" });
     const dashboardFantasyLink = page.locator("aside .nav-link", { hasText: "Fantasy IA" }).first();
     await assert.equal(await dashboardFantasyLink.getAttribute("href"), "/fantasy-ia");
+    await assert.equal(await page.locator("button", { hasText: "Simular entrada e saida IA" }).first().isVisible(), true);
     await dashboardFantasyLink.click();
     await page.waitForURL(/\/fantasy-ia/, { timeout: 15000 });
     await page.goto(`${baseURL}/fantasy-ia`, { waitUntil: "networkidle" });

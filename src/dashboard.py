@@ -1413,6 +1413,7 @@ def dashboard(request: Request) -> str:
           <div class="sim-lab-actions">
             <button class="ghost" type="button" onclick="runSimulationSession(30)">Rodar 30 jogos</button>
             <button class="ghost" type="button" onclick="runSimulationSession(45)">Rodar 45 jogos</button>
+            <button class="ghost success" type="button" onclick="runSimulationSession(60)">Simular entrada e saida IA</button>
           </div>
         </div>
         <div id="sim-session-panel">{sim_session_panel}</div>
@@ -2342,6 +2343,10 @@ async def api_simulator_session(
     session["trigger"] = "dashboard_manual"
     session["source_games"] = len(live_games)
     session["scan_scope"] = _scan_mode_label(mode)
+    try:
+        await SupabaseSink.from_settings(settings).sync_simulation_session(session)
+    except Exception:
+        pass
     state = store.add_simulation_session(session)
     learning = _learning_context(state)
     return JSONResponse(
@@ -2435,8 +2440,13 @@ async def api_fantasy_room_import(
         {
             "ok": True,
             "room_id": room_id,
+            "status": report.get("status"),
+            "api_status": report.get("api_status"),
+            "players_api_status": report.get("players_api_status"),
+            "api_blocked": bool(report.get("api_blocked")),
             "players_text": imported_text,
             "players_detected": len(imported_players),
+            "players_count": len(imported_players),
             "auto_ready": auto_ready,
             "budget": report.get("budget"),
             "message": report.get("message"),
@@ -3587,6 +3597,8 @@ def _simulate_live_session(
         peak = max(peak, bankroll)
         drawdown = peak - bankroll
         max_drawdown = max(max_drawdown, drawdown)
+        entry_minute = _sim_entry_minute(pick, rng)
+        exit_minute = _sim_exit_minute(entry_minute, won, risk, rng)
 
         rows.append(
             {
@@ -3603,13 +3615,20 @@ def _simulate_live_session(
                 "profit": round(profit, 2),
                 "bankroll": bankroll,
                 "win_prob_pct": round(win_prob * 100.0, 1),
+                "entry_minute": entry_minute,
+                "exit_minute": exit_minute,
+                "exit_action": _sim_exit_action(won, score, risk),
+                "exit_reason": _sim_exit_reason(won, score, risk, pick),
             }
         )
 
     hit_rate = round((greens / max(1, games_target)) * 100.0, 1)
     profit_units = round(bankroll - bankroll_start, 2)
     roi = round((profit_units / max(1.0, total_staked)) * 100.0, 1)
+    created_at = datetime.now(timezone.utc).isoformat()
     return {
+        "simulation_id": hashlib.sha256(f"{created_at}|{seed_material}".encode("utf-8")).hexdigest()[:24],
+        "created_at": created_at,
         "total_games": games_target,
         "greens": greens,
         "reds": reds,
@@ -3622,9 +3641,41 @@ def _simulate_live_session(
         "max_win_streak": max_win_streak,
         "max_loss_streak": max_loss_streak,
         "stake_percent": stake_pct,
+        "avg_confidence": round(sum(_safe_int(item.get("confidence")) for item in ranked) / max(1, len(ranked)), 2),
+        "avg_edge": round(sum(_safe_float(item.get("edge") or item.get("value_edge"), 0.0) for item in ranked) / max(1, len(ranked)), 4),
         "rows": rows,
-        "note": "Simulacao paper/live: usa leitura atual do scanner ao vivo, sem executar aposta real.",
+        "note": "Simulacao paper/live com entrada, acompanhamento e saida dinamica. Usa jogos reais do scanner e nao executa aposta real.",
     }
+
+
+def _sim_entry_minute(pick: dict[str, Any], rng: random.Random) -> int:
+    minute = _safe_int(pick.get("minute")) or 1
+    return max(1, min(89, minute + rng.randint(0, 3)))
+
+
+def _sim_exit_minute(entry_minute: int, won: bool, risk: int, rng: random.Random) -> int:
+    window = rng.randint(6, 18) if won else rng.randint(3, 12)
+    if risk >= 70:
+        window = min(window, rng.randint(3, 7))
+    return max(entry_minute + 1, min(90, entry_minute + window))
+
+
+def _sim_exit_action(won: bool, score: int, risk: int) -> str:
+    if won:
+        return "SAIR COM GREEN" if risk >= 55 else "SEGURAR ATE CONFIRMAR"
+    if risk >= 70 or score < 52:
+        return "SAIR PARA REDUZIR RED"
+    return "SAIR POR PERDA DE EDGE"
+
+
+def _sim_exit_reason(won: bool, score: int, risk: int, pick: dict[str, Any]) -> str:
+    if won:
+        return "Pressao confirmou a leitura; saida simulada apos capturar valor."
+    if risk >= 70:
+        return "Risco subiu durante a dinamica; saida simulada para preservar banca."
+    if score < 52:
+        return "Score caiu abaixo do corte operacional; saida simulada antes de piorar."
+    return f"Mercado {pick.get('market') or '-'} perdeu edge na simulacao."
 
 
 def _synthetic_live_odds(score: int, risk: int, rng: random.Random) -> float:
@@ -3670,7 +3721,7 @@ def _simulation_session_panel(session: dict[str, Any]) -> str:
         "</div>"
         "<div class='sim-lab-table-wrap'>"
         "<table>"
-        "<thead><tr><th>#</th><th>Jogo</th><th>Mercado</th><th>Leitura</th><th>Odd</th><th>Stake</th><th>Resultado</th><th>Lucro</th><th>Banca</th></tr></thead>"
+        "<thead><tr><th>#</th><th>Jogo</th><th>Mercado</th><th>Leitura</th><th>Entrada/Saida</th><th>Odd</th><th>Stake</th><th>Resultado</th><th>Lucro</th><th>Banca</th></tr></thead>"
         f"<tbody>{_sim_result_rows_html(rows)}</tbody>"
         "</table>"
         "</div>"
@@ -3725,6 +3776,7 @@ def _sim_result_rows_html(rows: list[dict[str, Any]]) -> str:
             f"<td>{_esc(row.get('match'))}<br><span class='muted'>{_esc(row.get('minute'))}' | {_esc(row.get('scoreline'))}</span></td>"
             f"<td>{_esc(row.get('market'))}</td>"
             f"<td>{_esc(row.get('selection'))} {_esc(row.get('line'))}<br><span class='muted'>p={_esc(row.get('win_prob_pct'))}%</span></td>"
+            f"<td>{_esc(row.get('entry_minute'))}' -> {_esc(row.get('exit_minute'))}'<br><strong>{_esc(row.get('exit_action') or '-')}</strong><br><span class='muted'>{_esc(row.get('exit_reason') or '')}</span></td>"
             f"<td>{_esc(row.get('odds'))}</td>"
             f"<td>{_esc(_format_brl(row.get('stake')))}</td>"
             f"<td class='{outcome_cls}'>{_esc(outcome)}</td>"
@@ -4055,7 +4107,14 @@ async def _fetch_rei_room_report(room_id: str) -> dict[str, Any]:
             api_url = f"https://eiger.reidopitaco.io/api/rooms/public/deeplink_info?roomId={room_id}"
             api_response = await client.get(api_url, headers={**headers, "accept": "application/json,text/plain,*/*"})
             report["api_status"] = api_response.status_code
-            if api_response.headers.get("content-type", "").startswith("application/json"):
+            if api_response.status_code in {401, 403}:
+                report["api_blocked"] = True
+                report["status"] = "protected"
+                report["message"] = (
+                    "O Rei do Pitaco bloqueou o pool público desta sala. Para montar dentro da sala, "
+                    "é preciso uma sessão logada/autorizada; sem isso, o servidor não recebe os nomes dos jogadores."
+                )
+            elif api_response.headers.get("content-type", "").startswith("application/json"):
                 data = api_response.json()
                 if isinstance(data, dict):
                     report["api_payload"] = data
@@ -4094,8 +4153,6 @@ async def _fetch_rei_room_report(room_id: str) -> dict[str, Any]:
                             matches_payload = matches_response.json()
                             if isinstance(matches_payload, list):
                                 report["matches"] = matches_payload
-            elif api_response.status_code in {401, 403}:
-                report["api_blocked"] = True
     except Exception as exc:
         report["status"] = "error"
         report["message"] = f"Falha ao consultar a sala: {type(exc).__name__}."

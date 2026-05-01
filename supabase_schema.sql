@@ -89,3 +89,26 @@ create table if not exists public.betsignal_ai_skills (
 
 create index if not exists betsignal_ai_skills_active_priority_idx
   on public.betsignal_ai_skills(active, priority);
+
+create table if not exists public.betsignal_simulations (
+  simulation_id text primary key,
+  trigger text not null,
+  scan_scope text,
+  source_games integer,
+  total_games integer not null default 0,
+  greens integer not null default 0,
+  reds integer not null default 0,
+  hit_rate numeric,
+  profit_units numeric,
+  roi numeric,
+  max_drawdown numeric,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists betsignal_simulations_created_at_idx
+  on public.betsignal_simulations(created_at desc);
+
+create index if not exists betsignal_simulations_trigger_idx
+  on public.betsignal_simulations(trigger);
