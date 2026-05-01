@@ -1264,6 +1264,10 @@ Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
         <div id='fantasy-lineup' class='fantasy-list'><div class='muted'>Clique em montar para gerar a escalação.</div></div>
       </div>
       <div class='section card'>
+        <h3 class='title'>Time para finalizar no Rei do Pitaco</h3>
+        <div id='fantasy-pitaco-transfer' class='fantasy-list'><div class='muted'>Cole a URL da sala e clique em ler sala para gerar a lista de atletas.</div></div>
+      </div>
+      <div class='section card'>
         <h3 class='title'>Leitura da IA</h3>
         <ul id='fantasy-tips' class='muted'><li>A IA prioriza valor por preço, projeção e risco.</li></ul>
       </div>
@@ -1303,6 +1307,52 @@ function pitacoPlayersToDescription(playersText, roomUrl) {
     return `${parts[0]}, ${parts[1]}, ${parts[2] || '-'}, preço ${parts[3] || 0}, proj ${parts[4] || 0}, risco 35`;
   }).join('\\n')}`;
 }
+function pitacoRoomId(value) {
+  const text = String(value || '');
+  const direct = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (direct) return direct[0];
+  try {
+    const parsed = new URL(text);
+    return parsed.searchParams.get('roomId') || parsed.searchParams.get('roomid') || '';
+  } catch (error) {
+    return '';
+  }
+}
+function renderPitacoTransfer(players, roomUrl) {
+  const target = document.getElementById('fantasy-pitaco-transfer');
+  if (!target) return;
+  if (!players || !players.length) {
+    target.innerHTML = '<div class="muted">Nenhum atleta real da sala foi lido ainda.</div>';
+    return;
+  }
+  const ordered = players.map((player, index) => {
+    const pos = escapeHtml(player.pos || player.position || '-');
+    const name = escapeHtml(player.name || '-');
+    const team = escapeHtml(player.team || '-');
+    return `<div class="fantasy-player">
+      <div class="pos-pill">${pos}</div>
+      <div><div class="player-name">${index + 1}. ${name}</div><div class="player-meta">${team}</div></div>
+      <div class="score-box"><strong>${Number(player.proj || player.projection || 0).toFixed(1)}</strong><div class="player-meta">proj</div></div>
+    </div>`;
+  }).join('');
+  const copyText = players.map(player => `${player.pos || player.position || '-'} - ${player.name || '-'} (${player.team || '-'})`).join('\\n');
+  target.dataset.copyText = copyText;
+  target.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap">
+    <button class="btn primary" type="button" onclick="copyChampionTeam()">Copiar time campeão</button>
+    ${roomUrl ? `<a class="btn" href="${escapeHtml(roomUrl)}" target="_blank" rel="noopener">Abrir sala para finalizar</a>` : ''}
+  </div>${ordered}`;
+}
+async function copyChampionTeam() {
+  const target = document.getElementById('fantasy-pitaco-transfer');
+  const text = target?.dataset.copyText || '';
+  const note = document.getElementById('fantasy-note');
+  if (!text) {
+    if (note) note.textContent = 'Monte o time primeiro para copiar.';
+    return;
+  }
+  await navigator.clipboard.writeText(text);
+  if (note) note.textContent = 'Time copiado. Abra a sala e confira os atletas antes de finalizar.';
+}
 async function buildFantasyLineup() {
   const note = document.getElementById('fantasy-note');
   const lineup = document.getElementById('fantasy-lineup');
@@ -1323,6 +1373,7 @@ async function buildFantasyLineup() {
     document.getElementById('fantasy-projection').textContent = Number(data.projection).toFixed(1);
     document.getElementById('fantasy-cost').textContent = `${Number(data.total_price).toFixed(1)} / ${Number(data.budget).toFixed(1)}`;
     lineup.innerHTML = data.lineup.map(fantasyPlayerRow).join('');
+    renderPitacoTransfer([], '');
     document.getElementById('fantasy-tips').innerHTML = data.tips.map(t => `<li>${escapeHtml(t)}</li>`).join('');
     note.textContent = data.note;
   } catch (error) {
@@ -1335,6 +1386,10 @@ async function importFantasyRoomLineup() {
   const roomUrl = document.getElementById('fantasy-room-url').value.trim();
   if (!roomUrl) {
     note.textContent = 'Cole a URL da sala do Rei do Pitaco.';
+    return;
+  }
+  if (!pitacoRoomId(roomUrl)) {
+    note.textContent = 'Essa URL é a vitrine do Fantasy. Abra uma sala específica no Rei do Pitaco e cole a URL com roomId.';
     return;
   }
   note.textContent = 'Lendo sala e montando time...';
@@ -1364,6 +1419,7 @@ async function importFantasyRoomLineup() {
       document.getElementById('fantasy-projection').textContent = Number(data.lineup.projected_points || 0).toFixed(1);
       document.getElementById('fantasy-cost').textContent = `${Number(data.lineup.used_budget || 0).toFixed(1)} / ${Number(data.lineup.budget || 0).toFixed(1)}`;
       lineup.innerHTML = data.lineup.players.map(fantasyImportedPlayerRow).join('');
+      renderPitacoTransfer(data.lineup.players, roomUrl);
       document.getElementById('fantasy-tips').innerHTML = '<li>Time montado com o pool real retornado pela sala.</li><li>Confira titulares e fechamento da rodada antes de finalizar.</li>';
       note.textContent = data.lineup_message || 'Time montado no site. Agora você só decide se vai jogar.';
       return;
@@ -1374,6 +1430,7 @@ async function importFantasyRoomLineup() {
       return;
     }
     note.textContent = data.message || 'A sala abriu, mas não liberou o pool público. Abra logado e cole a grade de jogadores no campo.';
+    renderPitacoTransfer([], roomUrl);
     lineup.innerHTML = data.html || '<div class="muted">Pool não disponível publicamente.</div>';
   } catch (error) {
     note.textContent = error.message;

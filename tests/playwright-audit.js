@@ -127,7 +127,13 @@ async function main() {
     await page.goto(`${baseURL}/fantasy-ia`, { waitUntil: "networkidle" });
     await assert.equal(await page.locator("#fantasy-room-url").isVisible(), true);
     await assert.equal(await page.locator("button", { hasText: "Ler sala e montar time" }).isVisible(), true);
+    await assert.equal(await page.locator("text=Time para finalizar no Rei do Pitaco").isVisible(), true);
+    await page.locator("#fantasy-room-url").fill("https://fantasy.reidopitaco.com.br/fantasy?tab=dfs");
+    await page.locator("button", { hasText: "Ler sala e montar time" }).click();
+    await assert.match(await page.locator("#fantasy-note").innerText(), /vitrine|roomId/i);
+    await page.locator("button", { hasText: "Montar melhor time" }).click();
     await page.waitForFunction(() => document.querySelectorAll(".fantasy-player").length >= 11, { timeout: 15000 });
+    await page.waitForFunction(() => /pool|perfis|Usei/i.test(document.querySelector("#fantasy-note")?.innerText || ""), { timeout: 15000 });
     await assert.equal(await page.locator(".fantasy-player").count(), 11);
     await assert.match(await page.locator("#fantasy-note").innerText(), /pool|perfis|Usei/i);
     const costText = await page.locator("#fantasy-cost").innerText();
