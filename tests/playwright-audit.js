@@ -155,6 +155,40 @@ async function main() {
     await page.close();
   });
 
+  await run("authenticated client bankroll control", async () => {
+    if (!adminEmail || !adminPassword) {
+      console.log("skip - ADMIN_EMAIL/ADMIN_PASSWORD not set");
+      return;
+    }
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(`${baseURL}/login`, { waitUntil: "networkidle" });
+    await page.locator("input[name='email']").fill(adminEmail);
+    await page.locator("input[name='password']").fill(adminPassword);
+    await page.locator("button[type='submit']").click();
+    await page.waitForURL(/\/app/, { timeout: 15000 });
+    await page.goto(`${baseURL}/dashboard`, { waitUntil: "networkidle" });
+    await page.locator("#account-toggle").click();
+    await assert.equal(await page.locator("#account-panel.open").isVisible(), true);
+    await page.locator("#bankroll-initial").fill("1000");
+    await page.locator("#bankroll-balance").fill("1000");
+    await page.locator("#bankroll-stake-percent").fill("5");
+    await page.locator("button", { hasText: "Salvar banca" }).click();
+    await page.waitForFunction(() => /Banca salva/i.test(document.querySelector("#bankroll-note")?.innerText || ""), { timeout: 15000 });
+    await page.locator("#bankroll-game").fill("Teste Playwright x Banco");
+    await page.locator("#bankroll-market").fill("Over 1.5 teste");
+    await page.locator("#bankroll-odds").fill("2");
+    await page.locator("#bankroll-amount").fill("50");
+    await page.locator("button", { hasText: "Registrar entrada e monitorar" }).click();
+    await page.waitForFunction(() => /Entrada em monitoramento/i.test(document.querySelector("#bankroll-note")?.innerText || ""), { timeout: 15000 });
+    await assert.match(await page.locator("#bankroll-balance-label").innerText(), /950,00/);
+    page.once("dialog", dialog => dialog.accept());
+    await page.locator("#bankroll-entry-rows tr").first().locator("button", { hasText: "Green" }).click();
+    await page.waitForFunction(() => /Resultado salvo/i.test(document.querySelector("#bankroll-note")?.innerText || ""), { timeout: 15000 });
+    await assert.match(await page.locator("#bankroll-balance-label").innerText(), /1\.050,00/);
+    await checkNoHorizontalOverflow(page, "bankroll");
+    await page.close();
+  });
+
   await browser.close();
 
   if (failures.length) {

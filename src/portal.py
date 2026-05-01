@@ -20,6 +20,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _money_or(value: Any, default: float = 0.0) -> float:
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return round(float(default), 2)
+
+
 def _hash_password(password: str) -> str:
     iterations = 200_000
     salt = os.urandom(16)
@@ -149,6 +156,14 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "keywords": ["banca", "unidade", "unidades", "stake", "exposicao", "exposição", "gestao", "gestão"],
         "answer": "Separe uma banca fixa e opere por unidades. Evite stake alta em um único jogo.",
         "priority": 70,
+    },
+    {
+        "skill_id": "client_bankroll_panel",
+        "title": "Banca do cliente",
+        "intent": "Explicar controle de banca, entrada e saída monitorada pela IA.",
+        "keywords": ["saldo", "banca", "depositar", "entrada", "monitorar", "saida", "saída", "deduzir"],
+        "answer": "Na conta, informe banca e entrada. A IA monitora; Green credita retorno, Red mantém débito.",
+        "priority": 71,
     },
     {
         "skill_id": "risk_no_chasing",
@@ -354,6 +369,30 @@ class PortalStore:
                   payload_json text not null default '{}',
                   updated_at text not null
                 );
+                create table if not exists bankroll_accounts (
+                  user_id integer primary key,
+                  initial_bankroll_brl real not null default 0,
+                  balance_brl real not null default 0,
+                  default_stake_percent real not null default 2,
+                  updated_at text not null,
+                  foreign key(user_id) references users(id) on delete cascade
+                );
+                create table if not exists bankroll_entries (
+                  id integer primary key autoincrement,
+                  user_id integer not null,
+                  signal_id text,
+                  game_label text not null,
+                  market text not null,
+                  amount_brl real not null,
+                  odds real,
+                  status text not null default 'open',
+                  profit_brl real not null default 0,
+                  ai_notes text,
+                  opened_at text not null,
+                  closed_at text,
+                  updated_at text not null,
+                  foreign key(user_id) references users(id) on delete cascade
+                );
                 """
             )
             self._ensure_column(conn, "users", "is_admin", "integer not null default 0")
@@ -363,6 +402,7 @@ class PortalStore:
             self._ensure_column(conn, "users", "gateway", "text")
             self._ensure_column(conn, "users", "gateway_subscription_id", "text")
             self._ensure_column(conn, "user_preferences", "scan_enabled", "integer not null default 1")
+            self._ensure_column(conn, "bankroll_accounts", "default_stake_percent", "real not null default 2")
 
     def seed_ai_skills(self, skills: list[dict[str, Any]]) -> None:
         now = _now_iso()
@@ -439,6 +479,182 @@ class PortalStore:
         if column in current:
             return
         conn.execute(f"alter table {table} add column {column} {ddl_type}")
+
+    def get_bankroll_account(self, user_id: int) -> dict[str, Any]:
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into bankroll_accounts (user_id, initial_bankroll_brl, balance_brl, default_stake_percent, updated_at)
+                values (?, 0, 0, 2, ?)
+                on conflict(user_id) do nothing
+                """,
+                (int(user_id), now),
+            )
+            row = conn.execute(
+                "select * from bankroll_accounts where user_id = ?",
+                (int(user_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else {
+            "user_id": int(user_id),
+            "initial_bankroll_brl": 0.0,
+            "balance_brl": 0.0,
+            "default_stake_percent": 2.0,
+            "updated_at": now,
+        }
+
+    def update_bankroll_account(
+        self,
+        user_id: int,
+        initial_bankroll_brl: float | None = None,
+        balance_brl: float | None = None,
+        default_stake_percent: float | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_bankroll_account(user_id)
+        initial = _money_or(current.get("initial_bankroll_brl"), 0.0)
+        balance = _money_or(current.get("balance_brl"), 0.0)
+        stake_percent = _money_or(current.get("default_stake_percent"), 2.0)
+        if initial_bankroll_brl is not None:
+            initial = max(0.0, round(float(initial_bankroll_brl), 2))
+        if balance_brl is not None:
+            balance = max(0.0, round(float(balance_brl), 2))
+        if default_stake_percent is not None:
+            stake_percent = max(0.1, min(100.0, round(float(default_stake_percent), 2)))
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update bankroll_accounts
+                   set initial_bankroll_brl = ?,
+                       balance_brl = ?,
+                       default_stake_percent = ?,
+                       updated_at = ?
+                 where user_id = ?
+                """,
+                (initial, balance, stake_percent, now, int(user_id)),
+            )
+        return self.get_bankroll_account(user_id)
+
+    def list_bankroll_entries(self, user_id: int, limit: int = 80) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from bankroll_entries
+                 where user_id = ?
+                 order by case status when 'open' then 0 else 1 end, opened_at desc, id desc
+                 limit ?
+                """,
+                (int(user_id), max(1, min(200, int(limit)))),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def open_bankroll_entry(
+        self,
+        user_id: int,
+        game_label: str,
+        market: str,
+        amount_brl: float,
+        odds: float | None = None,
+        signal_id: str | None = None,
+        ai_notes: str | None = None,
+    ) -> dict[str, Any]:
+        amount = round(float(amount_brl), 2)
+        if amount <= 0:
+            raise ValueError("Valor de entrada invalido.")
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into bankroll_accounts (user_id, initial_bankroll_brl, balance_brl, default_stake_percent, updated_at)
+                values (?, 0, 0, 2, ?)
+                on conflict(user_id) do nothing
+                """,
+                (int(user_id), now),
+            )
+            account = conn.execute(
+                "select * from bankroll_accounts where user_id = ?",
+                (int(user_id),),
+            ).fetchone()
+            balance = _money_or(account["balance_brl"] if account else 0, 0.0)
+            if amount > balance:
+                raise ValueError("Saldo insuficiente para registrar essa entrada.")
+            new_balance = round(balance - amount, 2)
+            cursor = conn.execute(
+                """
+                insert into bankroll_entries (
+                    user_id, signal_id, game_label, market, amount_brl, odds, status,
+                    profit_brl, ai_notes, opened_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, 'open', 0, ?, ?, ?)
+                """,
+                (
+                    int(user_id),
+                    str(signal_id or "").strip() or None,
+                    str(game_label or "Jogo selecionado").strip()[:220],
+                    str(market or "Entrada manual").strip()[:180],
+                    amount,
+                    float(odds) if odds is not None else None,
+                    str(ai_notes or "").strip()[:500] or None,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "update bankroll_accounts set balance_brl = ?, updated_at = ? where user_id = ?",
+                (new_balance, now, int(user_id)),
+            )
+            row = conn.execute(
+                "select * from bankroll_entries where id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else {}
+
+    def close_bankroll_entry(self, user_id: int, entry_id: int, outcome: str) -> dict[str, Any]:
+        clean = str(outcome or "").strip().lower()
+        if clean not in {"win", "loss", "void"}:
+            raise ValueError("Resultado invalido.")
+        now = _now_iso()
+        with self._connect() as conn:
+            entry = conn.execute(
+                "select * from bankroll_entries where id = ? and user_id = ?",
+                (int(entry_id), int(user_id)),
+            ).fetchone()
+            if not entry:
+                raise ValueError("Entrada nao encontrada.")
+            if str(entry["status"]) != "open":
+                raise ValueError("Entrada ja foi fechada.")
+            account = conn.execute(
+                "select * from bankroll_accounts where user_id = ?",
+                (int(user_id),),
+            ).fetchone()
+            balance = _money_or(account["balance_brl"] if account else 0, 0.0)
+            amount = _money_or(entry["amount_brl"], 0.0)
+            odds = _money_or(entry["odds"], 0.0)
+            credit = 0.0
+            profit = -amount
+            if clean == "win":
+                credit = round(amount * max(1.0, odds or 1.0), 2)
+                profit = round(credit - amount, 2)
+            elif clean == "void":
+                credit = amount
+                profit = 0.0
+            new_balance = round(balance + credit, 2)
+            conn.execute(
+                """
+                update bankroll_entries
+                   set status = ?, profit_brl = ?, closed_at = ?, updated_at = ?
+                 where id = ? and user_id = ?
+                """,
+                (clean, profit, now, now, int(entry_id), int(user_id)),
+            )
+            conn.execute(
+                "update bankroll_accounts set balance_brl = ?, updated_at = ? where user_id = ?",
+                (new_balance, now, int(user_id)),
+            )
+            row = conn.execute(
+                "select * from bankroll_entries where id = ?",
+                (int(entry_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else {}
 
     def create_user(
         self,

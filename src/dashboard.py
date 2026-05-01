@@ -69,6 +69,26 @@ class HistoryOutcomePayload(BaseModel):
     outcome: str
 
 
+class BankrollSettingsPayload(BaseModel):
+    initial_bankroll: float | None = None
+    balance: float | None = None
+    default_stake_percent: float | None = None
+
+
+class BankrollEntryPayload(BaseModel):
+    signal_id: str | None = None
+    game_label: str
+    market: str
+    amount: float
+    odds: float | None = None
+    ai_notes: str | None = None
+
+
+class BankrollClosePayload(BaseModel):
+    entry_id: int
+    outcome: str
+
+
 class ScannerPreferencePayload(BaseModel):
     mode: str
 
@@ -157,6 +177,22 @@ def _valid_portal_session(request: Request, settings) -> bool:
     return bool(user)
 
 
+def _current_dashboard_user(request: Request, settings) -> dict[str, Any] | None:
+    token = request.cookies.get(SESSION_COOKIE)
+    user_id = read_session_token(token, settings.portal_session_secret)
+    store = PortalStore(settings.portal_db_file)
+    if user_id:
+        user = store.get_user(int(user_id))
+        if user:
+            return user
+    if _valid_basic_header(request, settings):
+        user = store.find_user_by_email(settings.admin_email)
+        if user:
+            return user
+        return store.ensure_admin(settings.admin_email, settings.admin_name, settings.admin_password)
+    return None
+
+
 def _valid_basic_header(request: Request, settings) -> bool:
     header = str(request.headers.get("authorization") or "").strip()
     if not header.lower().startswith("basic "):
@@ -193,6 +229,7 @@ def dashboard(request: Request) -> str:
     settings = load_settings()
     if not _can_open_dashboard(request, settings):
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    user = _current_dashboard_user(request, settings)
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     history = state.history or []
     live_games = _live_games_only(state.last_games or [])
@@ -245,6 +282,7 @@ def dashboard(request: Request) -> str:
     leadership_rows = _leadership_rows(live_games)
     market_tape = _market_tape(live_games)
     league_radar = _league_radar_panel(live_games)
+    account_panel = _account_bankroll_panel(settings, user, state)
     domains = _domains(settings.dashboard_domains)
     support = _esc(settings.support_note)
     product_name = _esc(settings.product_name)
@@ -490,6 +528,61 @@ def dashboard(request: Request) -> str:
     .card .muted {{ line-height: 1.35; }}
     .chip {{ border: 1px solid var(--line); border-radius: 4px; display: inline-flex; padding: 7px 10px; color: #111; background: var(--amber); font-size: 12px; font-weight: 800; gap: 6px; }}
     .chip.build-chip {{ background: var(--panel-2); color: var(--muted); }}
+    .account-toggle {{
+      align-items: center;
+      background: #0ecb81;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 999px;
+      color: #07130e;
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 900;
+      gap: 8px;
+      min-height: 34px;
+      margin-top: 0;
+      padding: 8px 12px;
+      white-space: nowrap;
+    }}
+    .account-toggle::before {{
+      background: #07130e;
+      border-radius: 999px;
+      content: "";
+      display: inline-block;
+      height: 8px;
+      width: 8px;
+    }}
+    .account-panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow-soft);
+      display: none;
+      margin-left: auto;
+      max-width: 980px;
+      padding: 14px;
+      position: absolute;
+      right: 18px;
+      top: 74px;
+      width: min(980px, calc(100vw - 28px));
+      z-index: 38;
+    }}
+    .account-panel.open {{ display: block; }}
+    .account-panel-head {{ align-items: center; display: flex; gap: 12px; justify-content: space-between; margin-bottom: 12px; }}
+    .account-user {{ display: grid; gap: 2px; min-width: 0; }}
+    .account-user strong {{ font-size: 18px; overflow-wrap: anywhere; }}
+    .bankroll-grid {{ display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 12px; }}
+    .bankroll-form {{ display: grid; gap: 10px; grid-template-columns: repeat(5, minmax(0, 1fr)); }}
+    .bankroll-form .wide {{ grid-column: span 2; }}
+    .bankroll-actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .bankroll-table-wrap {{ margin-top: 12px; max-height: 270px; overflow: auto; }}
+    .bankroll-table td:nth-child(4), .bankroll-table td:nth-child(5), .bankroll-table td:nth-child(7) {{
+      text-align: right;
+      white-space: nowrap;
+    }}
+    .bankroll-status {{ border-radius: 999px; display: inline-flex; font-size: 11px; font-weight: 900; padding: 4px 7px; text-transform: uppercase; }}
+    .bankroll-status.open {{ background: rgba(252,213,53,.12); color: var(--amber); }}
+    .bankroll-status.win {{ background: rgba(14,203,129,.12); color: var(--green); }}
+    .bankroll-status.loss {{ background: rgba(246,70,93,.12); color: var(--red); }}
+    .bankroll-status.void {{ background: rgba(132,142,156,.15); color: var(--muted); }}
     .status-dot {{ width: 8px; height: 8px; border-radius: 999px; background: var(--green); margin-top: 4px; }}
     .status-dot.amber {{ background: var(--amber); }}
     .status-dot.red {{ background: var(--red); }}
@@ -1312,6 +1405,9 @@ def dashboard(request: Request) -> str:
       }}
       .ticker {{ padding: 8px 12px; }}
       .topbar {{ align-items: flex-start; flex-direction: column; gap: 10px; }}
+      .account-panel {{ left: 12px; right: 12px; top: 126px; width: auto; }}
+      .bankroll-grid, .bankroll-form {{ grid-template-columns: 1fr; }}
+      .bankroll-form .wide {{ grid-column: auto; }}
       .mobile-nav {{ top: 116px; padding-inline: 12px; }}
       table.responsive td {{ grid-template-columns: 78px minmax(0, 1fr); }}
       textarea {{ min-height: 132px; }}
@@ -1335,6 +1431,7 @@ def dashboard(request: Request) -> str:
       <div class="topbar-actions">
         <div class="chip build-chip">Build {build_stamp}</div>
         <button class="theme-toggle" id="theme-toggle" type="button" onclick="toggleTheme()" aria-pressed="false">Tema claro</button>
+        <button class="account-toggle" id="account-toggle" type="button" onclick="toggleAccountPanel()" aria-expanded="false">{_esc((user or {}).get("name") or "Conta")}</button>
         <div class="chip"><span class="status-dot"></span> Sistema online</div>
       </div>
     </div>
@@ -1347,12 +1444,14 @@ def dashboard(request: Request) -> str:
       <div>IA <span>{stats["readiness"]}</span></div>
     </div>
   </header>
+  {account_panel}
   <nav class="mobile-nav">
     <a class="nav-link" href="#scanner">Scanner</a>
     <a class="nav-link" href="#mercado">Mercado</a>
     <a class="nav-link" href="#simulador">Ao vivo</a>
     <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
     <a class="nav-link" href="#entradas">Entradas</a>
+    <a class="nav-link" href="#conta-banca">Banca</a>
     <a class="nav-link" href="#importar">Resultados</a>
     <a class="nav-link" href="#historico">Historico</a>
     <a class="nav-link" href="#comercial">Comercial</a>
@@ -1367,6 +1466,7 @@ def dashboard(request: Request) -> str:
     <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
     <a class="nav-link" href="#ativo">Jogo ativo</a>
     <a class="nav-link" href="#entradas">Entradas</a>
+    <a class="nav-link" href="#conta-banca">Banca do cliente</a>
     <a class="nav-link" href="#importar">Importar resultados</a>
     <a class="nav-link" href="#historico">Historico</a>
     <a class="nav-link" href="#comercial">Comercial</a>
@@ -1618,6 +1718,143 @@ def dashboard(request: Request) -> str:
     applyTheme(current === 'light' ? 'dark' : 'light');
   }}
 
+  function toggleAccountPanel(force) {{
+    const panel = document.getElementById('account-panel');
+    const button = document.getElementById('account-toggle');
+    if (!panel) return;
+    const shouldOpen = typeof force === 'boolean' ? force : !panel.classList.contains('open');
+    panel.classList.toggle('open', shouldOpen);
+    if (button) button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+  }}
+
+  function formatBRL(value) {{
+    const number = Number(value || 0);
+    return number.toLocaleString('pt-BR', {{style: 'currency', currency: 'BRL'}});
+  }}
+
+  function updateBankrollUI(account, rowsHtml, suggestedStake) {{
+    if (!account) return;
+    const initial = document.getElementById('bankroll-initial-label');
+    const balance = document.getElementById('bankroll-balance-label');
+    const stake = document.getElementById('bankroll-stake-label');
+    const initialInput = document.getElementById('bankroll-initial');
+    const balanceInput = document.getElementById('bankroll-balance');
+    const stakeInput = document.getElementById('bankroll-stake-percent');
+    const amountInput = document.getElementById('bankroll-amount');
+    const rows = document.getElementById('bankroll-entry-rows');
+    const openLabel = document.getElementById('bankroll-open-label');
+    if (initial) initial.textContent = formatBRL(account.initial_bankroll_brl);
+    if (balance) balance.textContent = formatBRL(account.balance_brl);
+    if (stake) stake.textContent = formatBRL(suggestedStake);
+    if (initialInput) initialInput.value = account.initial_bankroll_brl ?? 0;
+    if (balanceInput) balanceInput.value = account.balance_brl ?? 0;
+    if (stakeInput) stakeInput.value = account.default_stake_percent ?? 2;
+    if (amountInput && Number(suggestedStake || 0) > 0) amountInput.value = suggestedStake;
+    if (rows && rowsHtml) rows.innerHTML = rowsHtml;
+    if (openLabel && rows) openLabel.textContent = String(rows.querySelectorAll('.bankroll-status.open').length);
+  }}
+
+  function setBankrollNote(message, isError = false) {{
+    const note = document.getElementById('bankroll-note');
+    if (!note) return;
+    note.textContent = message;
+    note.classList.toggle('red', Boolean(isError));
+  }}
+
+  async function saveBankrollSettings() {{
+    const initial = parseMoneyInput(document.getElementById('bankroll-initial')?.value || '');
+    const balance = parseMoneyInput(document.getElementById('bankroll-balance')?.value || '');
+    const stakePercent = parseMoneyInput(document.getElementById('bankroll-stake-percent')?.value || '');
+    setBankrollNote('Salvando banca...');
+    try {{
+      const response = await fetch('/api/bankroll/settings', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          initial_bankroll: initial,
+          balance,
+          default_stake_percent: stakePercent
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao salvar banca');
+      updateBankrollUI(data.account, null, data.suggested_stake);
+      setBankrollNote('Banca salva. A IA ja usa esse saldo como referencia.');
+    }} catch (error) {{
+      setBankrollNote(error.message, true);
+    }}
+  }}
+
+  function fillBankrollFromSignal(signal) {{
+    if (!signal) return;
+    const fields = {{
+      'bankroll-signal-id': signal.signal_id || '',
+      'bankroll-game': signal.game_label || '',
+      'bankroll-market': signal.market || '',
+      'bankroll-odds': signal.odds || '',
+      'bankroll-ai-notes': signal.ai_notes || ''
+    }};
+    Object.entries(fields).forEach(([id, value]) => {{
+      const input = document.getElementById(id);
+      if (input) input.value = value;
+    }});
+    setBankrollNote('Jogo carregado para conferencia da entrada.');
+    toggleAccountPanel(true);
+  }}
+
+  function fillBankrollFromActive() {{
+    toggleAccountPanel(true);
+    setBankrollNote('Use os campos abaixo para conferir valor, odd e regra de saida.');
+  }}
+
+  async function openBankrollEntry() {{
+    const payload = {{
+      signal_id: document.getElementById('bankroll-signal-id')?.value || null,
+      game_label: document.getElementById('bankroll-game')?.value || '',
+      market: document.getElementById('bankroll-market')?.value || '',
+      amount: parseMoneyInput(document.getElementById('bankroll-amount')?.value || ''),
+      odds: parseMoneyInput(document.getElementById('bankroll-odds')?.value || ''),
+      ai_notes: document.getElementById('bankroll-ai-notes')?.value || ''
+    }};
+    if (!payload.game_label || !payload.market || !payload.amount) {{
+      setBankrollNote('Informe jogo, mercado e valor da entrada.', true);
+      return;
+    }}
+    setBankrollNote('Registrando entrada e deduzindo da banca...');
+    try {{
+      const response = await fetch('/api/bankroll/entry', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(payload)
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao registrar entrada');
+      updateBankrollUI(data.account, data.rows_html, data.suggested_stake);
+      setBankrollNote('Entrada em monitoramento. Feche como Green, Red ou Anular quando a IA indicar saida.');
+    }} catch (error) {{
+      setBankrollNote(error.message, true);
+    }}
+  }}
+
+  async function closeBankrollEntry(entryId, outcome) {{
+    const label = outcome === 'win' ? 'Green' : outcome === 'loss' ? 'Red' : 'Anular';
+    if (!confirm(`Fechar esta entrada como ${{label}}?`)) return;
+    setBankrollNote('Atualizando banca...');
+    try {{
+      const response = await fetch('/api/bankroll/close', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{entry_id: Number(entryId), outcome}})
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao fechar entrada');
+      updateBankrollUI(data.account, data.rows_html, data.suggested_stake);
+      setBankrollNote('Resultado salvo. Saldo e aprendizado operacional atualizados.');
+    }} catch (error) {{
+      setBankrollNote(error.message, true);
+    }}
+  }}
+
   function initTheme() {{
     let preferred = 'dark';
     try {{
@@ -1661,6 +1898,14 @@ def dashboard(request: Request) -> str:
     if (shell.contains(event.target)) return;
     shell.classList.remove('open');
     if (button) button.setAttribute('aria-expanded', 'false');
+  }});
+
+  document.addEventListener('click', (event) => {{
+    const panel = document.getElementById('account-panel');
+    const button = document.getElementById('account-toggle');
+    if (!panel || !panel.classList.contains('open')) return;
+    if (panel.contains(event.target) || button?.contains(event.target)) return;
+    toggleAccountPanel(false);
   }});
 
   document.addEventListener('keydown', (event) => {{
@@ -2047,7 +2292,8 @@ def dashboard(request: Request) -> str:
   window.setInterval(() => {{
     const active = document.activeElement;
     const typing = active && ['TEXTAREA', 'INPUT'].includes(active.tagName);
-    if (!typing) window.location.reload();
+    const accountOpen = document.getElementById('account-panel')?.classList.contains('open');
+    if (!typing && !accountOpen) window.location.reload();
   }}, 5 * 60 * 1000);
 
   async function selectScannedGame(gameId) {{
@@ -2067,6 +2313,7 @@ def dashboard(request: Request) -> str:
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Falha ao carregar jogo');
       panel.innerHTML = data.html;
+      if (data.signal) fillBankrollFromSignal(data.signal);
       if (showLoading) panel.scrollTo({{top: 0, behavior: 'smooth'}});
     }} catch (error) {{
       panel.innerHTML = `<p class="muted">${{error.message}}</p>`;
@@ -2517,7 +2764,125 @@ def api_match_stats(game_id: str, _: None = Depends(_auth)) -> JSONResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Jogo nao encontrado nos escaneados.",
         )
-    return JSONResponse({"html": _match_stats_panel(selected, history)})
+    game = selected.get("game") or {}
+    match = f"{game.get('home', '')} x {game.get('away', '')}".strip(" x")
+    return JSONResponse(
+        {
+            "html": _match_stats_panel(selected, history),
+            "signal": {
+                "signal_id": selected.get("signal_id"),
+                "game_label": match,
+                "market": _entry_text_for_bankroll(selected),
+                "odds": selected.get("entry_odds") or selected.get("target_odds") or selected.get("odds"),
+                "ai_notes": selected.get("reason") or selected.get("action") or "",
+            },
+        }
+    )
+
+
+@app.get("/api/bankroll")
+def api_bankroll(request: Request, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    user = _current_dashboard_user(request, settings)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
+    store = PortalStore(settings.portal_db_file)
+    account = store.get_bankroll_account(int(user["id"]))
+    entries = store.list_bankroll_entries(int(user["id"]), limit=80)
+    return JSONResponse(
+        {
+            "ok": True,
+            "account": account,
+            "entries": entries,
+            "rows_html": "".join(_bankroll_entry_row(entry) for entry in entries)
+            or "<tr><td colspan='8'>Nenhuma entrada registrada na banca do cliente.</td></tr>",
+            "suggested_stake": _suggested_stake(account),
+        }
+    )
+
+
+@app.post("/api/bankroll/settings")
+def api_bankroll_settings(
+    payload: BankrollSettingsPayload,
+    request: Request,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    settings = load_settings()
+    user = _current_dashboard_user(request, settings)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
+    store = PortalStore(settings.portal_db_file)
+    account = store.update_bankroll_account(
+        int(user["id"]),
+        initial_bankroll_brl=payload.initial_bankroll,
+        balance_brl=payload.balance,
+        default_stake_percent=payload.default_stake_percent,
+    )
+    return JSONResponse({"ok": True, "account": account, "suggested_stake": _suggested_stake(account)})
+
+
+@app.post("/api/bankroll/entry")
+def api_bankroll_entry(
+    payload: BankrollEntryPayload,
+    request: Request,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    settings = load_settings()
+    user = _current_dashboard_user(request, settings)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
+    try:
+        store = PortalStore(settings.portal_db_file)
+        entry = store.open_bankroll_entry(
+            int(user["id"]),
+            game_label=payload.game_label,
+            market=payload.market,
+            amount_brl=payload.amount,
+            odds=payload.odds,
+            signal_id=payload.signal_id,
+            ai_notes=payload.ai_notes,
+        )
+        account = store.get_bankroll_account(int(user["id"]))
+        entries = store.list_bankroll_entries(int(user["id"]), limit=80)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "ok": True,
+            "entry": entry,
+            "account": account,
+            "suggested_stake": _suggested_stake(account),
+            "rows_html": "".join(_bankroll_entry_row(item) for item in entries),
+        }
+    )
+
+
+@app.post("/api/bankroll/close")
+def api_bankroll_close(
+    payload: BankrollClosePayload,
+    request: Request,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    settings = load_settings()
+    user = _current_dashboard_user(request, settings)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
+    try:
+        store = PortalStore(settings.portal_db_file)
+        entry = store.close_bankroll_entry(int(user["id"]), payload.entry_id, payload.outcome)
+        account = store.get_bankroll_account(int(user["id"]))
+        entries = store.list_bankroll_entries(int(user["id"]), limit=80)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "ok": True,
+            "entry": entry,
+            "account": account,
+            "suggested_stake": _suggested_stake(account),
+            "rows_html": "".join(_bankroll_entry_row(item) for item in entries),
+        }
+    )
 
 
 @app.post("/api/import-history")
@@ -3477,6 +3842,151 @@ def _active(signal: dict[str, Any] | None) -> str:
         f"<div class='mini'><div class='muted'>Dados</div><strong>{_esc(signal.get('data_quality', '-'))}%</strong></div>"
         "</div>"
         f"<p class='subtle'>{_esc(signal.get('reason'))}</p>"
+    )
+
+
+def _account_bankroll_panel(settings: Settings, user: dict[str, Any] | None, state) -> str:
+    if not user:
+        return ""
+    store = PortalStore(settings.portal_db_file)
+    account = store.get_bankroll_account(int(user["id"]))
+    entries = store.list_bankroll_entries(int(user["id"]), limit=60)
+    open_entries = [entry for entry in entries if entry.get("status") == "open"]
+    closed_profit = sum(_safe_float(entry.get("profit_brl")) for entry in entries if entry.get("status") != "open")
+    suggested = _suggested_stake(account)
+    active_signal = state.active_signal or {}
+    game = active_signal.get("game") or {}
+    active_match = f"{game.get('home', '')} x {game.get('away', '')}".strip(" x")
+    active_market = _entry_text_for_bankroll(active_signal)
+    active_odds = active_signal.get("entry_odds") or active_signal.get("target_odds") or ""
+    active_signal_id = active_signal.get("signal_id") or ""
+    rows = "".join(_bankroll_entry_row(entry) for entry in entries[:60])
+    if not rows:
+        rows = "<tr><td colspan='8'>Nenhuma entrada registrada na banca do cliente.</td></tr>"
+    return f"""
+  <section class="account-panel" id="account-panel" aria-label="Conta e banca do cliente">
+    <div class="account-panel-head">
+      <div class="account-user">
+        <strong>{_esc(user.get("name") or user.get("email") or "Cliente")}</strong>
+        <span class="muted">{_esc(user.get("email") or "")} | plano {_esc(user.get("plan") or "-")}</span>
+      </div>
+      <button class="ghost" type="button" onclick="toggleAccountPanel(false)">Fechar</button>
+    </div>
+    <section id="conta-banca">
+      <div class="bankroll-grid">
+        <div class="mini"><div class="muted">Banca inicial</div><strong id="bankroll-initial-label">{_esc(_format_brl(account.get("initial_bankroll_brl")))}</strong></div>
+        <div class="mini"><div class="muted">Disponivel</div><strong id="bankroll-balance-label">{_esc(_format_brl(account.get("balance_brl")))}</strong></div>
+        <div class="mini"><div class="muted">Stake sugerida</div><strong id="bankroll-stake-label">{_esc(_format_brl(suggested))}</strong></div>
+        <div class="mini"><div class="muted">Entradas abertas</div><strong id="bankroll-open-label">{len(open_entries)}</strong></div>
+      </div>
+      <div class="bankroll-form">
+        <div>
+          <label>Banca inicial</label>
+          <input id="bankroll-initial" type="number" min="0" step="0.01" value="{_esc(account.get("initial_bankroll_brl"))}" />
+        </div>
+        <div>
+          <label>Saldo disponivel</label>
+          <input id="bankroll-balance" type="number" min="0" step="0.01" value="{_esc(account.get("balance_brl"))}" />
+        </div>
+        <div>
+          <label>% stake padrao</label>
+          <input id="bankroll-stake-percent" type="number" min="0.1" max="100" step="0.1" value="{_esc(account.get("default_stake_percent"))}" />
+        </div>
+        <div class="wide">
+          <label>Status IA</label>
+          <div class="mini">A IA deduz a entrada quando voce registra e credita retorno quando fechar Green.</div>
+        </div>
+      </div>
+      <div class="bankroll-actions" style="margin-top:10px">
+        <button type="button" onclick="saveBankrollSettings()">Salvar banca</button>
+        <button class="ghost" type="button" onclick="fillBankrollFromActive()">Usar jogo ativo</button>
+        <span class="notice muted" id="bankroll-note"></span>
+      </div>
+      <div class="bankroll-form" style="margin-top:14px">
+        <input id="bankroll-signal-id" type="hidden" value="{_esc(active_signal_id)}" />
+        <div class="wide">
+          <label>Jogo selecionado</label>
+          <input id="bankroll-game" type="text" value="{_esc(active_match)}" placeholder="Ex: Flamengo x Palmeiras" />
+        </div>
+        <div class="wide">
+          <label>Mercado / entrada</label>
+          <input id="bankroll-market" type="text" value="{_esc(active_market)}" placeholder="Ex: Over 1.5, BTTS, escanteios" />
+        </div>
+        <div>
+          <label>Odd</label>
+          <input id="bankroll-odds" type="number" min="1" step="0.01" value="{_esc(active_odds)}" />
+        </div>
+        <div>
+          <label>Valor da entrada</label>
+          <input id="bankroll-amount" type="number" min="0.01" step="0.01" value="{_esc(suggested)}" />
+        </div>
+        <div class="wide">
+          <label>Conferencia IA</label>
+          <input id="bankroll-ai-notes" type="text" value="{_esc(active_signal.get("reason") or "")}" placeholder="Motivo da entrada ou regra de saida" />
+        </div>
+      </div>
+      <div class="bankroll-actions" style="margin-top:10px">
+        <button class="success" type="button" onclick="openBankrollEntry()">Registrar entrada e monitorar</button>
+        <button class="ghost" type="button" onclick="window.location.hash='entradas'">Ver entradas globais</button>
+      </div>
+      <div class="bankroll-table-wrap">
+        <table class="responsive bankroll-table">
+          <thead><tr><th>Jogo</th><th>Mercado</th><th>Aberta</th><th>Valor</th><th>Odd</th><th>Status</th><th>Lucro</th><th>Acao</th></tr></thead>
+          <tbody id="bankroll-entry-rows">{rows}</tbody>
+        </table>
+      </div>
+      <p class="muted">Resultado fechado nesta banca: {_esc(_format_brl(closed_profit))}. Aposta real continua manual; o painel controla saldo, disciplina e aprendizado.</p>
+    </section>
+  </section>
+"""
+
+
+def _suggested_stake(account: dict[str, Any]) -> float:
+    balance = _safe_float(account.get("balance_brl"))
+    percent = _safe_float(account.get("default_stake_percent"), 2.0)
+    if balance <= 0:
+        return 0.0
+    return round(max(1.0, balance * (percent / 100)), 2)
+
+
+def _entry_text_for_bankroll(signal: dict[str, Any]) -> str:
+    if not signal:
+        return ""
+    market = signal.get("entry_market") or signal.get("market") or ""
+    selection = signal.get("entry_selection") or signal.get("selection") or ""
+    line = signal.get("entry_line") or signal.get("line") or ""
+    return " ".join(str(item).strip() for item in (market, selection, line) if str(item or "").strip())
+
+
+def _bankroll_entry_row(entry: dict[str, Any]) -> str:
+    status_value = str(entry.get("status") or "open")
+    status_label = {
+        "open": "Monitorando",
+        "win": "Green",
+        "loss": "Red",
+        "void": "Anulada",
+    }.get(status_value, status_value)
+    entry_id = _js_string(entry.get("id") or "")
+    actions = "-"
+    if status_value == "open":
+        actions = (
+            "<div class='action-buttons'>"
+            f"<button class='ghost success' type='button' onclick=\"closeBankrollEntry('{entry_id}', 'win')\">Green</button>"
+            f"<button class='ghost danger' type='button' onclick=\"closeBankrollEntry('{entry_id}', 'loss')\">Red</button>"
+            f"<button class='ghost' type='button' onclick=\"closeBankrollEntry('{entry_id}', 'void')\">Anular</button>"
+            "</div>"
+        )
+    return (
+        "<tr>"
+        f"<td data-label='Jogo'>{_esc(entry.get('game_label'))}<br><span class='muted'>{_esc(entry.get('ai_notes') or '')}</span></td>"
+        f"<td data-label='Mercado'>{_esc(entry.get('market'))}</td>"
+        f"<td data-label='Aberta'>{_esc((entry.get('opened_at') or '')[:16])}</td>"
+        f"<td data-label='Valor'>{_esc(_format_brl(entry.get('amount_brl')))}</td>"
+        f"<td data-label='Odd'>{_esc(entry.get('odds') or '-')}</td>"
+        f"<td data-label='Status'><span class='bankroll-status {status_value}'>{_esc(status_label)}</span></td>"
+        f"<td data-label='Lucro' class='{_value_class(entry.get('profit_brl'))}'>{_esc(_format_brl(entry.get('profit_brl')))}</td>"
+        f"<td data-label='Acao'>{actions}</td>"
+        "</tr>"
     )
 
 
