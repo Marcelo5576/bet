@@ -704,7 +704,35 @@ def dashboard(request: Request) -> str:
       max-height: 280px;
       overflow: auto;
     }}
-    .sim-lab-table-wrap table {{ min-width: 920px; }}
+    .sim-lab-table-wrap table {{ min-width: 1320px; table-layout: fixed; }}
+    .sim-lab-table-wrap th,
+    .sim-lab-table-wrap td {{
+      overflow-wrap: normal;
+      word-break: normal;
+    }}
+    .sim-lab-table-wrap th:nth-child(1), .sim-lab-table-wrap td:nth-child(1) {{ width: 44px; min-width: 44px; }}
+    .sim-lab-table-wrap th:nth-child(2), .sim-lab-table-wrap td:nth-child(2) {{ width: 220px; overflow-wrap: anywhere; }}
+    .sim-lab-table-wrap th:nth-child(3), .sim-lab-table-wrap td:nth-child(3) {{ width: 132px; }}
+    .sim-lab-table-wrap th:nth-child(4), .sim-lab-table-wrap td:nth-child(4) {{ width: 170px; overflow-wrap: anywhere; }}
+    .sim-lab-table-wrap th:nth-child(5), .sim-lab-table-wrap td:nth-child(5) {{ width: 350px; overflow-wrap: anywhere; }}
+    .sim-lab-table-wrap th:nth-child(6), .sim-lab-table-wrap td:nth-child(6),
+    .sim-lab-table-wrap th:nth-child(7), .sim-lab-table-wrap td:nth-child(7),
+    .sim-lab-table-wrap th:nth-child(8), .sim-lab-table-wrap td:nth-child(8),
+    .sim-lab-table-wrap th:nth-child(9), .sim-lab-table-wrap td:nth-child(9),
+    .sim-lab-table-wrap th:nth-child(10), .sim-lab-table-wrap td:nth-child(10) {{
+      min-width: 92px;
+      text-align: right;
+      white-space: nowrap;
+    }}
+    .sim-lab-table-wrap td:nth-child(5) strong,
+    .sim-lab-table-wrap td:nth-child(6),
+    .sim-lab-table-wrap td:nth-child(7),
+    .sim-lab-table-wrap td:nth-child(8),
+    .sim-lab-table-wrap td:nth-child(9),
+    .sim-lab-table-wrap td:nth-child(10) {{
+      overflow-wrap: normal;
+      word-break: keep-all;
+    }}
     .sim-lab-note {{ margin-top: 8px; }}
     .sim-history-wrap {{
       border: 1px solid var(--line);
@@ -713,7 +741,20 @@ def dashboard(request: Request) -> str:
       max-height: 260px;
       overflow: auto;
     }}
-    .sim-history-wrap table {{ min-width: 840px; }}
+    .sim-history-wrap table {{ min-width: 980px; table-layout: fixed; }}
+    .sim-history-wrap th,
+    .sim-history-wrap td {{
+      overflow-wrap: normal;
+      word-break: normal;
+    }}
+    .sim-history-wrap th:nth-child(2), .sim-history-wrap td:nth-child(2) {{ width: 170px; }}
+    .sim-history-wrap th:nth-child(7), .sim-history-wrap td:nth-child(7),
+    .sim-history-wrap th:nth-child(8), .sim-history-wrap td:nth-child(8),
+    .sim-history-wrap th:nth-child(9), .sim-history-wrap td:nth-child(9) {{
+      min-width: 118px;
+      text-align: right;
+      white-space: nowrap;
+    }}
     .section-head {{
       align-items: center;
       display: flex;
