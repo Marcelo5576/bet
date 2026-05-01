@@ -3,3 +3,7 @@ data/
 __pycache__/
 *.pyc
 *.pyo
+.runtime_deps/
+runtime_deps2/
+settings_probe.py
+*_out.txt

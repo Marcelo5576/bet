@@ -268,6 +268,78 @@ def _rate_limit(request: Request, key: str, limit: int, window_seconds: int) -> 
     _RATE_LIMIT[bucket_key] = bucket
 
 
+def _telegram_status(
+    settings: Settings,
+    prefs: dict[str, Any] | None,
+    state_obj,
+) -> dict[str, Any]:
+    prefs = prefs or {}
+    scan_enabled = bool(int(prefs.get("scan_enabled") or 0))
+    notifications_enabled = bool(int(prefs.get("telegram_enabled") or 0))
+    chat_id = str(prefs.get("telegram_chat_id") or "").strip()
+    token_present = bool(settings.telegram_bot_token)
+    blockers: list[str] = []
+    if not token_present:
+        blockers.append("Telegram desligado neste ambiente: falta TELEGRAM_BOT_TOKEN no .env.")
+    if not chat_id:
+        blockers.append("Falta vincular o Chat ID. Abra o bot e use /chatid.")
+    if chat_id and not notifications_enabled:
+        blockers.append("As notificações do Telegram estão desmarcadas neste usuário.")
+    if not scan_enabled:
+        blockers.append("O scanner deste usuário está pausado, então nenhum alerta será enviado.")
+    ready = token_present and bool(chat_id) and notifications_enabled and scan_enabled
+    summary = (
+        "Telegram pronto para este usuário."
+        if ready
+        else blockers[0] if blockers else "Telegram ainda precisa de configuração."
+    )
+    return {
+        "ready": ready,
+        "severity": "ok" if ready else "warning",
+        "summary": summary,
+        "blockers": blockers,
+        "token_present": token_present,
+        "chat_id_present": bool(chat_id),
+        "notifications_enabled": notifications_enabled,
+        "scan_enabled": scan_enabled,
+        "state_chat_ids": len(getattr(state_obj, "chat_ids", []) or []),
+    }
+
+
+def _telegram_status_html(status: dict[str, Any]) -> str:
+    css = "notice ok" if status.get("ready") else "notice muted"
+    blockers = status.get("blockers") or []
+    extra = f"<div class='muted'>{_esc(' | '.join(blockers))}</div>" if blockers else ""
+    return (
+        f"<div id='telegram-status' class='{css}'>"
+        f"<strong>Telegram:</strong> {_esc(status.get('summary') or '-')}{extra}"
+        "</div>"
+    )
+
+
+def _ai_memory_status(settings: Settings, store: PortalStore) -> dict[str, Any]:
+    store.seed_ai_skills(DEFAULT_AI_SUPPORT_SKILLS)
+    local_skills = store.list_ai_skills(limit=200)
+    supabase_enabled = bool(settings.supabase_url and settings.supabase_service_role_key)
+    summary = (
+        f"{len(local_skills)} skills curtas ativas. Supabase {'ligado' if supabase_enabled else 'desligado'} neste ambiente."
+    )
+    return {
+        "skills_total": len(local_skills),
+        "supabase_enabled": supabase_enabled,
+        "summary": summary,
+    }
+
+
+def _ai_memory_status_html(status: dict[str, Any]) -> str:
+    css = "notice ok" if status.get("supabase_enabled") else "notice muted"
+    return (
+        f"<div id='ai-memory-status' class='{css}'>"
+        f"<strong>Memoria IA:</strong> {_esc(status.get('summary') or '-')}"
+        "</div>"
+    )
+
+
 async def _ai_support_skills(settings: Settings) -> list[dict[str, Any]]:
     store = _portal_store(settings)
     store.seed_ai_skills(DEFAULT_AI_SUPPORT_SKILLS)
@@ -1235,7 +1307,11 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
     settings = _settings()
     store = _portal_store(settings)
     plans = _plan_catalog(settings, store)
+    store.seed_ai_skills(DEFAULT_AI_SUPPORT_SKILLS)
     prefs = store.get_preferences(int(user["id"]))
+    state_obj = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    telegram_status = _telegram_status(settings, prefs, state_obj)
+    ai_memory_status = _ai_memory_status(settings, store)
     logs = store.list_support_logs(int(user["id"]), limit=20)
     payments = store.list_payments(int(user["id"]), limit=10)
     chat_rows = "".join(
@@ -1312,6 +1388,8 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
       <label><input id='pref-enabled' type='checkbox' {'checked' if int(prefs.get("telegram_enabled") or 0) else ''} /> Quero notificacoes no Telegram</label>
       <button class='btn primary' onclick='savePrefs()'>Salvar preferencias</button>
       <div id='prefs-note' class='notice muted'></div>
+      {_telegram_status_html(telegram_status)}
+      {_ai_memory_status_html(ai_memory_status)}
       <p class='muted'>Guia rapido: abra o bot, use <strong>/chatid</strong>, copie o numero e cole aqui.</p>
       <p class='muted'>Se desativar o scanner, voce pausa alertas para seu usuario sem afetar os demais.</p>
     </div>
@@ -1412,6 +1490,22 @@ async function savePrefs() {
   const data = await res.json();
   if (!res.ok) { note.textContent = data.detail || 'Falha ao salvar.'; return; }
   note.textContent = 'Preferencias salvas com sucesso.';
+  renderTelegramStatus(data.telegram_status);
+  renderAiMemoryStatus(data.ai_memory_status);
+}
+function renderTelegramStatus(status) {
+  const box = document.getElementById('telegram-status');
+  if (!box || !status) return;
+  const blockers = Array.isArray(status.blockers) ? status.blockers.filter(Boolean) : [];
+  box.className = status.ready ? 'notice ok' : 'notice muted';
+  const extra = blockers.length ? `<div class="muted">${blockers.join(' | ')}</div>` : '';
+  box.innerHTML = `<strong>Telegram:</strong> ${status.summary || '-'}${extra}`;
+}
+function renderAiMemoryStatus(status) {
+  const box = document.getElementById('ai-memory-status');
+  if (!box || !status) return;
+  box.className = status.supabase_enabled ? 'notice ok' : 'notice muted';
+  box.innerHTML = `<strong>Memoria IA:</strong> ${status.summary || '-'}`;
 }
 </script>"""
     return _page_shell("Portal do Cliente", body, script)
@@ -1984,7 +2078,15 @@ def api_user_preferences(user: dict[str, Any] = Depends(_require_user)) -> JSONR
     settings = _settings()
     store = _portal_store(settings)
     prefs = store.get_preferences(int(user["id"]))
-    return JSONResponse({"ok": True, "preferences": prefs})
+    state_obj = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    return JSONResponse(
+        {
+            "ok": True,
+            "preferences": prefs,
+            "telegram_status": _telegram_status(settings, prefs, state_obj),
+            "ai_memory_status": _ai_memory_status(settings, store),
+        }
+    )
 
 
 @router.post("/api/user/preferences")
@@ -2004,7 +2106,15 @@ def api_user_preferences_update(
         telegram_enabled=payload.telegram_enabled,
         telegram_chat_id=payload.telegram_chat_id,
     )
-    return JSONResponse({"ok": True, "preferences": prefs})
+    state_obj = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    return JSONResponse(
+        {
+            "ok": True,
+            "preferences": prefs,
+            "telegram_status": _telegram_status(settings, prefs, state_obj),
+            "ai_memory_status": _ai_memory_status(settings, store),
+        }
+    )
 
 
 @router.post("/api/auth/forgot-password")
@@ -2053,10 +2163,13 @@ async def api_support_chat(
     text = payload.message.strip()
     if len(text) < 2:
         raise HTTPException(status_code=400, detail="Digite uma pergunta mais completa.")
+    prefs = store.get_preferences(int(user["id"])) if user else None
     context = {
         "red_lock": stop,
         "active_signal": bool(state.active_signal),
         "skills": await _ai_support_skills(settings),
+        "telegram_status": _telegram_status(settings, prefs, state),
+        "ai_memory_status": _ai_memory_status(settings, store),
     }
     answer = support_agent_reply(text, context)
     logs_html = ""

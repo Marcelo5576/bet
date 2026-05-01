@@ -106,7 +106,7 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "title": "Conectar Telegram",
         "intent": "Explicar como ligar o Telegram à conta do cliente.",
         "keywords": ["telegram", "bot", "chat id", "chatid", "alerta", "notificacao", "notificação"],
-        "answer": "No Telegram, envie /chatid ao bot. Cole o ID na Área do Cliente e salve as notificações.",
+        "answer": "Para receber alertas: abra o bot, use /chatid, cole o ID na Área do Cliente e salve as notificações.",
         "priority": 20,
     },
     {
@@ -114,7 +114,7 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "title": "Scanner ao vivo",
         "intent": "Explicar scanner, ciclos de monitoramento e ausência de jogos.",
         "keywords": ["scanner", "jogo", "jogos", "ao vivo", "sinal", "sinais", "odds", "sem jogos"],
-        "answer": "O scanner lê jogos ao vivo, odds e pressão. Sem jogo ativo roda em 1m; com jogo ativo, 2m.",
+        "answer": "O scanner lê jogos ao vivo, odds e pressão. Sem jogo ativo usa o ciclo configurado; com jogo ativo, entra no ciclo curto.",
         "priority": 30,
     },
     {
@@ -258,7 +258,7 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "title": "Memória IA",
         "intent": "Explicar memória operacional e Supabase.",
         "keywords": ["memoria", "memória", "supabase", "skills", "aprende", "aprendizado", "ia"],
-        "answer": "A IA usa histórico e skills curtas. Com Supabase ativo, a memória fica persistente.",
+        "answer": "A IA usa histórico e skills curtas. Com Supabase ativo, essas skills sincronizam e a memória fica persistente.",
         "priority": 150,
     },
     {
@@ -310,6 +310,54 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "priority": 200,
     },
 ]
+
+_DEFAULT_SKILL_METADATA: dict[str, dict[str, Any]] = {
+    "public_login_password": {"topic": "auth", "section": "access"},
+    "public_telegram_connect": {"topic": "telegram", "section": "delivery"},
+    "public_scanner_live": {"topic": "scanner", "section": "live"},
+    "public_plans_trial": {"topic": "billing", "section": "plans"},
+    "plans_ai_agent_scope": {"topic": "product", "section": "agent"},
+    "public_fantasy": {"topic": "fantasy", "section": "lineup"},
+    "public_risk_notice": {"topic": "risk", "section": "responsibility"},
+    "risk_bankroll_units": {"topic": "risk", "section": "bankroll"},
+    "client_bankroll_panel": {"topic": "bankroll", "section": "client"},
+    "telegram_entry_form": {"topic": "telegram", "section": "entry"},
+    "scanner_active_monitoring": {"topic": "scanner", "section": "active"},
+    "ai_live_efficiency": {"topic": "ai", "section": "live"},
+    "security_operational_limits": {"topic": "security", "section": "ops"},
+    "risk_no_chasing": {"topic": "risk", "section": "discipline"},
+    "risk_record_every_bet": {"topic": "history", "section": "learning"},
+    "risk_daily_stop": {"topic": "risk", "section": "daily-stop"},
+    "live_odds_quality": {"topic": "odds", "section": "quality"},
+    "live_data_quality": {"topic": "data", "section": "quality"},
+    "support_import_bets": {"topic": "import", "section": "slip"},
+    "product_dashboard": {"topic": "product", "section": "dashboard"},
+    "ai_memory_supabase": {"topic": "memory", "section": "supabase"},
+    "compliance_brazil": {"topic": "compliance", "section": "brazil"},
+    "responsible_gambling": {"topic": "compliance", "section": "responsible"},
+    "sales_positioning": {"topic": "sales", "section": "positioning"},
+    "product_differentiators": {"topic": "sales", "section": "differentiators"},
+    "team_plan": {"topic": "billing", "section": "team"},
+    "support_checkout": {"topic": "support", "section": "diagnostic"},
+}
+
+
+def _decorate_default_skills(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for item in skills:
+        skill = dict(item)
+        payload = dict(skill.get("payload") or {})
+        payload.update(_DEFAULT_SKILL_METADATA.get(str(skill.get("skill_id") or ""), {}))
+        payload.setdefault("version", "2026-05-01")
+        payload.setdefault("compact", True)
+        payload.setdefault("answer_chars", len(str(skill.get("answer") or "")))
+        payload.setdefault("keywords_count", len(skill.get("keywords") or []))
+        skill["payload"] = payload
+        enriched.append(skill)
+    return enriched
+
+
+DEFAULT_AI_SUPPORT_SKILLS = _decorate_default_skills(DEFAULT_AI_SUPPORT_SKILLS)
 
 
 class PortalStore:
@@ -1295,14 +1343,83 @@ def _skill_match_score(message: str, skill: dict[str, Any]) -> int:
     return score
 
 
-def support_agent_reply(message: str, context: dict[str, Any]) -> str:
-    skills = context.get("skills") or DEFAULT_AI_SUPPORT_SKILLS
-    ranked_skills = sorted(
+def _skill_topic(skill: dict[str, Any]) -> str:
+    payload = skill.get("payload") or {}
+    topic = str(payload.get("topic") or "").strip()
+    if topic:
+        return topic
+    return str(skill.get("skill_id") or skill.get("title") or "general")
+
+
+def _ranked_skill_matches(message: str, skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(
         (skill for skill in skills if skill.get("answer")),
         key=lambda item: (-_skill_match_score(message, item), int(item.get("priority") or 100)),
     )
-    if ranked_skills and _skill_match_score(message, ranked_skills[0]) > 0:
-        return str(ranked_skills[0]["answer"])
+    return [item for item in ranked if _skill_match_score(message, item) > 0]
+
+
+def _compact_skill_reply(message: str, skills: list[dict[str, Any]], max_items: int = 2) -> str:
+    chosen: list[str] = []
+    seen_topics: set[str] = set()
+    for skill in _ranked_skill_matches(message, skills):
+        topic = _skill_topic(skill)
+        if topic in seen_topics:
+            continue
+        answer = str(skill.get("answer") or "").strip()
+        if not answer:
+            continue
+        chosen.append(answer)
+        seen_topics.add(topic)
+        if len(chosen) >= max_items:
+            break
+    if not chosen:
+        return ""
+    reply = " | ".join(chosen)
+    if len(reply) <= 480:
+        return reply
+    trimmed = reply[:477].rsplit(" ", 1)[0].rstrip(" |")
+    return f"{trimmed}..."
+
+
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _runtime_support_notes(message: str, context: dict[str, Any]) -> list[str]:
+    text = _plain_text(message)
+    notes: list[str] = []
+    telegram = context.get("telegram_status") or {}
+    ai_memory = context.get("ai_memory_status") or {}
+    if _contains_any(text, ("telegram", "chatid", "chat id", "alerta", "notificacao", "notificação")):
+        summary = str(telegram.get("summary") or "").strip()
+        if summary:
+            notes.append(summary)
+    if _contains_any(text, ("supabase", "memoria", "memória", "skills", "aprendizado", "ia")):
+        summary = str(ai_memory.get("summary") or "").strip()
+        if summary:
+            notes.append(summary)
+    deduped: list[str] = []
+    seen = set()
+    for note in notes:
+        key = _plain_text(note)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(note)
+    return deduped
+
+
+def support_agent_reply(message: str, context: dict[str, Any]) -> str:
+    skills = context.get("skills") or DEFAULT_AI_SUPPORT_SKILLS
+    skill_reply = _compact_skill_reply(message, skills)
+    runtime_notes = _runtime_support_notes(message, context)
+    if skill_reply or runtime_notes:
+        parts = [part for part in [skill_reply, *runtime_notes] if part]
+        reply = " | ".join(dict.fromkeys(parts))
+        if len(reply) <= 520:
+            return reply
+        return f"{reply[:517].rsplit(' ', 1)[0]}..."
 
     text = _plain_text(message)
     if any(token in text for token in ("senha", "login", "entrar")):

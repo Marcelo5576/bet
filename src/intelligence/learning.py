@@ -41,7 +41,11 @@ def summarize_history_with_simulation(
     max_simulation_rows: int = 240,
 ) -> dict[str, Any]:
     base = summarize_history(history)
-    sessions = [item for item in (simulation_sessions or []) if isinstance(item, dict)]
+    sessions = [
+        item
+        for item in (simulation_sessions or [])
+        if isinstance(item, dict) and _session_is_live(item)
+    ]
     if not sessions:
         base["real_sample_size"] = int(base.get("sample_size") or 0)
         base["simulation_sample_size"] = 0
@@ -63,6 +67,20 @@ def summarize_history_with_simulation(
     blended["simulation_sample_size"] = weighted_size
     blended["simulation_weight"] = round(weight, 2)
     return blended
+
+
+def _session_is_live(session: dict[str, Any]) -> bool:
+    scan_scope = str(session.get("scan_scope") or "").lower()
+    if "ao vivo" in scan_scope or "live" in scan_scope:
+        return True
+    for row in session.get("rows") or []:
+        minute = row.get("minute")
+        if isinstance(minute, (int, float)):
+            return True
+        text = str(minute or "").strip()
+        if text.isdigit():
+            return True
+    return False
 
 
 def simulation_rows_as_history(
