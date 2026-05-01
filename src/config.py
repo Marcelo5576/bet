@@ -90,7 +90,7 @@ def load_settings() -> Settings:
         product_name=os.getenv("PRODUCT_NAME", "ApexGol AI").strip() or "ApexGol AI",
         product_tagline=os.getenv(
             "PRODUCT_TAGLINE",
-            "Inteligencia de operacao ao vivo para futebol, odds e gestao de risco.",
+            "Inteligência de operação ao vivo para futebol, odds e gestão de risco.",
         ).strip(),
         website_url=os.getenv("WEBSITE_URL", "https://novo.tickpost.com.br").strip(),
         sales_whatsapp=os.getenv("SALES_WHATSAPP", "").strip(),

@@ -88,6 +88,37 @@ class SupabaseSink:
             logger.info("Falha ao coletar fontes raspadas para IA: %s", exc)
         await self._upsert("betsignal_ai_memory", rows, "memory_id")
 
+    async def sync_ai_skills(self, skills: list[dict[str, Any]]) -> None:
+        if not self.available or not skills:
+            return
+        rows = [_skill_row(skill) for skill in skills]
+        await self._upsert("betsignal_ai_skills", rows, "skill_id")
+
+    async def fetch_ai_skills(self) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(
+                    f"{self.url}/rest/v1/betsignal_ai_skills",
+                    headers=self._headers(),
+                    params={
+                        "select": "skill_id,title,intent,keywords,answer,priority,active,payload,updated_at",
+                        "active": "eq.true",
+                        "order": "priority.asc,title.asc",
+                        "limit": "50",
+                    },
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            self._maybe_disable(exc.response)
+            logger.warning("Falha ao consultar skills IA no Supabase: %s", _safe_http_error(exc))
+            return []
+        except Exception as exc:
+            logger.warning("Falha ao consultar skills IA no Supabase: %s", exc)
+            return []
+
     async def fetch_ai_context(self, active_signal: dict[str, Any] | None) -> dict[str, Any]:
         if not self.available:
             return {"enabled": False, "items": []}
@@ -257,6 +288,23 @@ def _memory_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for (scope, subject), items in groups.items():
         rows.append(_memory_row(scope, subject, items))
     return rows
+
+
+def _skill_row(skill: dict[str, Any]) -> dict[str, Any]:
+    keywords = skill.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords = [item.strip() for item in keywords.split(",") if item.strip()]
+    return {
+        "skill_id": str(skill.get("skill_id") or skill.get("id") or ""),
+        "title": str(skill.get("title") or ""),
+        "intent": str(skill.get("intent") or ""),
+        "keywords": [str(item).strip().lower() for item in keywords if str(item).strip()],
+        "answer": str(skill.get("answer") or ""),
+        "priority": int(skill.get("priority") or 100),
+        "active": bool(skill.get("active", True)),
+        "payload": skill.get("payload") or {},
+        "updated_at": _now(),
+    }
 
 
 def _memory_row(scope: str, subject: str, items: list[dict[str, Any]]) -> dict[str, Any]:

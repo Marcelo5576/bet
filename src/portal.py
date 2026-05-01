@@ -13,6 +13,7 @@ import secrets
 import smtplib
 import sqlite3
 from typing import Any
+import unicodedata
 
 
 def _now_iso() -> str:
@@ -82,6 +83,170 @@ def read_session_token(token: str | None, secret: str) -> int | None:
 class PasswordResetDelivery:
     ok: bool
     message: str
+
+
+DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
+    {
+        "skill_id": "public_login_password",
+        "title": "Login e senha",
+        "intent": "Resolver dúvidas de acesso, login, cadastro e recuperação de senha.",
+        "keywords": ["senha", "login", "entrar", "acesso", "cadastro", "recuperar"],
+        "answer": "Acesse em /login. Se esqueceu a senha, use 'Esqueci minha senha'. Nova conta: /signup.",
+        "priority": 10,
+    },
+    {
+        "skill_id": "public_telegram_connect",
+        "title": "Conectar Telegram",
+        "intent": "Explicar como ligar o Telegram à conta do cliente.",
+        "keywords": ["telegram", "bot", "chat id", "chatid", "alerta", "notificacao", "notificação"],
+        "answer": "No Telegram, envie /chatid ao bot. Cole o ID na Área do Cliente e salve as notificações.",
+        "priority": 20,
+    },
+    {
+        "skill_id": "public_scanner_live",
+        "title": "Scanner ao vivo",
+        "intent": "Explicar scanner, ciclos de monitoramento e ausência de jogos.",
+        "keywords": ["scanner", "jogo", "jogos", "ao vivo", "sinal", "sinais", "odds", "sem jogos"],
+        "answer": "O scanner lê jogos ao vivo, odds e pressão. Sem jogo ativo roda em 1m; com jogo ativo, 5m.",
+        "priority": 30,
+    },
+    {
+        "skill_id": "public_plans_trial",
+        "title": "Planos e teste",
+        "intent": "Responder dúvidas de preço, teste grátis, cobrança e cancelamento.",
+        "keywords": ["plano", "preco", "preço", "valor", "teste", "gratis", "grátis", "cobrar", "cancelar", "fatura"],
+        "answer": "Planos têm 7 dias de teste. Starter é individual, Pro tem IA com memória, Team é multioperador.",
+        "priority": 40,
+    },
+    {
+        "skill_id": "public_fantasy",
+        "title": "Fantasy Campeão",
+        "intent": "Explicar leitura de sala e montagem de escalação para Fantasy Campeão.",
+        "keywords": ["fantasy", "campeao", "campeão", "escalação", "escalacao", "lobby", "jogadores", "scout"],
+        "answer": "No Fantasy, a IA cruza preço, pool, histórico e projeção para sugerir escalação racional.",
+        "priority": 50,
+    },
+    {
+        "skill_id": "public_risk_notice",
+        "title": "Gestão de risco",
+        "intent": "Reforçar responsabilidade e limites das sugestões.",
+        "keywords": ["risco", "green", "red", "lucro", "garantia", "banca", "stake", "responsabilidade"],
+        "answer": "A IA apoia análise e risco, mas não promete lucro. A decisão final é sempre do usuário.",
+        "priority": 60,
+    },
+    {
+        "skill_id": "risk_bankroll_units",
+        "title": "Banca e unidades",
+        "intent": "Orientar banca, unidade e exposição por entrada.",
+        "keywords": ["banca", "unidade", "unidades", "stake", "exposicao", "exposição", "gestao", "gestão"],
+        "answer": "Separe uma banca fixa e opere por unidades. Evite stake alta em um único jogo.",
+        "priority": 70,
+    },
+    {
+        "skill_id": "risk_no_chasing",
+        "title": "Não perseguir red",
+        "intent": "Evitar aumento emocional de stake após perdas.",
+        "keywords": ["recuperar", "perdi", "red", "martingale", "dobrar", "loss", "prejuizo", "prejuízo"],
+        "answer": "Depois de red, não dobre stake. Pare, registre o motivo e espere nova leitura limpa.",
+        "priority": 80,
+    },
+    {
+        "skill_id": "risk_record_every_bet",
+        "title": "Registrar entradas",
+        "intent": "Incentivar histórico real para aprendizado.",
+        "keywords": ["historico", "histórico", "registrar", "green", "red", "anular", "resultado", "aprendizado"],
+        "answer": "Registre odd, mercado, stake e resultado. Sem histórico real, a IA aprende devagar.",
+        "priority": 90,
+    },
+    {
+        "skill_id": "risk_daily_stop",
+        "title": "Limite diário",
+        "intent": "Aplicar disciplina em sequência negativa.",
+        "keywords": ["limite", "diario", "diário", "sequencia", "sequência", "stop", "pausar", "disciplina"],
+        "answer": "Defina limite diário de reds. Ao bater o limite, reduza risco ou pare a operação.",
+        "priority": 100,
+    },
+    {
+        "skill_id": "live_odds_quality",
+        "title": "Qualidade das odds",
+        "intent": "Explicar leitura de odds e qualidade dos dados.",
+        "keywords": ["odds", "odd", "valor", "edge", "probabilidade", "mercado", "justa"],
+        "answer": "A IA compara odd alvo, probabilidade estimada e edge. Odd ruim reduz valor da entrada.",
+        "priority": 110,
+    },
+    {
+        "skill_id": "live_data_quality",
+        "title": "Qualidade dos dados",
+        "intent": "Alertar sobre dados incompletos ou atrasados.",
+        "keywords": ["dados", "atrasado", "estatistica", "estatística", "pressao", "pressão", "placar"],
+        "answer": "Se dados estiverem incompletos ou atrasados, trate o sinal como fraco e reduza exposição.",
+        "priority": 120,
+    },
+    {
+        "skill_id": "support_import_bets",
+        "title": "Importar aposta",
+        "intent": "Orientar importação manual de entradas reais.",
+        "keywords": ["importar", "bet365", "aposta", "bilhete", "entrada real", "colar"],
+        "answer": "Cole o texto bruto da aposta em Importar. Depois confira mercado, odd, valor e resultado.",
+        "priority": 130,
+    },
+    {
+        "skill_id": "product_dashboard",
+        "title": "Dashboard",
+        "intent": "Explicar áreas principais do dashboard.",
+        "keywords": ["dashboard", "painel", "app", "area", "área", "cliente", "operacional"],
+        "answer": "O dashboard mostra scanner, histórico, Green/Red, perfil, Telegram, planos e suporte.",
+        "priority": 140,
+    },
+    {
+        "skill_id": "ai_memory_supabase",
+        "title": "Memória IA",
+        "intent": "Explicar memória operacional e Supabase.",
+        "keywords": ["memoria", "memória", "supabase", "skills", "aprende", "aprendizado", "ia"],
+        "answer": "A IA usa histórico e skills curtas. Com Supabase ativo, a memória fica persistente.",
+        "priority": 150,
+    },
+    {
+        "skill_id": "compliance_brazil",
+        "title": "Regulação Brasil",
+        "intent": "Resposta curta sobre cuidado regulatório no Brasil.",
+        "keywords": ["brasil", "regulacao", "regulação", "lei", "aposta", "responsavel", "responsável", "bet.br"],
+        "answer": "No Brasil, apostas têm regras federais. Use linguagem educativa e jogo responsável.",
+        "priority": 160,
+    },
+    {
+        "skill_id": "responsible_gambling",
+        "title": "Jogo responsável",
+        "intent": "Reforçar jogo responsável e autoproteção.",
+        "keywords": ["compulsao", "compulsão", "vicio", "vício", "responsavel", "responsável", "autoexclusao", "autoexclusão"],
+        "answer": "Se apostar virou pressão ou perda de controle, pause e busque ajuda. Saúde vem primeiro.",
+        "priority": 170,
+    },
+    {
+        "skill_id": "sales_positioning",
+        "title": "Posicionamento comercial",
+        "intent": "Explicar proposta sem promessa de lucro.",
+        "keywords": ["promessa", "resultado", "vender", "oferta", "garantia", "ganhar"],
+        "answer": "Venda como apoio estatístico e disciplina operacional, nunca como garantia de lucro.",
+        "priority": 180,
+    },
+    {
+        "skill_id": "team_plan",
+        "title": "Plano Team",
+        "intent": "Explicar uso para equipe.",
+        "keywords": ["team", "equipe", "operadores", "multioperador", "admin", "gestao comercial"],
+        "answer": "O Team é para equipes, multioperadores e gestão comercial/admin centralizada.",
+        "priority": 190,
+    },
+    {
+        "skill_id": "support_checkout",
+        "title": "Diagnóstico",
+        "intent": "Orientar diagnóstico quando algo não funciona.",
+        "keywords": ["erro", "bug", "nao funciona", "não funciona", "diagnostico", "diagnóstico", "suporte"],
+        "answer": "Se algo falhar, informe tela, horário, ação feita e mensagem exibida. Isso acelera correção.",
+        "priority": 200,
+    },
+]
 
 
 class PortalStore:
@@ -162,6 +327,17 @@ class PortalStore:
                   monthly_price_brl real not null,
                   updated_at text not null
                 );
+                create table if not exists ai_skills (
+                  skill_id text primary key,
+                  title text not null,
+                  intent text not null,
+                  keywords_json text not null default '[]',
+                  answer text not null,
+                  priority integer not null default 100,
+                  active integer not null default 1,
+                  payload_json text not null default '{}',
+                  updated_at text not null
+                );
                 """
             )
             self._ensure_column(conn, "users", "is_admin", "integer not null default 0")
@@ -171,6 +347,75 @@ class PortalStore:
             self._ensure_column(conn, "users", "gateway", "text")
             self._ensure_column(conn, "users", "gateway_subscription_id", "text")
             self._ensure_column(conn, "user_preferences", "scan_enabled", "integer not null default 1")
+
+    def seed_ai_skills(self, skills: list[dict[str, Any]]) -> None:
+        now = _now_iso()
+        with self._connect() as conn:
+            for skill in skills:
+                skill_id = str(skill.get("skill_id") or "").strip()
+                answer = str(skill.get("answer") or "").strip()
+                if not skill_id or not answer:
+                    continue
+                keywords = skill.get("keywords") or []
+                if isinstance(keywords, str):
+                    keywords = [item.strip() for item in keywords.split(",") if item.strip()]
+                payload = skill.get("payload") or {}
+                conn.execute(
+                    """
+                    insert into ai_skills (
+                        skill_id, title, intent, keywords_json, answer, priority, active, payload_json, updated_at
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict(skill_id) do update set
+                        title = excluded.title,
+                        intent = excluded.intent,
+                        keywords_json = excluded.keywords_json,
+                        answer = excluded.answer,
+                        priority = excluded.priority,
+                        active = excluded.active,
+                        payload_json = excluded.payload_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        skill_id,
+                        str(skill.get("title") or skill_id)[:160],
+                        str(skill.get("intent") or "")[:500],
+                        json.dumps([str(item).strip().lower() for item in keywords if str(item).strip()], ensure_ascii=False),
+                        answer[:700],
+                        int(skill.get("priority") or 100),
+                        1 if bool(skill.get("active", True)) else 0,
+                        json.dumps(payload, ensure_ascii=False),
+                        now,
+                    ),
+                )
+
+    def list_ai_skills(self, active_only: bool = True, limit: int = 80) -> list[dict[str, Any]]:
+        query = """
+            select skill_id, title, intent, keywords_json, answer, priority, active, payload_json, updated_at
+              from ai_skills
+        """
+        params: list[Any] = []
+        if active_only:
+            query += " where active = 1"
+        query += " order by priority asc, title asc limit ?"
+        params.append(max(1, min(200, int(limit))))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        skills = []
+        for row in rows:
+            data = dict(row)
+            try:
+                keywords = json.loads(data.pop("keywords_json") or "[]")
+            except json.JSONDecodeError:
+                keywords = []
+            try:
+                payload = json.loads(data.pop("payload_json") or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            data["keywords"] = keywords if isinstance(keywords, list) else []
+            data["payload"] = payload if isinstance(payload, dict) else {}
+            data["active"] = bool(data.get("active"))
+            skills.append(data)
+        return skills
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
         rows = conn.execute(f"pragma table_info({table})").fetchall()
@@ -765,8 +1010,36 @@ def send_password_reset_email(settings, to_email: str, token: str) -> PasswordRe
         return PasswordResetDelivery(False, f"Falha ao enviar email: {exc}")
 
 
+def _plain_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.lower())
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def _skill_match_score(message: str, skill: dict[str, Any]) -> int:
+    text = _plain_text(message)
+    keywords = skill.get("keywords") or []
+    score = 0
+    for keyword in keywords:
+        token = _plain_text(str(keyword).strip())
+        if token and token in text:
+            score += 3 if " " in token else 1
+    intent = _plain_text(str(skill.get("intent") or ""))
+    for word in text.split():
+        if len(word) > 3 and word in intent:
+            score += 1
+    return score
+
+
 def support_agent_reply(message: str, context: dict[str, Any]) -> str:
-    text = message.lower()
+    skills = context.get("skills") or DEFAULT_AI_SUPPORT_SKILLS
+    ranked_skills = sorted(
+        (skill for skill in skills if skill.get("answer")),
+        key=lambda item: (-_skill_match_score(message, item), int(item.get("priority") or 100)),
+    )
+    if ranked_skills and _skill_match_score(message, ranked_skills[0]) > 0:
+        return str(ranked_skills[0]["answer"])
+
+    text = _plain_text(message)
     if any(token in text for token in ("senha", "login", "entrar")):
         return (
             "Para acesso: use seu email e senha em /login. "
@@ -799,6 +1072,6 @@ def support_agent_reply(message: str, context: dict[str, Any]) -> str:
             "Se nao abrir, valide DNS A para o IP do servidor e execute /checkout."
         )
     return (
-        "Posso ajudar com login, senha, scanner, importacao, plano/cobranca e dashboard. "
-        "Me diga em uma frase o problema e o que voce esperava que acontecesse."
+        "Posso ajudar com login, senha, scanner, Telegram, planos, Fantasy Campeão, importação e dashboard. "
+        "Me diga em uma frase o problema e o que você esperava que acontecesse."
     )

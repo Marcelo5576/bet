@@ -74,3 +74,18 @@ create index if not exists betsignal_ai_memory_scope_subject_idx
 
 create index if not exists betsignal_ai_memory_updated_at_idx
   on public.betsignal_ai_memory(updated_at desc);
+
+create table if not exists public.betsignal_ai_skills (
+  skill_id text primary key,
+  title text not null,
+  intent text not null,
+  keywords text[] not null default '{}'::text[],
+  answer text not null,
+  priority integer not null default 100,
+  active boolean not null default true,
+  payload jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists betsignal_ai_skills_active_priority_idx
+  on public.betsignal_ai_skills(active, priority);

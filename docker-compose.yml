@@ -2,6 +2,8 @@ services:
   betsignal:
     build: .
     container_name: betsignal-cloud
+    profiles:
+      - bot
     restart: unless-stopped
     env_file:
       - .env

@@ -15,8 +15,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from src.config import Settings, load_settings
+from src.integrations.supabase import SupabaseSink
 from src.intelligence.risk import red_stop_status
 from src.portal import (
+    DEFAULT_AI_SUPPORT_SKILLS,
     PortalStore,
     issue_session_token,
     read_session_token,
@@ -30,21 +32,22 @@ SESSION_COOKIE = "bs_session"
 _STORE_CACHE: dict[str, PortalStore] = {}
 _BOOTSTRAP_DONE: set[str] = set()
 _RATE_LIMIT: dict[str, list[float]] = {}
+_AI_SKILLS_SYNC_DONE: set[str] = set()
 PLAN_FEATURES = {
     "starter": [
         "Scanner ao vivo + Telegram",
-        "Historico Green/Red",
+        "Histórico Green/Red",
         "Dashboard responsiva",
     ],
     "pro": [
         "Tudo do Starter",
-        "IA com memoria operacional",
-        "Suporte prioritario",
+        "IA com memória operacional",
+        "Suporte prioritário",
     ],
     "team": [
         "Tudo do Pro",
         "Multi-operadores",
-        "Gestao comercial/admin completa",
+        "Gestão comercial/admin completa",
     ],
 }
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -120,6 +123,7 @@ def _portal_store(settings: Settings) -> PortalStore:
         _STORE_CACHE[key] = store
     if key not in _BOOTSTRAP_DONE:
         store.ensure_admin(settings.admin_email, settings.admin_name, settings.admin_password)
+        store.seed_ai_skills(DEFAULT_AI_SUPPORT_SKILLS)
         _BOOTSTRAP_DONE.add(key)
     return store
 
@@ -259,6 +263,21 @@ def _rate_limit(request: Request, key: str, limit: int, window_seconds: int) -> 
     _RATE_LIMIT[bucket_key] = bucket
 
 
+async def _ai_support_skills(settings: Settings) -> list[dict[str, Any]]:
+    store = _portal_store(settings)
+    store.seed_ai_skills(DEFAULT_AI_SUPPORT_SKILLS)
+    local_skills = store.list_ai_skills()
+    sink = SupabaseSink.from_settings(settings)
+    if not sink.enabled:
+        return local_skills or DEFAULT_AI_SUPPORT_SKILLS
+    sync_key = settings.supabase_url or "default"
+    if sync_key not in _AI_SKILLS_SYNC_DONE:
+        await sink.sync_ai_skills(local_skills or DEFAULT_AI_SUPPORT_SKILLS)
+        _AI_SKILLS_SYNC_DONE.add(sync_key)
+    skills = await sink.fetch_ai_skills()
+    return skills or local_skills or DEFAULT_AI_SUPPORT_SKILLS
+
+
 def _session_user(request: Request, settings: Settings, store: PortalStore) -> dict[str, Any]:
     token = request.cookies.get(SESSION_COOKIE)
     user_id = read_session_token(token, settings.portal_session_secret)
@@ -274,6 +293,15 @@ def _require_user(request: Request) -> dict[str, Any]:
     settings = _settings()
     store = _portal_store(settings)
     return _session_user(request, settings, store)
+
+
+def _optional_user(request: Request) -> dict[str, Any] | None:
+    settings = _settings()
+    store = _portal_store(settings)
+    try:
+        return _session_user(request, settings, store)
+    except HTTPException:
+        return None
 
 
 def _require_admin(user: dict[str, Any] = Depends(_require_user)) -> dict[str, Any]:
@@ -298,9 +326,12 @@ def _trial_left_days(user: dict[str, Any]) -> int:
 
 def _fmt_money(value: Any) -> str:
     try:
-        return f"R$ {float(value):.2f}"
+        amount = float(value)
+        if amount.is_integer():
+            return f"R$ {int(amount)}"
+        return f"R$ {amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except (TypeError, ValueError):
-        return "R$ 0.00"
+        return "R$ 0"
 
 
 def _esc(value: Any) -> str:
@@ -358,13 +389,33 @@ def _validate_email(value: str) -> str:
     return clean
 
 
-def _page_shell(title: str, body_html: str, extra_script: str = "") -> str:
-    build_stamp = _build_stamp()
+def _page_shell(
+    title: str,
+    body_html: str,
+    extra_script: str = "",
+    description: str | None = None,
+    canonical_path: str | None = None,
+) -> str:
+    settings = _settings()
+    desc = description or (
+        "ApexGol AI monitora futebol ao vivo, odds, Telegram, Fantasy Campeão e gestão de risco "
+        "para apoiar decisões racionais."
+    )
+    site_url = (settings.website_url or "").rstrip("/")
+    canonical_url = f"{site_url}{canonical_path or ''}" if site_url else canonical_path or "/"
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{_esc(desc)}">
+  <link rel="canonical" href="{_esc(canonical_url)}">
+  <meta property="og:title" content="{_esc(title)}">
+  <meta property="og:description" content="{_esc(desc)}">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="{_esc(canonical_url)}">
+  <meta property="og:image" content="{_esc(site_url)}/assets/logo-apexgol-mark.svg">
+  <link rel="icon" href="/assets/logo-apexgol-mark.svg" type="image/svg+xml">
   <title>{_esc(title)}</title>
   <style>
     :root {{
@@ -389,14 +440,23 @@ def _page_shell(title: str, body_html: str, extra_script: str = "") -> str:
       width:20px;
     }}
     .nav {{ display:flex; gap:8px; flex-wrap:wrap; }}
+    .nav-scroll {{ max-width:100%; overflow-x:auto; padding-bottom:2px; scrollbar-width:none; }}
+    .nav-scroll::-webkit-scrollbar {{ display:none; }}
     .btn {{
+      align-items:center;
       border:1px solid #344254;
       background:linear-gradient(180deg, #182435, #111824);
       color:var(--txt);
       border-radius:10px;
+      display:inline-flex;
+      justify-content:center;
       padding:10px 14px;
       font-weight:800;
       letter-spacing:0;
+      line-height:1.1;
+      min-height:42px;
+      text-align:center;
+      white-space:nowrap;
       cursor:pointer;
       transition:transform .16s ease, box-shadow .2s ease, border-color .2s ease;
       box-shadow:0 6px 14px rgba(4,10,20,.32);
@@ -423,7 +483,7 @@ def _page_shell(title: str, body_html: str, extra_script: str = "") -> str:
         url('https://images.unsplash.com/photo-1574629810360-7efbbe195018?auto=format&fit=crop&w=1800&q=80') center/cover no-repeat;
       border-bottom:1px solid #202a37;
     }}
-    .hero h1 {{ margin:0 0 10px; font-size:clamp(34px,6vw,62px); line-height:1.02; max-width:860px; }}
+    .hero h1 {{ margin:0 0 10px; font-size:clamp(34px,6vw,62px); line-height:1.02; max-width:860px; text-wrap:balance; }}
     .hero p {{ margin:0; color:#d3ddeb; font-size:clamp(16px,2.3vw,21px); max-width:760px; }}
     .hero-actions {{ margin-top:18px; display:flex; gap:10px; flex-wrap:wrap; }}
     .section {{ margin-top:22px; }}
@@ -480,29 +540,36 @@ def _page_shell(title: str, body_html: str, extra_script: str = "") -> str:
     .ai-panel {{
       position:fixed; right:18px; bottom:86px; width:min(380px, calc(100vw - 26px));
       background:#0f1723; border:1px solid #2c4360; border-radius:10px; padding:12px; z-index:39; display:none;
+      box-shadow:0 18px 40px rgba(0,0,0,.35);
     }}
     .ai-panel.open {{ display:block; }}
     .ai-panel textarea {{ min-height:76px; }}
-    .build-badge {{
-      position:fixed; left:18px; bottom:18px; z-index:38;
-      border:1px solid #314156; border-radius:999px; background:rgba(10,15,24,.92);
-      color:#b9c8d9; padding:8px 12px; font-size:11px; font-weight:700;
-      box-shadow:0 8px 18px rgba(0,0,0,.28);
-    }}
     @media (max-width:960px) {{
       .g3, .g2 {{ grid-template-columns:1fr; }}
-      .hero {{ padding-top:14vh; min-height:80vh; }}
+      .hero {{ padding:20vh 0 9vh; min-height:72vh; background-position:58% center; }}
+      .hero h1 {{ font-size:clamp(28px,9vw,42px); max-width:100%; }}
+      .hero p {{ font-size:16px; }}
       .topin {{ align-items:flex-start; flex-direction:column; }}
+    }}
+    @media (max-width:520px) {{
+      .topin {{ gap:10px; padding:12px 16px; }}
+      .nav {{ flex-wrap:nowrap; min-width:max-content; }}
+      .nav .btn {{ padding:9px 12px; font-size:14px; }}
+      .nav .desktop-only {{ display:none; }}
+      .hero {{ min-height:76vh; padding-top:18vh; }}
+      .hero-actions {{ flex-wrap:nowrap; }}
+      .hero-actions .btn {{ flex:1; min-width:0; padding-inline:10px; white-space:normal; }}
+      .ai-fab {{ right:14px; bottom:14px; width:52px; height:52px; }}
+      .ai-panel {{ right:13px; bottom:76px; max-height:70vh; overflow:auto; }}
     }}
   </style>
 </head>
 <body>
 {body_html}
-<div class="build-badge">Build {build_stamp}</div>
 <button class="ai-fab" type="button" onclick="toggleAiHelp()">IA</button>
 <section id="ai-float" class="ai-panel" aria-live="polite">
   <h3 class="title" style="margin-top:0">Assistente ApexGol</h3>
-  <p class="muted">Duvidas rapidas sobre scanner, plano, login e Telegram.</p>
+  <p class="muted">Dúvidas rápidas sobre scanner, plano, login, Fantasy e Telegram.</p>
   <textarea id="ai-float-input" placeholder="Ex: como conecto meu Telegram?"></textarea>
   <button class="btn primary" type="button" onclick="askAiFloat()">Perguntar</button>
   <div id="ai-float-note" class="notice muted"></div>
@@ -520,22 +587,22 @@ async function askAiFloat() {{
   if (!input || !note) return;
   const message = input.value.trim();
   if (!message) {{ note.textContent = 'Digite uma pergunta.'; return; }}
-  note.textContent = 'Processando...';
-  const res = await fetch('/api/support-chat', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
-    body:JSON.stringify({{message}})
-  }});
-  const data = await res.json();
-  if (res.status === 401) {{
-    note.textContent = 'Para usar o assistente completo, faca login em /login.';
-    return;
+  try {{
+    note.textContent = 'Processando...';
+    const res = await fetch('/api/support-chat', {{
+      method:'POST',
+      headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+      body:JSON.stringify({{message}})
+    }});
+    const data = await res.json();
+    if (!res.ok) {{
+      note.textContent = data.detail || 'Não consegui responder agora.';
+      return;
+    }}
+    note.textContent = data.answer || 'Resposta enviada.';
+  }} catch (error) {{
+    note.textContent = 'Não consegui conectar ao assistente agora.';
   }}
-  if (!res.ok) {{
-    note.textContent = data.detail || 'Nao consegui responder agora.';
-    return;
-  }}
-  note.textContent = data.answer || 'Resposta enviada.';
 }}
 </script>
 </body>
@@ -550,18 +617,22 @@ async function submitAuth(event) {{
   const data = Object.fromEntries(new FormData(form).entries());
   const notice = document.getElementById('notice');
   notice.textContent = 'Processando...';
-  const response = await fetch('{kind}', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
-    body:JSON.stringify(data)
-  }});
-  const payload = await response.json();
-  if (!response.ok) {{
-    notice.textContent = payload.detail || payload.message || 'Falha na operacao.';
-    return;
+  try {{
+    const response = await fetch('{kind}', {{
+      method:'POST',
+      headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+      body:JSON.stringify(data)
+    }});
+    const payload = await response.json();
+    if (!response.ok) {{
+      notice.textContent = payload.detail || payload.message || 'Falha na operação.';
+      return;
+    }}
+    notice.textContent = payload.message || 'Sucesso.';
+    window.location.href = payload.redirect || '/app';
+  }} catch (error) {{
+    notice.textContent = 'Não consegui conectar ao servidor agora.';
   }}
-  notice.textContent = payload.message || 'Sucesso.';
-  window.location.href = payload.redirect || '/app';
 }}
 </script>"""
 
@@ -578,60 +649,95 @@ def landing() -> str:
         plan_html.append(
             "<div class='card'>"
             f"<h3>{_esc(plan['label'])}</h3>"
-            f"<div class='kpi'>{_fmt_money(plan['price'])}/mes</div>"
-            f"<p class='muted'>7 dias de teste gratis.</p>"
+            f"<div class='kpi'>{_fmt_money(plan['price'])}/mês</div>"
+            f"<p class='muted'>7 dias de teste grátis. Cancele quando quiser.</p>"
             f"<ul>{features}</ul>"
-            f"<a class='btn primary' href='/signup?plan={key}'>Comecar { _esc(plan['label']) }</a>"
+            f"<a class='btn primary' href='/signup?plan={key}'>Começar { _esc(plan['label']) }</a>"
             "</div>"
         )
     body = f"""
 <header class='top'>
   <div class='topin'>
     <div class='brand'>{_esc(settings.product_name)}</div>
-    <nav class='nav'>
+    <nav class='nav nav-scroll'>
       <a class='btn' href='/login'>Login</a>
       <a class='btn primary' href='/signup'>Teste 7 dias</a>
-      <a class='btn' href='/dashboard'>Dashboard Operacional</a>
+      <a class='btn desktop-only' href='/dashboard'>Dashboard Operacional</a>
     </nav>
   </div>
 </header>
 <section class='hero'>
   <div class='wrap'>
-    <h1>Objetivo claro: transformar dados ao vivo em leitura racional para apoiar sua decisao.</h1>
+    <h1>Transforme dados ao vivo em leitura racional para apoiar sua decisão.</h1>
     <p>{_esc(settings.product_tagline)}</p>
     <div class='hero-actions'>
-      <a class='btn primary' href='/signup'>Quero testar gratis</a>
-      <a class='btn' href='/login'>Ja sou cliente</a>
+      <a class='btn primary' href='/signup'>Quero testar grátis</a>
+      <a class='btn' href='/login'>Já sou cliente</a>
     </div>
   </div>
 </section>
 <main class='wrap'>
   <section class='section grid g3'>
-    <div class='card'><div class='muted'>Scanner em tempo real</div><div class='kpi'>24/7</div><div class='muted'>Cobertura global com priorizacao Brasil.</div></div>
-    <div class='card'><div class='muted'>Ciclo de monitoramento</div><div class='kpi'>5m / 1m</div><div class='muted'>5 min com jogo ativo, 1 min sem selecao ativa.</div></div>
-    <div class='card'><div class='muted'>Fantasy Campeao</div><div class='kpi'>Scout IA</div><div class='muted'>Leitura de sala, pool de jogadores e montagem otimizada por preco, projecao e historico.</div></div>
+    <div class='card'><div class='muted'>Scanner em tempo real</div><div class='kpi'>24/7</div><div class='muted'>Cobertura global com priorização Brasil.</div></div>
+    <div class='card'><div class='muted'>Ciclo de monitoramento</div><div class='kpi'>5m / 1m</div><div class='muted'>5 min com jogo ativo, 1 min sem seleção ativa.</div></div>
+    <div class='card'><div class='muted'>Fantasy Campeão</div><div class='kpi'>Scout IA</div><div class='muted'>Leitura de sala, pool de jogadores e montagem otimizada por preço, projeção e histórico.</div></div>
   </section>
   <section class='section'>
-    <h2 class='title'>Planos viaveis para operacao individual e equipe</h2>
+    <h2 class='title'>Planos viáveis para operação individual e equipe</h2>
     <div class='grid g3'>{''.join(plan_html)}</div>
   </section>
   <section class='section grid g2'>
     <div class='card'>
       <h3 class='title'>Como funciona</h3>
-      <p class='muted'>1) Cria conta e ativa teste de 7 dias. 2) Escolhe os jogos no scanner. 3) Registra entrada real no Telegram/site. 4) IA acompanha manter/sair e aprende com Green/Red. 5) No Fantasy Campeao, cruza preco do lobby com estatisticas globais para sugerir a melhor escalação.</p>
+      <p class='muted'>1) Crie conta e ative o teste de 7 dias. 2) Escolha jogos no scanner. 3) Registre entrada real no Telegram/site. 4) A IA acompanha manter/sair e aprende com Green/Red. 5) No Fantasy Campeão, cruza preço do lobby com estatísticas globais para sugerir a melhor escalação.</p>
     </div>
     <div class='card'>
       <h3 class='title'>Suporte inteligente</h3>
-      <p class='muted'>O agente de suporte resolve duvidas basicas de login, scanner, importacao e plano sem voce esperar atendimento humano para o simples.</p>
+      <p class='muted'>O agente de suporte responde dúvidas básicas de login, scanner, importação, Fantasy, Telegram e plano antes mesmo do cadastro.</p>
     </div>
   </section>
   <section class='section card'>
     <h3 class='title'>Aviso importante</h3>
-    <p class='muted'>{_esc(settings.product_name)} e uma plataforma de apoio estatistico e educacional. As sugestoes de entrada sao parametros de analise e nao promessa de lucro. A decisao final e sempre do usuario, que assume integralmente a responsabilidade pelas operacoes realizadas.</p>
+    <p class='muted'>{_esc(settings.product_name)} é uma plataforma de apoio estatístico e educacional. As sugestões de entrada são parâmetros de análise e não promessa de lucro. A decisão final é sempre do usuário, que assume integralmente a responsabilidade pelas operações realizadas.</p>
   </section>
 </main>
 """
-    return _page_shell(f"{settings.product_name} | Plataforma", body)
+    return _page_shell(
+        f"{settings.product_name} | Plataforma",
+        body,
+        description="ApexGol AI monitora futebol ao vivo, odds, Telegram e Fantasy Campeão para apoiar decisões racionais com gestão de risco.",
+        canonical_path="/",
+    )
+
+
+@router.get("/robots.txt")
+def robots_txt() -> HTMLResponse:
+    settings = _settings()
+    base = (settings.website_url or "").rstrip("/")
+    content = "User-agent: *\nAllow: /\n"
+    if base:
+        content += f"Sitemap: {base}/sitemap.xml\n"
+    return HTMLResponse(content, media_type="text/plain")
+
+
+@router.get("/favicon.ico")
+def favicon() -> RedirectResponse:
+    return RedirectResponse("/assets/logo-apexgol-mark.svg", status_code=status.HTTP_308_PERMANENT_REDIRECT)
+
+
+@router.get("/sitemap.xml")
+def sitemap_xml() -> HTMLResponse:
+    settings = _settings()
+    base = (settings.website_url or "").rstrip("/")
+    urls = ["", "/signup", "/login"]
+    items = "".join(
+        f"<url><loc>{_esc(base + (path or '/'))}</loc><changefreq>weekly</changefreq><priority>{'1.0' if path == '' else '0.7'}</priority></url>"
+        for path in urls
+        if base
+    )
+    content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{items}</urlset>"""
+    return HTMLResponse(content, media_type="application/xml")
 
 
 @router.get("/signup", response_class=HTMLResponse)
@@ -639,14 +745,14 @@ def signup_page(plan: str | None = None) -> str:
     settings = _settings()
     selected = _safe_plan(plan)
     body = f"""
-<header class='top'><div class='topin'><div class='brand'>Cadastro</div><nav class='nav'><a class='btn' href='/'>Inicio</a><a class='btn' href='/login'>Login</a></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Cadastro</div><nav class='nav nav-scroll'><a class='btn' href='/'>Início</a><a class='btn' href='/login'>Login</a></nav></div></header>
 <main class='wrap'>
   <div class='card' style='max-width:520px;margin:24px auto;'>
-    <h2 class='title'>Crie sua conta (teste gratis por 7 dias)</h2>
+    <h2 class='title'>Crie sua conta (teste grátis por 7 dias)</h2>
     <form onsubmit='submitAuth(event)'>
       <label>Nome</label><input name='name' required maxlength='120' />
       <label>Email</label><input name='email' type='email' required />
-      <label>Senha (minimo 8 caracteres)</label><input name='password' type='password' minlength='8' required />
+      <label>Senha (mínimo 8 caracteres)</label><input name='password' type='password' minlength='8' required />
       <label>Plano inicial</label>
       <select name='plan'>
         <option value='starter' {'selected' if selected == 'starter' else ''}>Starter</option>
@@ -659,14 +765,14 @@ def signup_page(plan: str | None = None) -> str:
   </div>
 </main>
 """
-    return _page_shell(f"Cadastro | {settings.product_name}", body, _auth_js("/api/auth/signup"))
+    return _page_shell(f"Cadastro | {settings.product_name}", body, _auth_js("/api/auth/signup"), canonical_path="/signup")
 
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page() -> str:
     settings = _settings()
     body = """
-<header class='top'><div class='topin'><div class='brand'>Login</div><nav class='nav'><a class='btn' href='/'>Inicio</a><a class='btn' href='/signup'>Cadastro</a></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Login</div><nav class='nav nav-scroll'><a class='btn' href='/'>Início</a><a class='btn' href='/signup'>Cadastro</a></nav></div></header>
 <main class='wrap'>
   <div class='card' style='max-width:520px;margin:24px auto;'>
     <h2 class='title'>Entrar na plataforma</h2>
@@ -680,7 +786,7 @@ def login_page() -> str:
   </div>
 </main>
 """
-    return _page_shell(f"Login | {settings.product_name}", body, _auth_js("/api/auth/login"))
+    return _page_shell(f"Login | {settings.product_name}", body, _auth_js("/api/auth/login"), canonical_path="/login")
 
 
 @router.get("/forgot-password", response_class=HTMLResponse)
@@ -1272,14 +1378,14 @@ def api_reset(request: Request, payload: ResetPayload) -> JSONResponse:
 
 
 @router.post("/api/support-chat")
-def api_support_chat(
+async def api_support_chat(
     request: Request,
     payload: SupportPayload,
-    user: dict[str, Any] = Depends(_require_user),
 ) -> JSONResponse:
     settings = _settings()
     _assert_same_origin(request, settings)
     store = _portal_store(settings)
+    user = _optional_user(request)
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     stop = red_stop_status(state.history or [], settings.daily_red_limit)
     text = payload.message.strip()
@@ -1288,15 +1394,18 @@ def api_support_chat(
     context = {
         "red_lock": stop,
         "active_signal": bool(state.active_signal),
+        "skills": await _ai_support_skills(settings),
     }
     answer = support_agent_reply(text, context)
-    store.log_support(int(user["id"]), "user", text)
-    store.log_support(int(user["id"]), "agent", answer)
-    logs = store.list_support_logs(int(user["id"]), limit=20)
-    logs_html = "".join(
-        f"<tr><td>{_esc(row['created_at'])[:16]}</td><td>{_esc(row['role'])}</td><td>{_esc(row['message'])}</td></tr>"
-        for row in logs
-    ) or "<tr><td colspan='3'>Sem conversas ainda.</td></tr>"
+    logs_html = ""
+    if user:
+        store.log_support(int(user["id"]), "user", text)
+        store.log_support(int(user["id"]), "agent", answer)
+        logs = store.list_support_logs(int(user["id"]), limit=20)
+        logs_html = "".join(
+            f"<tr><td>{_esc(row['created_at'])[:16]}</td><td>{_esc(row['role'])}</td><td>{_esc(row['message'])}</td></tr>"
+            for row in logs
+        ) or "<tr><td colspan='3'>Sem conversas ainda.</td></tr>"
     return JSONResponse({"ok": True, "answer": answer, "logs_html": logs_html})
 
 
