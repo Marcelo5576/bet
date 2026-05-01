@@ -166,6 +166,14 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "priority": 71,
     },
     {
+        "skill_id": "telegram_entry_form",
+        "title": "Entrada pelo Telegram",
+        "intent": "Explicar o formulário de entrada pelo botão Entrei no Telegram.",
+        "keywords": ["telegram", "entrei", "odd", "odds", "valor", "formulario", "formulário", "monitoramento"],
+        "answer": "No Telegram, clique Entrei. Mercado e odd vêm sugeridos; envie só o valor ou valor | odd.",
+        "priority": 72,
+    },
+    {
         "skill_id": "risk_no_chasing",
         "title": "Não perseguir red",
         "intent": "Evitar aumento emocional de stake após perdas.",

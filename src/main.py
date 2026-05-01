@@ -340,22 +340,38 @@ def _shorten(text: str, limit: int) -> str:
     return text[: limit - 60].rstrip() + "\n\n[Resumo cortado para caber no Telegram]"
 
 
-def _entry_prompt_text() -> str:
-    return "\n".join(
+def _entry_prompt_text(signal: dict | None = None) -> str:
+    default_market = _default_entry_market(signal)
+    lines = [
+        "Formulario de entrada:",
+        "",
+        "Envie so o valor da entrada.",
+        "Ou: valor | odd",
+        "Ou: mercado | valor | odd",
+        "",
+    ]
+    if default_market:
+        default_odds = _default_entry_odds(signal)
+        lines.extend(
+            [
+                f"Mercado selecionado: {default_market}",
+                f"Odd sugerida: {default_odds or '-'}",
+                "Exemplo rapido:",
+                "100",
+                "",
+            ]
+        )
+    lines.extend(
         [
-            "Informe sua entrada real neste formato:",
-            "",
-            "mercado | valor | odd",
-            "",
-            "Exemplos:",
+            "Exemplos completos:",
             "Over 2.5 gols | 100 | 1.85",
             "Escanteios over 8.5 | 80 | 1.90",
             "Flamengo -0.5 asiatica | 100 | 2.05",
             "",
-            "Tambem funciona direto com:",
-            "/entrada Over 2.5 gols | 100 | 1.85",
+            "Depois disso eu mando direto para monitoramento e voce fecha em Green, Red ou Anular.",
         ]
     )
+    return "\n".join(lines)
 
 
 def _closed_result_text(signal: dict | None, label: str) -> str:
@@ -402,13 +418,27 @@ def _red_lock_text(status: dict) -> str:
     )
 
 
-def _parse_entry_details(text: str) -> dict:
+def _parse_entry_details(text: str, signal: dict | None = None) -> dict:
     cleaned = " ".join((text or "").strip().split())
     parts = [part.strip() for part in re.split(r"\s*[|;]\s*", cleaned) if part.strip()]
     market = parts[0] if parts else cleaned
-    amount = _parse_number(parts[1]) if len(parts) >= 2 else None
-    odds = _parse_number(parts[2]) if len(parts) >= 3 else None
+    amount = _parse_amount(parts[1]) if len(parts) >= 2 else None
+    odds = _parse_odds(parts[2]) if len(parts) >= 3 else None
     notes = " | ".join(parts[3:]) if len(parts) >= 4 else None
+    if len(parts) == 2 and _parse_amount(parts[0]) is not None and _parse_odds(parts[1]) is not None:
+        market = _default_entry_market(signal) or "Entrada manual"
+        amount = _parse_amount(parts[0])
+        odds = _parse_odds(parts[1])
+    elif len(parts) == 1:
+        numbers = re.findall(r"\d+(?:[.,]\d+)?", cleaned)
+        if len(numbers) == 1:
+            market = _default_entry_market(signal) or "Entrada manual"
+            amount = _parse_amount(numbers[0])
+            odds = _default_entry_odds(signal)
+        elif len(numbers) >= 2:
+            market = _default_entry_market(signal) or "Entrada manual"
+            amount = _parse_amount(numbers[0])
+            odds = _parse_odds(numbers[1])
     return {
         "market": market or "Entrada manual",
         "amount": amount,
@@ -418,12 +448,73 @@ def _parse_entry_details(text: str) -> dict:
 
 
 def _parse_number(value: str | None) -> float | None:
+    return _parse_amount(value)
+
+
+def _parse_amount(value: str | None) -> float | None:
     if not value:
         return None
     match = re.search(r"\d+(?:[.,]\d+)?", value)
     if not match:
         return None
-    return float(match.group(0).replace(",", "."))
+    try:
+        return float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_odds(value: str | None) -> float | None:
+    if not value:
+        return None
+    match = re.search(r"\d+(?:[.,]\d+)?", value)
+    if not match:
+        return None
+    return _normalize_entry_odds(match.group(0))
+
+
+def _normalize_entry_odds(value: str | None) -> float | None:
+    if not value:
+        return None
+    raw = str(value)
+    try:
+        number = float(raw.replace(",", "."))
+    except ValueError:
+        return None
+    if number >= 100 and "." not in raw and "," not in raw:
+        return round(number / 100, 2)
+    return number
+
+
+def _default_entry_market(signal: dict | None) -> str:
+    if not signal:
+        return ""
+    primary = _primary_recommendation(signal)
+    market = primary.get("market") or signal.get("market") or signal.get("entry_market") or ""
+    entry = primary.get("entry") or _primary_entry_text(signal)
+    text = " ".join(str(item).strip() for item in (market, entry) if str(item or "").strip())
+    return text[:160]
+
+
+def _default_entry_odds(signal: dict | None) -> float | None:
+    if not signal:
+        return None
+    primary = _primary_recommendation(signal)
+    return _parse_odds(
+        str(
+            primary.get("odds")
+            or signal.get("entry_odds")
+            or signal.get("target_odds")
+            or signal.get("odds")
+            or ""
+        )
+    )
+
+
+def _active_signal_for_prompt(context: ContextTypes.DEFAULT_TYPE) -> dict | None:
+    store: StateStore | None = context.application.bot_data.get("store")
+    if not store:
+        return None
+    return store.load().active_signal
 
 
 def menu() -> InlineKeyboardMarkup:
@@ -678,8 +769,12 @@ async def ia_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def entry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = " ".join(context.args).strip()
     if not text:
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if chat_id:
+            pending = context.application.bot_data.setdefault("pending_entry_chats", set())
+            pending.add(chat_id)
         await update.effective_message.reply_text(
-            _entry_prompt_text(),
+            _entry_prompt_text(_active_signal_for_prompt(context)),
             reply_markup=active_menu(),
         )
         return
@@ -757,7 +852,14 @@ async def save_entry_details(
         )
         return
 
-    details = _parse_entry_details(raw_text)
+    details = _parse_entry_details(raw_text, state.active_signal)
+    if details.get("amount") is None or details.get("odds") is None:
+        await update.effective_message.reply_text(
+            "Preciso do valor e da odd para mandar ao monitoramento.\n\n"
+            + _entry_prompt_text(state.active_signal),
+            reply_markup=active_menu(),
+        )
+        return
     state = store.mark_entry_details(
         details["market"],
         details.get("amount"),
@@ -819,18 +921,21 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup = active_menu() if state.active_signal else games_menu()
     elif query.data == "entry:yes":
         store: StateStore = context.application.bot_data["store"]
-        state = store.mark_entry(True)
-        await supabase_sink(context).sync_signal(state.active_signal)
-        if state.active_signal and query.message:
-            await send_motion(context, query.message.chat_id, "signal")
-        text = (
-            "🟢🟢🟢 ENTRADA REGISTRADA\n"
-            "Vou monitorar este jogo a cada 5 minutos.\n\n"
-            + monitor_text(state.active_signal)
-            if state.active_signal
-            else "Nao ha jogo ativo para marcar entrada."
-        )
-        reply_markup = active_menu() if state.active_signal else games_menu()
+        state = store.load()
+        if not state.active_signal:
+            text = "Nao ha jogo ativo para marcar entrada."
+            reply_markup = games_menu()
+        else:
+            chat_id = query.message.chat_id if query.message else None
+            if chat_id:
+                pending = context.application.bot_data.setdefault("pending_entry_chats", set())
+                pending.add(chat_id)
+                await send_motion(context, chat_id, "signal")
+            text = (
+                "🟢 QUASE LA: informe valor e odd para entrar no monitoramento.\n\n"
+                + _entry_prompt_text(state.active_signal)
+            )
+            reply_markup = active_menu()
     elif query.data == "entry:details":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
@@ -842,7 +947,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if chat_id:
                 pending = context.application.bot_data.setdefault("pending_entry_chats", set())
                 pending.add(chat_id)
-            text = _entry_prompt_text()
+            text = _entry_prompt_text(state.active_signal)
             reply_markup = active_menu()
     elif query.data == "entry:no":
         store: StateStore = context.application.bot_data["store"]
