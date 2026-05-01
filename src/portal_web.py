@@ -727,6 +727,37 @@ def _page_shell(
     .feature-card {{ min-height:190px; padding:20px; }}
     .feature-card h3 {{ font-size:26px; margin:14px 0 10px; }}
     .feature-tag {{ border:1px solid #2f445d; border-radius:999px; color:#a7d9ff; display:inline-flex; font-size:11px; font-weight:900; letter-spacing:1px; padding:5px 9px; text-transform:uppercase; }}
+    .plan-intel {{
+      border:1px solid #2a3441;
+      border-radius:8px;
+      background:linear-gradient(180deg, rgba(16,25,36,.96), rgba(9,14,21,.96));
+      display:grid;
+      gap:18px;
+      grid-template-columns:minmax(0,.82fr) minmax(360px,1fr);
+      margin-bottom:18px;
+      padding:24px;
+    }}
+    .plan-intel h3 {{ font-size:30px; line-height:1.05; margin:10px 0; text-wrap:balance; }}
+    .plan-scope-grid {{ display:grid; gap:10px; grid-template-columns:repeat(3,minmax(0,1fr)); }}
+    .plan-scope {{
+      border:1px solid #26384d;
+      border-radius:8px;
+      background:#0b121a;
+      display:grid;
+      gap:8px;
+      min-height:156px;
+      padding:14px;
+    }}
+    .plan-scope strong {{ font-size:18px; }}
+    .plan-note {{
+      border-left:3px solid var(--gold);
+      color:#c8d4e3;
+      font-size:13px;
+      font-weight:800;
+      line-height:1.45;
+      margin-top:12px;
+      padding:8px 0 8px 12px;
+    }}
     .opportunity {{
       background:radial-gradient(circle at 72% 24%, rgba(0,194,120,.18), transparent 32%), #0d1117;
       border:1px solid #2a3441;
@@ -813,6 +844,8 @@ def _page_shell(
       .hero p {{ font-size:16px; }}
       .hud {{ min-height:auto; }}
       .opportunity {{ grid-template-columns:1fr; padding:18px; }}
+      .plan-intel {{ grid-template-columns:1fr; padding:18px; }}
+      .plan-scope-grid {{ grid-template-columns:1fr; }}
       .topin {{ align-items:flex-start; flex-direction:column; }}
     }}
     @media (max-width:520px) {{
@@ -1036,6 +1069,31 @@ def landing() -> str:
   <section class='section big'>
     <h2 class='display-title'>Escolha seu plano de operação</h2>
     <p class='muted' style='text-align:center;margin:0 auto 18px;max-width:680px'>Comece testando. Evolua quando precisar de mais memória, prioridade e estrutura comercial.</p>
+    <div class='plan-intel'>
+      <div>
+        <div class='feature-tag'>O que o cliente compra</div>
+        <h3>IA por contexto, plano e histórico de operação.</h3>
+        <p class='muted'>Cada cliente recebe uma experiência própria dentro do mesmo motor: login, Telegram, preferências, banca, histórico Green/Red e simulações ficam ligados à conta dele. Assim a IA responde com base no que aquele operador usa e registra.</p>
+        <div class='plan-note'>No Pro, o cliente tem um agente lógico próprio. Não é preciso criar um servidor separado por pessoa: o isolamento acontece por usuário, memória e regras do plano.</div>
+      </div>
+      <div class='plan-scope-grid' aria-label='Resumo dos planos e inteligência artificial'>
+        <div class='plan-scope'>
+          <div class='feature-tag'>Starter</div>
+          <strong>Leitura essencial</strong>
+          <p class='muted'>Scanner, Telegram, histórico básico e respostas de suporte para operar com processo.</p>
+        </div>
+        <div class='plan-scope'>
+          <div class='feature-tag'>Pro</div>
+          <strong>Agente com memória</strong>
+          <p class='muted'>Contexto do cliente, simulações no Supabase, preferências de banca e aprendizado por resultado.</p>
+        </div>
+        <div class='plan-scope'>
+          <div class='feature-tag'>Team</div>
+          <strong>Operação em equipe</strong>
+          <p class='muted'>Multioperador, visão admin, carteira comercial e IA acompanhando grupos de operação.</p>
+        </div>
+      </div>
+    </div>
     <div class='grid g3'>{''.join(plan_html)}</div>
   </section>
   <section class='section big card'>

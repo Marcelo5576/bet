@@ -46,6 +46,8 @@ async function main() {
     await assert.equal(await page.locator("meta[name='description']").count(), 1);
     await assert.equal(await page.locator("link[rel='canonical']").getAttribute("href"), "https://novo.tickpost.com.br/");
     await assert.ok((await page.locator("body").innerText()).includes("decisão"));
+    await assert.equal(await page.locator("text=O que o cliente compra").count(), 1);
+    await assert.equal(await page.locator("text=Agente com memória").count(), 1);
     await assert.equal(await page.locator("text=Build ").count(), 0);
     await checkNoHorizontalOverflow(page, "desktop");
     await page.screenshot({ path: path.join(outDir, "landing-desktop.png"), fullPage: true });
@@ -71,6 +73,14 @@ async function main() {
     const json = await response.json();
     assert.equal(json.ok, true);
     assert.match(json.answer, /Telegram|chatid|notifica/i);
+    const planResponse = await page.request.post(`${baseURL}/api/support-chat`, {
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+      data: { message: "no plano pro cada cliente tem seu proprio agente?" },
+    });
+    assert.equal(planResponse.status(), 200);
+    const planJson = await planResponse.json();
+    assert.equal(planJson.ok, true);
+    assert.match(planJson.answer, /cliente|hist[oó]rico|mem[oó]ria|Telegram/i);
     await page.goto(`${baseURL}/`, { waitUntil: "networkidle" });
     await page.locator(".ai-fab").click();
     await page.locator("#ai-float-input").fill("como conecto meu Telegram?");

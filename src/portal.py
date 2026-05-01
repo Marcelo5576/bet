@@ -119,6 +119,14 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "priority": 40,
     },
     {
+        "skill_id": "plans_ai_agent_scope",
+        "title": "Agente por cliente",
+        "intent": "Explicar como a IA funciona para cada cliente e plano.",
+        "keywords": ["agente", "cliente", "intermediario", "intermediário", "pro", "memoria", "memória", "isolado", "individual"],
+        "answer": "No Pro, cada cliente tem IA lógica própria: histórico, Telegram, preferências e banca separados.",
+        "priority": 41,
+    },
+    {
         "skill_id": "public_fantasy",
         "title": "Fantasy Campeão",
         "intent": "Explicar leitura de sala e montagem de escalação para Fantasy Campeão.",
@@ -229,6 +237,14 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "keywords": ["promessa", "resultado", "vender", "oferta", "garantia", "ganhar"],
         "answer": "Venda como apoio estatístico e disciplina operacional, nunca como garantia de lucro.",
         "priority": 180,
+    },
+    {
+        "skill_id": "product_differentiators",
+        "title": "Diferenciais ApexGol",
+        "intent": "Explicar diferenciais do produto frente a scanners, tips e bots simples.",
+        "keywords": ["diferencial", "concorrente", "comparar", "scanner", "tip", "bot", "mercado", "vantagem"],
+        "answer": "Diferencial: scanner, Telegram, simulação, saída dinâmica, Fantasy e memória Supabase juntos.",
+        "priority": 181,
     },
     {
         "skill_id": "team_plan",
