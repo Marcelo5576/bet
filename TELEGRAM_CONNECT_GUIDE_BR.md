@@ -29,7 +29,7 @@ O bot vai responder com um numero (chat_id).
 - O scanner agora envia apenas **jogos ao vivo reais**.
 - Se a fonte nao tiver jogo ao vivo naquele instante, o bot nao inventa pre-live, grade do dia ou resultado fake.
 - Sem jogo ativo: ciclo padrao definido no painel.
-- Com jogo escolhido: ciclo de 5 em 5 minutos.
+- Com jogo escolhido: ciclo de 2 em 2 minutos.
 - Cada usuario pode ajustar seus proprios tempos dentro dos limites permitidos.
 
 ## 4) Diagnostico rapido

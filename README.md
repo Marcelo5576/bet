@@ -81,7 +81,7 @@ Variaveis novas no `.env`:
 ## Scanner e Telegram por usuario
 
 - Ciclo padrao sem jogo ativo: 1 minuto.
-- Ciclo com jogo ativo: 5 minutos.
+- Ciclo com jogo ativo: 2 minutos.
 - Cada usuario pode ajustar preferencia no portal (`/app`) e optar por notificacao Telegram.
 - Guia completo: `TELEGRAM_CONNECT_GUIDE_BR.md`.
 

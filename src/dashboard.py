@@ -212,6 +212,28 @@ def _valid_basic_header(request: Request, settings) -> bool:
     return bool(user_ok and password_ok)
 
 
+def _assert_dashboard_write_request(request: Request, settings: Settings | None = None) -> None:
+    settings = settings or load_settings()
+    origin = str(request.headers.get("origin") or "").rstrip("/")
+    host = str(request.headers.get("host") or "").strip()
+    current_origin = f"{request.url.scheme}://{host}".rstrip("/") if host else ""
+    allowed = {current_origin}
+    website = str(getattr(settings, "website_url", "") or "").rstrip("/")
+    if website:
+        allowed.add(website)
+    for item in str(getattr(settings, "dashboard_domains", "") or "").split(","):
+        value = item.strip().rstrip("/")
+        if value:
+            allowed.add(value)
+    if origin and origin in allowed:
+        return
+    requested_with = str(request.headers.get("x-requested-with") or "").lower()
+    fetch_site = str(request.headers.get("sec-fetch-site") or "").lower()
+    if requested_with == "xmlhttprequest" and fetch_site in {"", "none", "same-origin", "same-site"}:
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Origem da requisicao recusada.")
+
+
 def _can_open_dashboard(request: Request, settings) -> bool:
     if _valid_portal_session(request, settings):
         return True
@@ -1769,7 +1791,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/bankroll/settings', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{
           initial_bankroll: initial,
           balance,
@@ -1824,7 +1846,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/bankroll/entry', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify(payload)
       }});
       const data = await response.json();
@@ -1843,7 +1865,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/bankroll/close', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{entry_id: Number(entryId), outcome}})
       }});
       const data = await response.json();
@@ -1943,7 +1965,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/scanner-preference', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{mode}})
       }});
       const data = await response.json();
@@ -1987,7 +2009,7 @@ def dashboard(request: Request) -> str:
     window.__scanInFlight = true;
     if (note) note.textContent = silent ? 'Executando scanner automatico...' : 'Executando scanner agora...';
     try {{
-      const response = await fetch('/api/scanner-run', {{method: 'POST'}});
+      const response = await fetch('/api/scanner-run', {{method: 'POST', headers: {{'X-Requested-With': 'XMLHttpRequest'}}}});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Falha ao solicitar scan');
       if (note) note.textContent = `${{data.message}} (${{data.candidates}} candidatos)`;
@@ -2026,7 +2048,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/simulator-session', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{games: totalGames, bankroll: 100, stake_percent: 10}})
       }});
       const data = await response.json();
@@ -2075,7 +2097,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/fantasy-lineup', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{
           players_text: playersText,
           room_url: roomUrl,
@@ -2120,7 +2142,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/fantasy-room-import', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{
           room_url: roomUrl,
           players_text: playersText,
@@ -2170,7 +2192,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/import-history', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{text}})
       }});
       const data = await response.json();
@@ -2203,7 +2225,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/history-value', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{
           signal_id: signalId,
           entry_value: value,
@@ -2224,7 +2246,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/history-delete', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{signal_id: signalId}})
       }});
       const data = await response.json();
@@ -2241,7 +2263,7 @@ def dashboard(request: Request) -> str:
     try {{
       const response = await fetch('/api/history-outcome', {{
         method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
         body: JSON.stringify({{signal_id: signalId, outcome}})
       }});
       const data = await response.json();
@@ -2377,8 +2399,10 @@ def api_scanner_preference(_: None = Depends(_auth)) -> JSONResponse:
 @app.post("/api/scanner-preference")
 def api_set_scanner_preference(
     payload: ScannerPreferencePayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
     state = store.set_scan_preference(payload.mode)
     mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
@@ -2393,7 +2417,8 @@ def api_set_scanner_preference(
 
 
 @app.post("/api/scanner-request")
-def api_scanner_request(_: None = Depends(_auth)) -> JSONResponse:
+def api_scanner_request(request: Request, _: None = Depends(_auth)) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
     state = store.request_scan_now()
     return JSONResponse(
@@ -2406,7 +2431,8 @@ def api_scanner_request(_: None = Depends(_auth)) -> JSONResponse:
 
 
 @app.post("/api/scanner-run")
-async def api_scanner_run(_: None = Depends(_auth)) -> JSONResponse:
+async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     settings = load_settings()
     store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
     state = store.load()
@@ -2568,8 +2594,10 @@ def api_fantasy_live_opportunities(_: None = Depends(_auth)) -> JSONResponse:
 @app.post("/api/simulator-session")
 async def api_simulator_session(
     payload: SimulationRunPayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     settings = load_settings()
     store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
     state = store.load()
@@ -2658,8 +2686,10 @@ async def api_simulator_session(
 @app.post("/api/fantasy-lineup")
 async def api_fantasy_lineup(
     payload: FantasyLineupPayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     room_url = str(payload.room_url or "").strip()
     players_text = str(payload.players_text or "").strip()
     budget = float(payload.budget)
@@ -2697,8 +2727,10 @@ async def api_fantasy_lineup(
 @app.post("/api/fantasy-room-import")
 async def api_fantasy_room_import(
     payload: FantasyRoomPayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     room_id = _extract_room_id(payload.room_url)
     if not room_id:
         raise HTTPException(
@@ -2808,6 +2840,7 @@ def api_bankroll_settings(
     _: None = Depends(_auth),
 ) -> JSONResponse:
     settings = load_settings()
+    _assert_dashboard_write_request(request, settings)
     user = _current_dashboard_user(request, settings)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
@@ -2828,6 +2861,7 @@ def api_bankroll_entry(
     _: None = Depends(_auth),
 ) -> JSONResponse:
     settings = load_settings()
+    _assert_dashboard_write_request(request, settings)
     user = _current_dashboard_user(request, settings)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
@@ -2864,6 +2898,7 @@ def api_bankroll_close(
     _: None = Depends(_auth),
 ) -> JSONResponse:
     settings = load_settings()
+    _assert_dashboard_write_request(request, settings)
     user = _current_dashboard_user(request, settings)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessao invalida.")
@@ -2886,7 +2921,12 @@ def api_bankroll_close(
 
 
 @app.post("/api/import-history")
-async def import_history(payload: ImportPayload, _: None = Depends(_auth)) -> JSONResponse:
+async def import_history(
+    payload: ImportPayload,
+    request: Request,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     records = parse_manual_bets(payload.text)
     if not records:
         raise HTTPException(
@@ -2914,8 +2954,10 @@ async def import_history(payload: ImportPayload, _: None = Depends(_auth)) -> JS
 @app.post("/api/history-value")
 async def update_history_value(
     payload: HistoryValuePayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     if payload.entry_value is None and payload.entry_odds is None and payload.profit_value is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2947,8 +2989,10 @@ async def update_history_value(
 @app.post("/api/history-delete")
 async def delete_history_record(
     payload: HistoryDeletePayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     settings = load_settings()
     store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
     state, deleted = store.delete_history_record(payload.signal_id)
@@ -2965,8 +3009,10 @@ async def delete_history_record(
 @app.post("/api/history-outcome")
 async def close_history_entry(
     payload: HistoryOutcomePayload,
+    request: Request,
     _: None = Depends(_auth),
 ) -> JSONResponse:
+    _assert_dashboard_write_request(request)
     outcome = payload.outcome.lower().strip()
     if outcome not in {"win", "loss"}:
         raise HTTPException(
@@ -3635,7 +3681,7 @@ def _scanner_status(state, settings=None) -> dict[str, Any]:
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
     live_games = _live_games_only(state.last_games or [])
     idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
-    active_seconds = int(getattr(settings, "active_scan_interval_seconds", 300) or 300)
+    active_seconds = int(getattr(settings, "active_scan_interval_seconds", 120) or 120)
     current_seconds = active_seconds if has_active else idle_seconds
     return {
         "mode": (

@@ -101,7 +101,7 @@ def load_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "300")),
         idle_scan_interval_seconds=int(os.getenv("IDLE_SCAN_INTERVAL_SECONDS", "60")),
-        active_scan_interval_seconds=int(os.getenv("ACTIVE_SCAN_INTERVAL_SECONDS", "300")),
+        active_scan_interval_seconds=int(os.getenv("ACTIVE_SCAN_INTERVAL_SECONDS", "120")),
         test_mode=_as_bool(os.getenv("TEST_MODE"), False),
         api_football_key=os.getenv("API_FOOTBALL_KEY") or None,
         api_football_base_url=os.getenv(

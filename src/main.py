@@ -873,53 +873,94 @@ async def save_entry_details(
     )
 
 
+def _valid_callback_data(data: str) -> bool:
+    exact = {
+        "menu:home",
+        "menu:games",
+        "menu:ia",
+        "menu:reports",
+        "menu:health",
+        "scan",
+        "list",
+        "entry:yes",
+        "entry:details",
+        "entry:no",
+        "exit:prompt",
+        "dashboard",
+        "stats",
+        "learning",
+        "offer",
+        "support",
+        "health:test",
+        "health:checkout",
+        "ia:help",
+        "ia:import",
+        "ia:paper",
+        "ia:context",
+        "status",
+        "stop",
+    }
+    if data in exact:
+        return True
+    if data.startswith("pick:"):
+        raw = data.split(":", 1)[1]
+        return raw.isdigit() and int(raw) < 30
+    if data.startswith("outcome:"):
+        return data.split(":", 1)[1] in {"win", "loss", "void"}
+    return False
+
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    data = str(query.data or "")
+    if not _valid_callback_data(data):
+        await query.answer("Comando invalido.", show_alert=True)
+        return
     await query.answer()
     reply_markup = menu()
-    if query.data == "menu:home":
+    if data == "menu:home":
         text = _home_text(context)
         reply_markup = menu()
-    elif query.data == "menu:games":
+    elif data == "menu:games":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         text = _games_text(state)
         reply_markup = games_menu(active=bool(state.active_signal))
-    elif query.data == "menu:ia":
+    elif data == "menu:ia":
         text = _ia_menu_text()
         reply_markup = ia_menu()
-    elif query.data == "menu:reports":
+    elif data == "menu:reports":
         text = _reports_text(context)
         reply_markup = reports_menu()
-    elif query.data == "menu:health":
+    elif data == "menu:health":
         text = _health_text(context)
         reply_markup = health_menu()
-    elif query.data == "scan":
+    elif data == "scan":
         if query.message:
             await send_motion(context, query.message.chat_id, "scan")
         text = await run_scan(context, auto_pick=False)
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         reply_markup = active_menu() if state.active_signal else candidate_menu(state)
-    elif query.data == "list":
+    elif data == "list":
         store: StateStore = context.application.bot_data["store"]
         store.clear_active()
         text = await run_scan(context, auto_pick=False, force_list=True)
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         reply_markup = active_menu() if state.active_signal else candidate_menu(state)
-    elif query.data.startswith("pick:"):
-        index = int(query.data.split(":", 1)[1])
+    elif data.startswith("pick:"):
+        index = int(data.split(":", 1)[1])
         store: StateStore = context.application.bot_data["store"]
         state = store.choose_candidate(index)
         text = (
-            "Jogo escolhido. Scanner ativo a cada 5 minutos:\n\n"
+            "Jogo escolhido. Scanner ativo a cada 2 minutos:\n\n"
             + monitor_text(state.active_signal)
             if state.active_signal
             else "Nao consegui escolher esse jogo. Rode /scan novamente."
         )
         reply_markup = active_menu() if state.active_signal else games_menu()
-    elif query.data == "entry:yes":
+    elif data == "entry:yes":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         if not state.active_signal:
@@ -936,7 +977,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 + _entry_prompt_text(state.active_signal)
             )
             reply_markup = active_menu()
-    elif query.data == "entry:details":
+    elif data == "entry:details":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         if not state.active_signal:
@@ -949,7 +990,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 pending.add(chat_id)
             text = _entry_prompt_text(state.active_signal)
             reply_markup = active_menu()
-    elif query.data == "entry:no":
+    elif data == "entry:no":
         store: StateStore = context.application.bot_data["store"]
         state = store.mark_entry(False)
         await supabase_sink(context).sync_signal(state.active_signal)
@@ -960,7 +1001,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else "Nao ha jogo ativo."
         )
         reply_markup = active_menu() if state.active_signal else games_menu()
-    elif query.data == "exit:prompt":
+    elif data == "exit:prompt":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         text = (
@@ -970,44 +1011,44 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if state.active_signal:
             text += "\n\n" + monitor_text(state.active_signal)
         reply_markup = active_menu() if state.active_signal else games_menu()
-    elif query.data == "dashboard":
+    elif data == "dashboard":
         settings: Settings = context.application.bot_data["settings"]
         text = _dashboard_text(settings)
         reply_markup = reports_menu()
-    elif query.data == "stats":
+    elif data == "stats":
         text = _stats_text(context)
         reply_markup = reports_menu()
-    elif query.data == "learning":
+    elif data == "learning":
         text = _learning_text(context)
         reply_markup = ia_menu()
-    elif query.data == "offer":
+    elif data == "offer":
         text = _offer_text(context)
         reply_markup = reports_menu()
-    elif query.data == "support":
+    elif data == "support":
         text = _support_text(context)
         reply_markup = health_menu()
-    elif query.data == "health:test":
+    elif data == "health:test":
         text = "🟢 Teste OK. O Telegram esta recebendo mensagens do BetSignal Cloud."
         reply_markup = health_menu()
-    elif query.data == "health:checkout":
+    elif data == "health:checkout":
         _, text = await run_system_checkout(context, manual=True)
         reply_markup = health_menu()
-    elif query.data == "ia:help":
+    elif data == "ia:help":
         text = _ia_help_text()
         reply_markup = ia_menu()
-    elif query.data == "ia:import":
+    elif data == "ia:import":
         chat_id = query.message.chat_id if query.message else None
         if chat_id:
             pending = context.application.bot_data.setdefault("pending_import_chats", set())
             pending.add(chat_id)
         text = _import_prompt_text()
         reply_markup = ia_menu()
-    elif query.data == "ia:paper":
+    elif data == "ia:paper":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         text = _paper_text(state)
         reply_markup = ia_menu()
-    elif query.data == "ia:context":
+    elif data == "ia:context":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         text = (
@@ -1016,8 +1057,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else "A IA ainda nao tem jogo ativo. Va em Jogos > Scan agora e escolha uma partida."
         )
         reply_markup = ia_menu()
-    elif query.data.startswith("outcome:"):
-        outcome = query.data.split(":", 1)[1]
+    elif data.startswith("outcome:"):
+        outcome = data.split(":", 1)[1]
         store: StateStore = context.application.bot_data["store"]
         before = store.load()
         signal_id = (before.active_signal or {}).get("signal_id")
@@ -1037,7 +1078,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if outcome == "loss" and stop.get("discipline_alert"):
             text += "\n\n" + _red_lock_text(stop)
         reply_markup = games_menu()
-    elif query.data == "status":
+    elif data == "status":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
         text = (
@@ -1321,7 +1362,7 @@ def _to_dict(item) -> dict:
 def candidate_list_text(signals: list[dict]) -> str:
     lines = [
         "🔵📡 SCANNER AO VIVO",
-        "Escolha um jogo para monitorar de 5 em 5 minutos.",
+        "Escolha um jogo para monitorar de 2 em 2 minutos.",
     ]
     scope = signals[0].get("scan_scope") if signals else None
     if scope:

@@ -167,6 +167,12 @@ async function main() {
     await page.locator("button[type='submit']").click();
     await page.waitForURL(/\/app/, { timeout: 15000 });
     await page.goto(`${baseURL}/dashboard`, { waitUntil: "networkidle" });
+    const stateResponse = await page.request.get(`${baseURL}/api/state`);
+    assert.equal(stateResponse.status(), 200);
+    const stateJson = await stateResponse.json();
+    assert.equal(stateJson.scanner.active_scan_interval_seconds, 120);
+    const csrfResponse = await page.request.post(`${baseURL}/api/scanner-run`);
+    assert.equal(csrfResponse.status(), 403);
     await page.locator("#account-toggle").click();
     await assert.equal(await page.locator("#account-panel.open").isVisible(), true);
     await page.locator("#bankroll-initial").fill("1000");

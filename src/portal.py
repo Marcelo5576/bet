@@ -114,7 +114,7 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "title": "Scanner ao vivo",
         "intent": "Explicar scanner, ciclos de monitoramento e ausência de jogos.",
         "keywords": ["scanner", "jogo", "jogos", "ao vivo", "sinal", "sinais", "odds", "sem jogos"],
-        "answer": "O scanner lê jogos ao vivo, odds e pressão. Sem jogo ativo roda em 1m; com jogo ativo, 5m.",
+        "answer": "O scanner lê jogos ao vivo, odds e pressão. Sem jogo ativo roda em 1m; com jogo ativo, 2m.",
         "priority": 30,
     },
     {
@@ -172,6 +172,30 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "keywords": ["telegram", "entrei", "odd", "odds", "valor", "formulario", "formulário", "monitoramento"],
         "answer": "No Telegram, clique Entrei. Mercado e odd vêm sugeridos; envie só o valor ou valor | odd.",
         "priority": 72,
+    },
+    {
+        "skill_id": "scanner_active_monitoring",
+        "title": "Monitoramento ativo",
+        "intent": "Explicar intervalo do scanner após escolher um jogo.",
+        "keywords": ["monitoramento", "2 minutos", "dois minutos", "jogo escolhido", "scanner", "ativo", "sair"],
+        "answer": "Com jogo escolhido, o scanner monitora a cada 2 minutos. Ao sair, volta ao ciclo normal.",
+        "priority": 73,
+    },
+    {
+        "skill_id": "ai_live_efficiency",
+        "title": "Eficiência ao vivo",
+        "intent": "Orientar leitura curta de valor, risco e saída dinâmica.",
+        "keywords": ["eficiencia", "eficiência", "edge", "pressao", "pressão", "tempo real", "saida", "saída"],
+        "answer": "A IA prioriza edge, pressão real, odd justa, risco baixo e saída antes de reforçar entrada.",
+        "priority": 74,
+    },
+    {
+        "skill_id": "security_operational_limits",
+        "title": "Segurança operacional",
+        "intent": "Explicar proteções de sessão, origem e botões sensíveis.",
+        "keywords": ["seguranca", "segurança", "csrf", "sessao", "sessão", "login", "callback", "telegram"],
+        "answer": "Ações sensíveis exigem sessão válida, origem confiável e callback reconhecido pelo sistema.",
+        "priority": 75,
     },
     {
         "skill_id": "risk_no_chasing",
@@ -355,7 +379,7 @@ class PortalStore:
                   user_id integer primary key,
                   scan_enabled integer not null default 1,
                   idle_scan_seconds integer not null default 60,
-                  active_scan_seconds integer not null default 300,
+                  active_scan_seconds integer not null default 120,
                   telegram_enabled integer not null default 0,
                   telegram_chat_id text,
                   updated_at text not null,
@@ -411,6 +435,7 @@ class PortalStore:
             self._ensure_column(conn, "users", "gateway_subscription_id", "text")
             self._ensure_column(conn, "user_preferences", "scan_enabled", "integer not null default 1")
             self._ensure_column(conn, "bankroll_accounts", "default_stake_percent", "real not null default 2")
+            conn.execute("update user_preferences set active_scan_seconds = 120 where active_scan_seconds = 300")
 
     def seed_ai_skills(self, skills: list[dict[str, Any]]) -> None:
         now = _now_iso()
@@ -709,7 +734,7 @@ class PortalStore:
                 """
                 insert into user_preferences (
                     user_id, scan_enabled, idle_scan_seconds, active_scan_seconds, telegram_enabled, telegram_chat_id, updated_at
-                ) values (?, 1, 60, 300, 0, null, ?)
+                ) values (?, 1, 60, 120, 0, null, ?)
                 """,
                 (user_id, now),
             )
@@ -965,7 +990,7 @@ class PortalStore:
             "user_id": int(user_id),
             "scan_enabled": 1,
             "idle_scan_seconds": 60,
-            "active_scan_seconds": 300,
+            "active_scan_seconds": 120,
             "telegram_enabled": 0,
             "telegram_chat_id": None,
             "updated_at": now,
