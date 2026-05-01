@@ -1310,7 +1310,7 @@ def dashboard(request: Request) -> str:
     <a class="nav-link" href="#scanner">Scanner</a>
     <a class="nav-link" href="#mercado">Mercado</a>
     <a class="nav-link" href="#simulador">Ao vivo</a>
-    <a class="nav-link" href="#fantasy">Fantasy</a>
+    <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
     <a class="nav-link" href="#entradas">Entradas</a>
     <a class="nav-link" href="#importar">Resultados</a>
     <a class="nav-link" href="#historico">Historico</a>
@@ -1323,7 +1323,7 @@ def dashboard(request: Request) -> str:
     <a class="nav-link" href="#scanner">Scanner</a>
     <a class="nav-link" href="#mercado">Mercado</a>
     <a class="nav-link" href="#simulador">Ao vivo</a>
-    <a class="nav-link" href="#fantasy">Fantasy campeao</a>
+    <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
     <a class="nav-link" href="#ativo">Jogo ativo</a>
     <a class="nav-link" href="#entradas">Entradas</a>
     <a class="nav-link" href="#importar">Importar resultados</a>
@@ -1541,7 +1541,7 @@ def dashboard(request: Request) -> str:
       <a class="fab-link" href="#scanner">Scanner</a>
       <a class="fab-link" href="#mercado">Mercado</a>
     <a class="fab-link" href="#simulador">Ao vivo</a>
-      <a class="fab-link" href="#fantasy">Fantasy</a>
+      <a class="fab-link" href="/fantasy-ia">Fantasy IA</a>
       <a class="fab-link" href="#ativo">Jogo ativo</a>
       <a class="fab-link" href="#entradas">Entradas</a>
       <a class="fab-link" href="#historico">Historico</a>
@@ -2192,6 +2192,86 @@ def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
             "match_stats_html": _match_stats_panel(default_signal, _green_red(state.history or [])),
             "default_game_id": (default_signal.get("game") or {}).get("game_id") if default_signal else None,
             "updated_at": _short_datetime(state.last_scan_at),
+        }
+    )
+
+
+def _fantasy_live_opportunity_cards(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "<div class='muted'>Aguardando oportunidades ao vivo do scanner.</div>"
+    cards: list[str] = []
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            _action_weight(item.get("action")),
+            _safe_int(item.get("score")) - _safe_int(item.get("risk")),
+            _safe_int(item.get("score")),
+        ),
+        reverse=True,
+    )
+    for item in ranked[:24]:
+        match = _esc(item.get("match") or "-")
+        league = _esc(item.get("league") or "-")
+        market = _esc(item.get("market") or "-")
+        selection = _esc(item.get("selection") or "-")
+        line = _esc(item.get("line") or "-")
+        odd = _esc(item.get("odds") or "-")
+        minute = _esc(item.get("minute") or "-")
+        scoreline = _esc(item.get("scoreline") or "-")
+        score = _esc(item.get("score") or 0)
+        risk = _esc(item.get("risk") or 0)
+        reason = _esc(item.get("reason") or "")
+        cards.append(
+            "<div class='fantasy-opportunity'>"
+            f"<div><strong>{match}</strong><div class='player-meta'>{league} | {minute}' | {scoreline}</div></div>"
+            f"<div class='player-meta'>{market} | {selection} {line} | odd {odd}</div>"
+            f"<div class='player-meta'>Score {score}/100 | risco {risk}/100</div>"
+            f"<div class='player-meta'>{reason}</div>"
+            "</div>"
+        )
+    return "".join(cards)
+
+
+def _fantasy_live_description(items: list[dict[str, Any]]) -> str:
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            _action_weight(item.get("action")),
+            _safe_int(item.get("score")) - _safe_int(item.get("risk")),
+            _safe_int(item.get("score")),
+        ),
+        reverse=True,
+    )
+    if not ranked:
+        return ""
+    lines = [
+        "Oportunidades ao vivo detectadas pelo scanner. Monte um time Fantasy priorizando atletas dos jogos com melhor score, mando, volume ofensivo e menor risco.",
+    ]
+    for item in ranked[:12]:
+        lines.append(
+            (
+                f"{item.get('match') or '-'}; liga {item.get('league') or '-'}; "
+                f"minuto {item.get('minute') or '-'}; placar {item.get('scoreline') or '-'}; "
+                f"mercado {item.get('market') or '-'}; seleção {item.get('selection') or '-'}; "
+                f"odd {item.get('odds') or '-'}; score {item.get('score') or 0}; "
+                f"risco {item.get('risk') or 0}; leitura {item.get('reason') or '-'}"
+            )
+        )
+    return "\n".join(lines)
+
+
+@app.get("/api/fantasy-live-opportunities")
+def api_fantasy_live_opportunities(_: None = Depends(_auth)) -> JSONResponse:
+    state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    signals = _simulation_signals(state)
+    opportunities = paper_opportunities(signals)
+    return JSONResponse(
+        {
+            "ok": True,
+            "count": len(opportunities),
+            "updated_at": _short_datetime(state.last_scan_at),
+            "description": _fantasy_live_description(opportunities),
+            "html": _fantasy_live_opportunity_cards(opportunities),
         }
     )
 

@@ -119,7 +119,14 @@ async function main() {
     await page.locator("button[type='submit']").click();
     await page.waitForURL(/\/app/, { timeout: 15000 });
     await assert.equal(await page.locator("text=Fantasy IA").first().isVisible(), true);
+    await page.goto(`${baseURL}/dashboard`, { waitUntil: "networkidle" });
+    const dashboardFantasyLink = page.locator("aside .nav-link", { hasText: "Fantasy IA" }).first();
+    await assert.equal(await dashboardFantasyLink.getAttribute("href"), "/fantasy-ia");
+    await dashboardFantasyLink.click();
+    await page.waitForURL(/\/fantasy-ia/, { timeout: 15000 });
     await page.goto(`${baseURL}/fantasy-ia`, { waitUntil: "networkidle" });
+    await assert.equal(await page.locator("#fantasy-room-url").isVisible(), true);
+    await assert.equal(await page.locator("button", { hasText: "Ler sala e montar time" }).isVisible(), true);
     await page.waitForFunction(() => document.querySelectorAll(".fantasy-player").length >= 11, { timeout: 15000 });
     await assert.equal(await page.locator(".fantasy-player").count(), 11);
     await assert.match(await page.locator("#fantasy-note").innerText(), /pool|perfis|Usei/i);

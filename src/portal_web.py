@@ -685,6 +685,8 @@ def _page_shell(
     .player-name {{ font-weight:900; overflow-wrap:anywhere; }}
     .player-meta {{ color:var(--muted); font-size:12px; }}
     .score-box {{ text-align:right; }}
+    .fantasy-opportunities {{ display:grid; gap:10px; max-height:420px; overflow:auto; padding-right:4px; }}
+    .fantasy-opportunity {{ border:1px solid #26384d; border-radius:8px; background:#0c141e; display:grid; gap:5px; padding:10px; }}
     .profile-row {{ align-items:flex-start; display:flex; gap:14px; }}
     .avatar {{
       align-items:center;
@@ -1230,11 +1232,18 @@ Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
     <aside class='card'>
       <h2 class='title'>Montador de escalação</h2>
       <p class='muted'>Cole a descrição da sala, jogo e jogadores. Use linhas com nome, posição, time, preço, projeção e risco quando tiver.</p>
+      <a class='btn' href='https://fantasy.reidopitaco.com.br/fantasy?tab=dfs' target='_blank' rel='noopener'>Abrir Rei do Pitaco</a>
+      <label>URL da sala do Rei do Pitaco</label>
+      <input id='fantasy-room-url' type='text' placeholder='https://fantasy.reidopitaco.com.br/fantasy/dfs/lineup?roomId=...' />
       <label>Orçamento</label>
       <input id='fantasy-budget' type='number' min='40' max='300' value='100' />
       <label>Descrição do jogo e pool</label>
       <textarea id='fantasy-description' style='min-height:360px'>{_esc(sample)}</textarea>
-      <button class='btn primary' type='button' onclick='buildFantasyLineup()'>Montar melhor time</button>
+      <div style='display:flex;gap:10px;flex-wrap:wrap'>
+        <button class='btn primary' type='button' onclick='importFantasyRoomLineup()'>Ler sala e montar time</button>
+        <button class='btn primary' type='button' onclick='buildFantasyLineup()'>Montar melhor time</button>
+        <button class='btn' type='button' onclick='loadFantasyOpportunities(true)'>Atualizar oportunidades</button>
+      </div>
       <div id='fantasy-note' class='notice muted'></div>
     </aside>
     <section>
@@ -1242,6 +1251,13 @@ Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
         <div class='card'><div class='muted'>Formação</div><div id='fantasy-formation' class='kpi'>1-2-2-3-3</div></div>
         <div class='card'><div class='muted'>Projeção</div><div id='fantasy-projection' class='kpi'>-</div></div>
         <div class='card'><div class='muted'>Custo</div><div id='fantasy-cost' class='kpi'>-</div></div>
+      </div>
+      <div class='section card'>
+        <div style='display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap'>
+          <h3 class='title' style='margin:0'>Oportunidades ao vivo</h3>
+          <span id='fantasy-live-status' class='muted'>Sincronizando scanner...</span>
+        </div>
+        <div id='fantasy-live-opportunities' class='fantasy-opportunities'><div class='muted'>Carregando oportunidades...</div></div>
       </div>
       <div class='section card'>
         <h3 class='title'>Time recomendado</h3>
@@ -1257,6 +1273,8 @@ Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
 """
     extra = """
 <script>
+let lastAutoFantasyDescription = '';
+let userEditedFantasyDescription = false;
 function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -1266,6 +1284,24 @@ function fantasyPlayerRow(player) {
     <div><div class="player-name">${escapeHtml(player.name)}</div><div class="player-meta">${escapeHtml(player.team || '-')} · preço ${Number(player.price).toFixed(1)} · risco ${Number(player.risk || 0).toFixed(0)}</div></div>
     <div class="score-box"><strong>${Number(player.projection).toFixed(1)}</strong><div class="player-meta">proj</div></div>
   </div>`;
+}
+function fantasyImportedPlayerRow(player) {
+  return fantasyPlayerRow({
+    position: player.pos || player.position || '-',
+    name: player.name || '-',
+    team: player.team || '-',
+    price: Number(player.price || 0),
+    projection: Number(player.proj || player.projection || 0),
+    risk: Number(player.risk || 0)
+  });
+}
+function pitacoPlayersToDescription(playersText, roomUrl) {
+  const header = roomUrl ? `Sala Rei do Pitaco: ${roomUrl}` : 'Sala Rei do Pitaco importada.';
+  return `${header}\n${String(playersText || '').split('\\n').filter(Boolean).map(line => {
+    const parts = line.split(';').map(part => part.trim());
+    if (parts.length < 4) return line;
+    return `${parts[0]}, ${parts[1]}, ${parts[2] || '-'}, preço ${parts[3] || 0}, proj ${parts[4] || 0}, risco 35`;
+  }).join('\\n')}`;
 }
 async function buildFantasyLineup() {
   const note = document.getElementById('fantasy-note');
@@ -1293,7 +1329,87 @@ async function buildFantasyLineup() {
     note.textContent = 'Não consegui conectar ao montador agora.';
   }
 }
-document.addEventListener('DOMContentLoaded', buildFantasyLineup);
+async function importFantasyRoomLineup() {
+  const note = document.getElementById('fantasy-note');
+  const lineup = document.getElementById('fantasy-lineup');
+  const roomUrl = document.getElementById('fantasy-room-url').value.trim();
+  if (!roomUrl) {
+    note.textContent = 'Cole a URL da sala do Rei do Pitaco.';
+    return;
+  }
+  note.textContent = 'Lendo sala e montando time...';
+  lineup.innerHTML = '<div class="muted">Buscando pool da sala...</div>';
+  try {
+    const res = await fetch('/api/fantasy-room-import', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+      body:JSON.stringify({
+        room_url: roomUrl,
+        formation: '4-3-3',
+        budget: Number(document.getElementById('fantasy-budget').value || 100),
+        players_text: '',
+        stats_text: ''
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Falha ao ler sala.');
+    if (data.players_text) {
+      document.getElementById('fantasy-description').value = pitacoPlayersToDescription(data.players_text, roomUrl);
+      lastAutoFantasyDescription = document.getElementById('fantasy-description').value;
+      userEditedFantasyDescription = false;
+    }
+    if (data.budget) document.getElementById('fantasy-budget').value = Number(data.budget).toFixed(1);
+    if (data.lineup && data.lineup.ok && Array.isArray(data.lineup.players)) {
+      document.getElementById('fantasy-formation').textContent = data.lineup.formation || '4-3-3';
+      document.getElementById('fantasy-projection').textContent = Number(data.lineup.projected_points || 0).toFixed(1);
+      document.getElementById('fantasy-cost').textContent = `${Number(data.lineup.used_budget || 0).toFixed(1)} / ${Number(data.lineup.budget || 0).toFixed(1)}`;
+      lineup.innerHTML = data.lineup.players.map(fantasyImportedPlayerRow).join('');
+      document.getElementById('fantasy-tips').innerHTML = '<li>Time montado com o pool real retornado pela sala.</li><li>Confira titulares e fechamento da rodada antes de finalizar.</li>';
+      note.textContent = data.lineup_message || 'Time montado no site. Agora você só decide se vai jogar.';
+      return;
+    }
+    if (data.players_text) {
+      note.textContent = 'Pool lido. Vou montar com o motor de descrição.';
+      await buildFantasyLineup();
+      return;
+    }
+    note.textContent = data.message || 'A sala abriu, mas não liberou o pool público. Abra logado e cole a grade de jogadores no campo.';
+    lineup.innerHTML = data.html || '<div class="muted">Pool não disponível publicamente.</div>';
+  } catch (error) {
+    note.textContent = error.message;
+    lineup.innerHTML = '';
+  }
+}
+async function loadFantasyOpportunities(forceApply) {
+  const status = document.getElementById('fantasy-live-status');
+  const panel = document.getElementById('fantasy-live-opportunities');
+  const description = document.getElementById('fantasy-description');
+  if (status) status.textContent = 'Atualizando oportunidades...';
+  try {
+    const res = await fetch('/api/fantasy-live-opportunities', {cache:'no-store'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Falha ao atualizar oportunidades.');
+    if (panel) panel.innerHTML = data.html || '<div class="muted">Sem oportunidades ao vivo agora.</div>';
+    if (status) status.textContent = `${Number(data.count || 0)} oportunidades · ${data.updated_at || '-'}`;
+    const canApply = Boolean(data.description) && (forceApply || !userEditedFantasyDescription || description.value.trim() === lastAutoFantasyDescription.trim());
+    if (canApply) {
+      description.value = data.description;
+      lastAutoFantasyDescription = data.description;
+      userEditedFantasyDescription = false;
+      await buildFantasyLineup();
+    }
+  } catch (error) {
+    if (status) status.textContent = `Falha: ${error.message}`;
+  }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const description = document.getElementById('fantasy-description');
+  description.addEventListener('input', () => { userEditedFantasyDescription = description.value.trim() !== lastAutoFantasyDescription.trim(); });
+  loadFantasyOpportunities(true).then(() => {
+    if (!lastAutoFantasyDescription) buildFantasyLineup();
+  });
+  setInterval(() => loadFantasyOpportunities(false), 60000);
+});
 </script>
 """
     return _page_shell(f"Fantasy IA | {settings.product_name}", body, extra, canonical_path="/fantasy-ia")
