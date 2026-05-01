@@ -607,7 +607,7 @@ def _page_shell(
     * {{ box-sizing: border-box; }}
     body {{ margin:0; background:var(--bg); color:var(--txt); }}
     a {{ color:#8bc4ff; text-decoration:none; }}
-    .top {{ position:sticky; top:0; z-index:2; border-bottom:1px solid #1d2530; background:#0c1118; }}
+    .top {{ position:sticky; top:0; z-index:2; border-bottom:1px solid #1d2530; background:rgba(8,11,16,.92); backdrop-filter:blur(14px); }}
     .topin {{ max-width:1180px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; padding:14px 16px; gap:16px; }}
     .brand {{ align-items:center; display:flex; font-weight:900; gap:8px; letter-spacing:0; color:var(--gold); font-size:19px; }}
     .brand::before {{
@@ -627,7 +627,7 @@ def _page_shell(
       border:1px solid #344254;
       background:linear-gradient(180deg, #182435, #111824);
       color:var(--txt);
-      border-radius:10px;
+      border-radius:8px;
       display:inline-flex;
       justify-content:center;
       padding:10px 14px;
@@ -654,25 +654,93 @@ def _page_shell(
     .btn.red {{ background:#2a1416; border-color:#673036; color:#ffb8bc; }}
     .wrap {{ max-width:1180px; margin:0 auto; padding:16px; }}
     .hero {{
-      min-height:88vh;
+      min-height:86vh;
       display:flex;
-      align-items:flex-end;
-      padding:18vh 0 8vh;
+      align-items:center;
+      padding:14vh 0 7vh;
+      position:relative;
+      overflow:hidden;
       background:
-        linear-gradient(180deg, rgba(8,11,16,.1), rgba(8,11,16,.82)),
-        url('https://images.unsplash.com/photo-1574629810360-7efbbe195018?auto=format&fit=crop&w=1800&q=80') center/cover no-repeat;
+        linear-gradient(90deg, rgba(5,8,12,.98) 0%, rgba(8,12,17,.86) 44%, rgba(6,9,14,.72) 100%),
+        linear-gradient(180deg, rgba(0,194,120,.12), rgba(245,200,66,.08)),
+        url('https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1800&q=82') center/cover no-repeat;
       border-bottom:1px solid #202a37;
     }}
-    .hero h1 {{ margin:0 0 10px; font-size:clamp(34px,6vw,62px); line-height:1.02; max-width:860px; text-wrap:balance; }}
-    .hero p {{ margin:0; color:#d3ddeb; font-size:clamp(16px,2.3vw,21px); max-width:760px; }}
+    .hero::before {{
+      content:"";
+      position:absolute;
+      inset:0;
+      background-image:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+      background-size:28px 28px;
+      mask-image:linear-gradient(180deg, rgba(0,0,0,.75), transparent 78%);
+      pointer-events:none;
+    }}
+    .hero-grid {{ position:relative; display:grid; grid-template-columns:minmax(0,1.04fr) minmax(360px,.96fr); gap:34px; align-items:center; }}
+    .hero-copy {{ min-width:0; }}
+    .hero h1 {{ margin:18px 0 14px; font-size:clamp(42px,7vw,84px); line-height:.94; max-width:880px; text-wrap:balance; }}
+    .hero p {{ margin:0; color:#d3ddeb; font-size:clamp(16px,2.2vw,22px); max-width:720px; }}
     .hero-actions {{ margin-top:18px; display:flex; gap:10px; flex-wrap:wrap; }}
+    .status-pill {{
+      align-items:center; border:1px solid #26384d; border-radius:999px; background:rgba(11,18,26,.72);
+      color:#aebdd0; display:inline-flex; font-size:11px; font-weight:900; gap:8px; letter-spacing:1px; padding:7px 11px; text-transform:uppercase;
+    }}
+    .status-dot {{ background:var(--green); border-radius:999px; box-shadow:0 0 12px rgba(0,194,120,.9); height:7px; width:7px; }}
+    .hero-word {{ color:var(--green); }}
+    .hero-word.gold {{ color:var(--gold); }}
+    .hud {{
+      background:rgba(11,16,23,.78);
+      border:1px solid rgba(96,125,157,.42);
+      border-radius:8px;
+      box-shadow:0 28px 70px rgba(0,0,0,.46);
+      min-height:420px;
+      padding:18px;
+      position:relative;
+    }}
+    .hud::after {{ content:""; position:absolute; inset:8px; border:1px solid rgba(255,255,255,.035); border-radius:6px; pointer-events:none; }}
+    .hud-head {{ align-items:center; display:flex; justify-content:space-between; gap:12px; margin-bottom:18px; }}
+    .hud-label {{ color:#748297; font-size:11px; font-weight:900; letter-spacing:1.6px; text-transform:uppercase; }}
+    .market-card {{ border:1px solid #26384d; border-radius:8px; background:rgba(10,16,24,.82); padding:12px; margin-bottom:10px; }}
+    .market-line {{ align-items:center; display:flex; justify-content:space-between; gap:10px; }}
+    .metric-bar {{ background:#232b35; border-radius:999px; height:7px; overflow:hidden; margin-top:9px; }}
+    .metric-bar span {{ background:linear-gradient(90deg, var(--green), var(--gold)); display:block; height:100%; }}
+    .signal-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }}
+    .signal-mini {{ border:1px solid #26384d; border-radius:8px; background:#0b121a; padding:11px; }}
+    .signal-mini strong {{ display:block; font-size:24px; line-height:1.1; }}
+    .callout {{ border-left:3px solid var(--green); background:rgba(0,194,120,.1); margin-top:12px; padding:10px 12px; font-size:13px; font-weight:800; }}
+    .ticker {{ border-top:1px solid #202a37; border-bottom:1px solid #202a37; overflow:hidden; background:#070a0e; }}
+    .ticker-track {{ animation:ticker 28s linear infinite; display:flex; gap:28px; min-width:max-content; padding:12px 0; }}
+    .ticker-track span {{ color:#a9b8ca; font-size:12px; font-weight:900; letter-spacing:1px; text-transform:uppercase; }}
+    @keyframes ticker {{ from {{ transform:translateX(0); }} to {{ transform:translateX(-50%); }} }}
     .section {{ margin-top:22px; }}
+    .section.big {{ margin-top:78px; }}
     .title {{ margin:0 0 10px; font-size:18px; }}
+    .display-title {{ font-size:clamp(30px,4.8vw,56px); line-height:1; margin:0 0 12px; text-align:center; text-wrap:balance; }}
+    .accent-red {{ color:var(--red); }}
+    .accent-gold {{ color:var(--gold); }}
     .muted {{ color:var(--muted); font-size:13px; }}
     .grid {{ display:grid; gap:10px; }}
     .g3 {{ grid-template-columns:repeat(3,minmax(0,1fr)); }}
     .g2 {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
     .card {{ border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:14px; }}
+    .feature-card {{ min-height:190px; padding:20px; }}
+    .feature-card h3 {{ font-size:26px; margin:14px 0 10px; }}
+    .feature-tag {{ border:1px solid #2f445d; border-radius:999px; color:#a7d9ff; display:inline-flex; font-size:11px; font-weight:900; letter-spacing:1px; padding:5px 9px; text-transform:uppercase; }}
+    .opportunity {{
+      background:radial-gradient(circle at 72% 24%, rgba(0,194,120,.18), transparent 32%), #0d1117;
+      border:1px solid #2a3441;
+      border-radius:8px;
+      display:grid;
+      gap:18px;
+      grid-template-columns:minmax(0,.9fr) minmax(320px,1fr);
+      padding:26px;
+    }}
+    .op-panel {{ border:1px solid #304155; border-radius:8px; background:rgba(8,13,20,.86); padding:18px; }}
+    .op-row {{ align-items:center; border-bottom:1px solid #202a37; display:flex; justify-content:space-between; gap:14px; padding:12px 0; }}
+    .op-row:last-child {{ border-bottom:0; }}
+    .price-row {{ align-items:end; display:flex; gap:8px; }}
+    .price-row strong {{ font-size:38px; line-height:1; }}
     .mini {{ border:1px solid var(--line); border-radius:8px; background:#0d141e; padding:12px; }}
     .kpi {{ font-size:29px; font-weight:900; }}
     .fantasy-board {{ display:grid; gap:12px; grid-template-columns:360px minmax(0,1fr); align-items:start; }}
@@ -731,7 +799,7 @@ def _page_shell(
     @keyframes pulse {{ 0%{{transform:scale(1);opacity:1;}} 100%{{transform:scale(1.22);opacity:0;}} }}
     .ai-panel {{
       position:fixed; right:18px; bottom:86px; width:min(380px, calc(100vw - 26px));
-      background:#0f1723; border:1px solid #2c4360; border-radius:10px; padding:12px; z-index:39; display:none;
+      background:#0f1723; border:1px solid #2c4360; border-radius:8px; padding:12px; z-index:39; display:none;
       box-shadow:0 18px 40px rgba(0,0,0,.35);
     }}
     .ai-panel.open {{ display:block; }}
@@ -739,9 +807,12 @@ def _page_shell(
     @media (max-width:960px) {{
       .g3, .g2 {{ grid-template-columns:1fr; }}
       .fantasy-board {{ grid-template-columns:1fr; }}
-      .hero {{ padding:20vh 0 9vh; min-height:72vh; background-position:58% center; }}
+      .hero {{ padding:15vh 0 7vh; min-height:78vh; background-position:58% center; }}
+      .hero-grid {{ grid-template-columns:1fr; }}
       .hero h1 {{ font-size:clamp(28px,9vw,42px); max-width:100%; }}
       .hero p {{ font-size:16px; }}
+      .hud {{ min-height:auto; }}
+      .opportunity {{ grid-template-columns:1fr; padding:18px; }}
       .topin {{ align-items:flex-start; flex-direction:column; }}
     }}
     @media (max-width:520px) {{
@@ -752,7 +823,9 @@ def _page_shell(
       .hero {{ min-height:76vh; padding-top:18vh; }}
       .hero-actions {{ flex-wrap:nowrap; }}
       .hero-actions .btn {{ flex:1; min-width:0; padding-inline:10px; white-space:normal; }}
-      .ai-fab {{ right:14px; bottom:14px; width:52px; height:52px; }}
+      .signal-grid {{ grid-template-columns:1fr; }}
+      .price-row strong {{ font-size:31px; }}
+      .ai-fab {{ right:14px; top:116px; bottom:auto; width:48px; height:48px; }}
       .ai-panel {{ right:13px; bottom:76px; max-height:70vh; overflow:auto; }}
     }}
   </style>
@@ -839,8 +912,11 @@ def landing() -> str:
     for key in ("starter", "pro", "team"):
         plan = plans[key]
         features = "".join(f"<li>{_esc(feature)}</li>" for feature in plan["features"])
+        card_class = "card" if key != "pro" else "card"
+        badge = "<div class='feature-tag'>Mais usado</div>" if key == "pro" else ""
         plan_html.append(
-            "<div class='card'>"
+            f"<div class='{card_class}'>"
+            f"{badge}"
             f"<h3>{_esc(plan['label'])}</h3>"
             f"<div class='kpi'>{_fmt_money(plan['price'])}/mês</div>"
             f"<p class='muted'>7 dias de teste grátis. Cancele quando quiser.</p>"
@@ -853,6 +929,8 @@ def landing() -> str:
   <div class='topin'>
     <div class='brand'>{_esc(settings.product_name)}</div>
     <nav class='nav nav-scroll'>
+      <a class='btn desktop-only' href='#indicadores'>Indicadores</a>
+      <a class='btn desktop-only' href='#poderes'>Poderes</a>
       <a class='btn' href='/login'>Login</a>
       <a class='btn primary' href='/signup'>Teste 7 dias</a>
       <a class='btn desktop-only' href='/dashboard'>Dashboard Operacional</a>
@@ -860,36 +938,107 @@ def landing() -> str:
   </div>
 </header>
 <section class='hero'>
-  <div class='wrap'>
-    <h1>Transforme dados ao vivo em leitura racional para apoiar sua decisão.</h1>
-    <p>{_esc(settings.product_tagline)}</p>
-    <div class='hero-actions'>
-      <a class='btn primary' href='/signup'>Quero testar grátis</a>
-      <a class='btn' href='/login'>Já sou cliente</a>
+  <div class='wrap hero-grid'>
+    <div class='hero-copy'>
+      <div class='status-pill'><span class='status-dot'></span>Sistema operacional de leitura ao vivo</div>
+      <h1>Não chute. <span class='hero-word'>Comande</span> sua leitura de jogo.</h1>
+      <p>Scanner, odds, pressão, risco e Fantasy Campeão em uma central para apoiar sua decisão antes, durante e depois da entrada.</p>
+      <div class='hero-actions'>
+        <a class='btn primary' href='/signup'>Acessar sistema</a>
+        <a class='btn' href='/login'>Entrar no painel</a>
+      </div>
     </div>
+    <aside class='hud' aria-label='Painel de indicadores ApexGol'>
+      <div class='hud-head'>
+        <div>
+          <div class='hud-label'>SYS.MONITOR</div>
+          <strong>Target acquired</strong>
+        </div>
+        <div class='status-pill'><span class='status-dot'></span>Ao vivo</div>
+      </div>
+      <div class='market-card'>
+        <div class='market-line'><span class='muted'>Pressão ofensiva</span><strong>87%</strong></div>
+        <div class='metric-bar'><span style='width:87%'></span></div>
+      </div>
+      <div class='market-card'>
+        <div class='market-line'><span class='muted'>Edge de mercado</span><strong class='good'>+18.4</strong></div>
+        <div class='metric-bar'><span style='width:74%'></span></div>
+      </div>
+      <div class='market-card'>
+        <div class='market-line'><span class='muted'>Risco de red</span><strong class='warn'>32%</strong></div>
+        <div class='metric-bar'><span style='width:32%'></span></div>
+      </div>
+      <div class='signal-grid'>
+        <div class='signal-mini'><span class='muted'>Odd alvo</span><strong>1.82</strong></div>
+        <div class='signal-mini'><span class='muted'>Saída IA</span><strong>73'</strong></div>
+        <div class='signal-mini'><span class='muted'>Confiança</span><strong>91%</strong></div>
+      </div>
+      <div class='callout'>Entrada simulada: Over pressão ativa. Proteger banca se o ritmo cair por 6 minutos.</div>
+    </aside>
+  </div>
+</section>
+<section class='ticker' aria-label='Indicadores do sistema'>
+  <div class='ticker-track'>
+    <span>Scanner ao vivo</span><span>Fantasy Campeão</span><span>Telegram ativo</span><span>Gestão de banca</span><span>Entrada e saída IA</span><span>Histórico Green/Red</span>
+    <span>Scanner ao vivo</span><span>Fantasy Campeão</span><span>Telegram ativo</span><span>Gestão de banca</span><span>Entrada e saída IA</span><span>Histórico Green/Red</span>
   </div>
 </section>
 <main class='wrap'>
-  <section class='section grid g3'>
-    <div class='card'><div class='muted'>Scanner em tempo real</div><div class='kpi'>24/7</div><div class='muted'>Cobertura global com priorização Brasil.</div></div>
-    <div class='card'><div class='muted'>Ciclo de monitoramento</div><div class='kpi'>5m / 1m</div><div class='muted'>5 min com jogo ativo, 1 min sem seleção ativa.</div></div>
-    <div class='card'><div class='muted'>Fantasy Campeão</div><div class='kpi'>Scout IA</div><div class='muted'>Leitura de sala, pool de jogadores e montagem otimizada por preço, projeção e histórico.</div></div>
+  <section id='indicadores' class='section big opportunity'>
+    <div>
+      <div class='feature-tag'>Simulador de oportunidade</div>
+      <h2 class='display-title' style='text-align:left'>Quanto custa entrar sem leitura?</h2>
+      <p class='muted'>A página fala direto com quem opera: o problema não é só acertar, é saber quando não entrar, quando proteger e quando deixar a IA aprender com o histórico.</p>
+    </div>
+    <div class='op-panel'>
+      <div class='op-row'><span class='muted'>Banca operacional</span><div class='price-row'><strong>R$ 1.000</strong></div></div>
+      <div class='op-row'><span class='muted'>Entradas ruins evitadas/mês</span><div class='price-row'><strong>12</strong><span class='muted'>alertas</span></div></div>
+      <div class='op-row'><span class='muted'>Exposição reduzida</span><div class='price-row'><strong class='accent-gold'>R$ 240</strong></div></div>
+      <div class='op-row'><span class='muted'>Impacto da disciplina IA</span><strong class='good'>menos tilt, mais processo</strong></div>
+    </div>
   </section>
-  <section class='section'>
-    <h2 class='title'>Planos viáveis para operação individual e equipe</h2>
+  <section class='section big'>
+    <h2 class='display-title'>Seu método não foi feito para depender de <span class='accent-red'>achismo</span>.</h2>
+    <p class='muted' style='text-align:center;max-width:760px;margin:0 auto'>A IA organiza sinais, contexto, risco e saída. Você decide com mais clareza e registra tudo para a próxima leitura ficar melhor.</p>
+  </section>
+  <section id='poderes' class='section big grid g3'>
+    <div class='card feature-card'>
+      <div class='feature-tag'>IA integrada</div>
+      <h3>Scanner que prioriza jogo vivo</h3>
+      <p class='muted'>Acompanha placar, minuto, pressão, mercado, confiança e risco para destacar onde existe leitura operacional.</p>
+    </div>
+    <div class='card feature-card'>
+      <div class='feature-tag'>Gestão real</div>
+      <h3>Entrada, proteção e saída</h3>
+      <p class='muted'>Simula dinâmica do jogo, sugere saída por green, perda de edge ou preservação da banca e grava tudo no Supabase.</p>
+    </div>
+    <div class='card feature-card'>
+      <div class='feature-tag'>Fantasy Campeão</div>
+      <h3>Time montado por projeção</h3>
+      <p class='muted'>Cruza preço, posição, estatísticas e oportunidades disponíveis para entregar uma escalação pronta para revisar.</p>
+    </div>
+    <div class='card feature-card'>
+      <div class='feature-tag'>Telegram</div>
+      <h3>Alerta onde você acompanha</h3>
+      <p class='muted'>Receba avisos e resumos sem ficar preso ao painel, mantendo o histórico de sinais e decisões.</p>
+    </div>
+    <div class='card feature-card'>
+      <div class='feature-tag'>Memória IA</div>
+      <h3>Aprendizado com Green/Red</h3>
+      <p class='muted'>Cada resultado alimenta leitura futura por mercado, score, risco, confiança e comportamento da banca.</p>
+    </div>
+    <div class='card feature-card'>
+      <div class='feature-tag'>Operação</div>
+      <h3>Painel para repetir processo</h3>
+      <p class='muted'>Scanner, mercado, ao vivo, entradas, histórico, rankings e comercial no mesmo ambiente.</p>
+    </div>
+  </section>
+  <section class='section big'>
+    <h2 class='display-title'>Escolha seu plano de operação</h2>
+    <p class='muted' style='text-align:center;margin:0 auto 18px;max-width:680px'>Comece testando. Evolua quando precisar de mais memória, prioridade e estrutura comercial.</p>
     <div class='grid g3'>{''.join(plan_html)}</div>
   </section>
-  <section class='section grid g2'>
-    <div class='card'>
-      <h3 class='title'>Como funciona</h3>
-      <p class='muted'>1) Crie conta e ative o teste de 7 dias. 2) Escolha jogos no scanner. 3) Registre entrada real no Telegram/site. 4) A IA acompanha manter/sair e aprende com Green/Red. 5) No Fantasy Campeão, cruza preço do lobby com estatísticas globais para sugerir a melhor escalação.</p>
-    </div>
-    <div class='card'>
-      <h3 class='title'>Suporte inteligente</h3>
-      <p class='muted'>O agente de suporte responde dúvidas básicas de login, scanner, importação, Fantasy, Telegram e plano antes mesmo do cadastro.</p>
-    </div>
-  </section>
-  <section class='section card'>
+  <section class='section big card'>
     <h3 class='title'>Aviso importante</h3>
     <p class='muted'>{_esc(settings.product_name)} é uma plataforma de apoio estatístico e educacional. As sugestões de entrada são parâmetros de análise e não promessa de lucro. A decisão final é sempre do usuário, que assume integralmente a responsabilidade pelas operações realizadas.</p>
   </section>
