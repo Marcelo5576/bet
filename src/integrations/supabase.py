@@ -10,20 +10,34 @@ import httpx
 from src.config import Settings
 from src.intelligence.source_catalog import source_memory_rows
 from src.intelligence.source_scraper import scraped_source_memory_rows
+from src.usage_metrics import UsageTracker
 
 logger = logging.getLogger("betsignal.supabase")
 
 
 class SupabaseSink:
-    def __init__(self, url: str | None, service_role_key: str | None):
+    def __init__(
+        self,
+        url: str | None,
+        service_role_key: str | None,
+        usage_tracker: UsageTracker | None = None,
+        cost_per_request_brl: float = 0.0,
+    ):
         self.url = (url or "").rstrip("/")
         self.service_role_key = service_role_key or ""
         self.disabled_until: datetime | None = None
         self.disabled_reason: str | None = None
+        self.usage_tracker = usage_tracker
+        self.cost_per_request_brl = float(cost_per_request_brl or 0)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "SupabaseSink":
-        return cls(settings.supabase_url, settings.supabase_service_role_key)
+        return cls(
+            settings.supabase_url,
+            settings.supabase_service_role_key,
+            usage_tracker=UsageTracker(settings.usage_metrics_db_file),
+            cost_per_request_brl=settings.supabase_cost_per_request_brl,
+        )
 
     @property
     def enabled(self) -> bool:
@@ -123,11 +137,18 @@ class SupabaseSink:
                     },
                 )
                 response.raise_for_status()
+                self._track(
+                    success=True,
+                    operation="fetch_ai_skills",
+                    response_bytes=len(response.content),
+                )
                 return response.json()
         except httpx.HTTPStatusError as exc:
+            self._track(success=False, operation="fetch_ai_skills", error=exc)
             logger.warning("Falha ao consultar skills IA no Supabase: %s", _safe_http_error(exc))
             return []
         except Exception as exc:
+            self._track(success=False, operation="fetch_ai_skills", error=exc)
             logger.warning("Falha ao consultar skills IA no Supabase: %s", exc)
             return []
 
@@ -160,6 +181,11 @@ class SupabaseSink:
                     params=params,
                 )
                 response.raise_for_status()
+                self._track(
+                    success=True,
+                    operation="fetch_ai_context",
+                    response_bytes=len(response.content),
+                )
                 items = response.json()
                 source_response = await client.get(
                     f"{self.url}/rest/v1/betsignal_ai_memory",
@@ -172,13 +198,20 @@ class SupabaseSink:
                     },
                 )
                 if source_response.status_code in {200, 206}:
+                    self._track(
+                        success=True,
+                        operation="fetch_ai_sources",
+                        response_bytes=len(source_response.content),
+                    )
                     items.extend(source_response.json())
                 return {"enabled": True, "items": items}
         except httpx.HTTPStatusError as exc:
+            self._track(success=False, operation="fetch_ai_context", error=exc)
             self._maybe_disable(exc.response)
             logger.warning("Falha ao consultar memoria IA no Supabase: %s", exc)
             return {"enabled": True, "items": [], "error": _safe_http_error(exc)}
         except Exception as exc:
+            self._track(success=False, operation="fetch_ai_context", error=exc)
             logger.warning("Falha ao consultar memoria IA no Supabase: %s", exc)
             return {"enabled": True, "items": [], "error": str(exc)}
 
@@ -201,12 +234,19 @@ class SupabaseSink:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(url, headers=headers, params=params, json=rows)
                 response.raise_for_status()
+                self._track(
+                    success=True,
+                    operation=f"upsert:{table}",
+                    response_bytes=len(response.content),
+                )
         except httpx.HTTPStatusError as exc:
+            self._track(success=False, operation=f"upsert:{table}", error=exc)
             if disable_on_missing_table:
                 self._maybe_disable(exc.response)
             if warn_on_error:
                 logger.warning("Falha ao sincronizar Supabase/%s: %s", table, _safe_http_error(exc))
         except Exception as exc:
+            self._track(success=False, operation=f"upsert:{table}", error=exc)
             if warn_on_error:
                 logger.warning("Falha ao sincronizar Supabase/%s: %s", table, exc)
 
@@ -225,6 +265,27 @@ class SupabaseSink:
             return
         self.disabled_until = datetime.now(timezone.utc) + timedelta(minutes=10)
         self.disabled_reason = "tabelas ausentes no Supabase; rode supabase_schema.sql"
+
+    def _track(
+        self,
+        *,
+        success: bool,
+        operation: str,
+        response_bytes: int = 0,
+        error: Exception | None = None,
+    ) -> None:
+        if not self.usage_tracker:
+            return
+        self.usage_tracker.record(
+            "supabase",
+            category="api",
+            request_count=1,
+            success=success,
+            response_bytes=response_bytes,
+            estimated_cost_brl=self.cost_per_request_brl,
+            operation=operation,
+            error=str(error)[:240] if error else None,
+        )
 
 
 def _game_row(game: Any) -> dict[str, Any]:

@@ -26,6 +26,7 @@ from src.portal import (
     support_agent_reply,
 )
 from src.storage import StateStore
+from src.usage_metrics import UsagePricing, UsageTracker
 
 router = APIRouter()
 SESSION_COOKIE = "bs_session"
@@ -609,6 +610,36 @@ def _size_label(size_bytes: int) -> str:
         amount /= 1024
         idx += 1
     return f"{amount:.1f} {units[idx]}"
+
+
+def _usage_tracker(settings: Settings) -> UsageTracker:
+    return UsageTracker(settings.usage_metrics_db_file)
+
+
+def _usage_pricing(settings: Settings) -> UsagePricing:
+    return UsagePricing(
+        gemini_input_cost_per_1m_brl=settings.gemini_input_cost_per_1m_brl,
+        gemini_output_cost_per_1m_brl=settings.gemini_output_cost_per_1m_brl,
+        api_football_cost_per_request_brl=settings.api_football_cost_per_request_brl,
+        football_data_org_cost_per_request_brl=settings.football_data_org_cost_per_request_brl,
+        espn_cost_per_request_brl=settings.espn_cost_per_request_brl,
+        supabase_cost_per_request_brl=settings.supabase_cost_per_request_brl,
+        stripe_cost_per_request_brl=settings.stripe_cost_per_request_brl,
+        mercadopago_cost_per_request_brl=settings.mercadopago_cost_per_request_brl,
+    )
+
+
+def _usage_service_label(service: str) -> str:
+    labels = {
+        "gemini": "Gemini IA",
+        "api_football": "API-Football",
+        "football_data_org": "football-data.org",
+        "espn": "ESPN Scoreboard",
+        "supabase": "Supabase",
+        "stripe": "Stripe",
+        "mercadopago": "Mercado Pago",
+    }
+    return labels.get(service, service.replace("_", " ").title())
 
 
 def _build_stamp() -> str:
@@ -1825,6 +1856,24 @@ def admin_users(_: dict[str, Any] = Depends(_require_admin)) -> str:
         </table>
       </div>
     </div>
+    <div class='section'>
+      <h3 class='title'>Consumo IA e APIs</h3>
+      <div class='grid g3'>
+        <div class='mini'><div class='muted'>Requisicoes hoje</div><div id='usage-req-today' class='kpi'>-</div></div>
+        <div class='mini'><div class='muted'>Tokens IA hoje</div><div id='usage-tokens-today' class='kpi'>-</div></div>
+        <div class='mini'><div class='muted'>Custo estimado hoje</div><div id='usage-cost-today' class='kpi'>-</div></div>
+        <div class='mini'><div class='muted'>Requisicoes total</div><div id='usage-req-total' class='kpi'>-</div></div>
+        <div class='mini'><div class='muted'>Tokens IA total</div><div id='usage-tokens-total' class='kpi'>-</div></div>
+        <div class='mini'><div class='muted'>Custo estimado total</div><div id='usage-cost-total' class='kpi'>-</div></div>
+      </div>
+      <div class='muted' id='usage-note' style='margin-top:8px;'>Carregando consumo...</div>
+      <div style='overflow:auto; margin-top:10px;'>
+        <table>
+          <thead><tr><th>Servico</th><th>Categoria</th><th>Requests</th><th>Tokens in/out</th><th>Custo</th><th>Ultima atividade</th><th>Operacoes</th><th>Erro recente</th></tr></thead>
+          <tbody id='usage-rows'><tr><td colspan='8'>Carregando...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
   </section>
 </main>
 """
@@ -1932,6 +1981,21 @@ function tokenRow(name, item, detail) {
   const detailText = detail || '-';
   return `<tr><td>${name}</td><td>${status}</td><td>${preview}</td><td>${detailText}</td></tr>`;
 }
+function fmtMoneyBr(value) {
+  const num = Number(value || 0);
+  return num.toLocaleString('pt-BR', {style:'currency', currency:'BRL'});
+}
+function fmtNumber(value) {
+  return Number(value || 0).toLocaleString('pt-BR');
+}
+function fmtDateTime(value) {
+  if (!value) return '-';
+  try {
+    return new Date(value).toLocaleString('pt-BR');
+  } catch (e) {
+    return value;
+  }
+}
 async function loadSystemHealth() {
   const note = document.getElementById('health-note');
   const res = await fetch('/api/admin/system-health', {cache:'no-store'});
@@ -1957,6 +2021,32 @@ async function loadSystemHealth() {
     tokenRow('SMTP', integrations.smtp_password, integrations.smtp_host || 'SMTP nao configurado')
   ].join('');
   document.getElementById('health-integrations').innerHTML = rows;
+  const usage = data.usage || {};
+  const today = usage.today || {};
+  const totals = usage.totals || {};
+  document.getElementById('usage-req-today').textContent = fmtNumber(today.requests || 0);
+  document.getElementById('usage-tokens-today').textContent = `${fmtNumber(today.input_tokens || 0)} / ${fmtNumber(today.output_tokens || 0)}`;
+  document.getElementById('usage-cost-today').textContent = fmtMoneyBr(today.estimated_cost_brl || 0);
+  document.getElementById('usage-req-total').textContent = fmtNumber(totals.requests || 0);
+  document.getElementById('usage-tokens-total').textContent = `${fmtNumber(totals.input_tokens || 0)} / ${fmtNumber(totals.output_tokens || 0)}`;
+  document.getElementById('usage-cost-total').textContent = fmtMoneyBr(totals.estimated_cost_brl || 0);
+  const pricingNote = usage.pricing_note || 'Contagem viva. Custos usam as tarifas configuradas no .env.';
+  document.getElementById('usage-note').textContent = `${pricingNote} Hoje: ${fmtNumber(today.ai_requests || 0)} IA, ${fmtNumber(today.api_requests || 0)} APIs, ${fmtNumber(today.payment_requests || 0)} pagamentos.`;
+  const usageRows = (usage.services || []).map(item => {
+    const ops = Object.entries(item.operations || {}).map(([key, value]) => `${key}: ${value}`).join(' | ') || '-';
+    const tokens = `${fmtNumber(item.input_tokens || 0)} / ${fmtNumber(item.output_tokens || 0)}`;
+    return `<tr>
+      <td>${item.label || item.service}</td>
+      <td>${item.category || '-'}</td>
+      <td>${fmtNumber(item.requests || 0)} <span class="muted">(${fmtNumber(item.error_requests || 0)} erro)</span></td>
+      <td>${tokens}</td>
+      <td>${fmtMoneyBr(item.estimated_cost_brl || 0)}</td>
+      <td>${fmtDateTime(item.last_request_at)}</td>
+      <td>${ops}</td>
+      <td>${item.last_error || '-'}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('usage-rows').innerHTML = usageRows || '<tr><td colspan="8">Sem consumo registrado ainda.</td></tr>';
 }
 document.getElementById('price-plan').addEventListener('change', loadSystemConfig);
 const showCanceled = document.getElementById('show-canceled');
@@ -2238,6 +2328,8 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
     store = _portal_store(settings)
     state_path = Path(os.getenv("STATE_FILE", "data/state.json"))
     state_obj = StateStore(str(state_path)).load()
+    usage = _usage_tracker(settings).summary()
+    pricing = _usage_pricing(settings)
     database = store.system_snapshot()
     state_size = state_path.stat().st_size if state_path.exists() else 0
     scanner_mode = str(state_obj.scan_preference or "brazil_first")
@@ -2258,6 +2350,8 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
         "smtp_password": _mask_secret(settings.smtp_password),
         "smtp_host": settings.smtp_host or "",
     }
+    for item in usage.get("services", []):
+        item["label"] = _usage_service_label(str(item.get("service") or ""))
     return JSONResponse(
         {
             "ok": True,
@@ -2282,6 +2376,11 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
                 "mode_label": mode_label_map.get(scanner_mode, scanner_mode),
             },
             "integrations": integrations,
+            "usage": {
+                **usage,
+                "pricing": pricing.as_dict(),
+                "pricing_note": "Contagem em tempo real. O custo estimado depende das tarifas preenchidas no .env.",
+            },
         }
     )
 
@@ -2314,6 +2413,7 @@ async def _create_checkout_for_user(
     price_catalog = _plan_catalog(settings, store)
     amount = float(price_catalog[plan]["price"])
     base_url = (settings.website_url or "").rstrip("/") or "http://localhost"
+    usage_tracker = _usage_tracker(settings)
     if settings.payment_gateway == "stripe":
         price_map = {
             "starter": settings.stripe_price_starter,
@@ -2337,11 +2437,33 @@ async def _create_checkout_for_user(
         }
         headers = {"Authorization": f"Bearer {settings.stripe_secret_key}"}
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                "https://api.stripe.com/v1/checkout/sessions",
-                data=payload,
-                headers=headers,
-            )
+            try:
+                response = await client.post(
+                    "https://api.stripe.com/v1/checkout/sessions",
+                    data=payload,
+                    headers=headers,
+                )
+            except Exception as exc:
+                usage_tracker.record(
+                    "stripe",
+                    category="payment",
+                    request_count=1,
+                    success=False,
+                    estimated_cost_brl=settings.stripe_cost_per_request_brl,
+                    operation="checkout_session",
+                    error=str(exc)[:240],
+                )
+                raise
+        usage_tracker.record(
+            "stripe",
+            category="payment",
+            request_count=1,
+            success=response.status_code < 300,
+            response_bytes=len(response.content),
+            estimated_cost_brl=settings.stripe_cost_per_request_brl,
+            operation="checkout_session",
+            error=None if response.status_code < 300 else f"http {response.status_code}",
+        )
         if response.status_code >= 300:
             raise HTTPException(status_code=502, detail=f"Falha no Stripe ({response.status_code}).")
         body = response.json()
@@ -2374,11 +2496,33 @@ async def _create_checkout_for_user(
         }
         headers = {"Authorization": f"Bearer {settings.mercadopago_access_token}"}
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                "https://api.mercadopago.com/checkout/preferences",
-                json=preference,
-                headers=headers,
-            )
+            try:
+                response = await client.post(
+                    "https://api.mercadopago.com/checkout/preferences",
+                    json=preference,
+                    headers=headers,
+                )
+            except Exception as exc:
+                usage_tracker.record(
+                    "mercadopago",
+                    category="payment",
+                    request_count=1,
+                    success=False,
+                    estimated_cost_brl=settings.mercadopago_cost_per_request_brl,
+                    operation="checkout_preference",
+                    error=str(exc)[:240],
+                )
+                raise
+        usage_tracker.record(
+            "mercadopago",
+            category="payment",
+            request_count=1,
+            success=response.status_code < 300,
+            response_bytes=len(response.content),
+            estimated_cost_brl=settings.mercadopago_cost_per_request_brl,
+            operation="checkout_preference",
+            error=None if response.status_code < 300 else f"http {response.status_code}",
+        )
         if response.status_code >= 300:
             raise HTTPException(status_code=502, detail=f"Falha no Mercado Pago ({response.status_code}).")
         body = response.json()

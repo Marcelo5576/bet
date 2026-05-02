@@ -54,6 +54,7 @@ class Settings:
     dashboard_domains: str
     support_note: str
     portal_db_file: str
+    usage_metrics_db_file: str
     portal_session_secret: str
     portal_session_hours: int
     portal_trial_days: int
@@ -76,6 +77,14 @@ class Settings:
     mercadopago_access_token: str | None
     supabase_url: str | None
     supabase_service_role_key: str | None
+    gemini_input_cost_per_1m_brl: float
+    gemini_output_cost_per_1m_brl: float
+    api_football_cost_per_request_brl: float
+    football_data_org_cost_per_request_brl: float
+    espn_cost_per_request_brl: float
+    supabase_cost_per_request_brl: float
+    stripe_cost_per_request_brl: float
+    mercadopago_cost_per_request_brl: float
     auto_simulation_enabled: bool
     auto_simulation_hour: int
     auto_simulation_timezone: str
@@ -131,6 +140,7 @@ def load_settings() -> Settings:
             "Se der problema, envie /suporte no Telegram e compartilhe o diagnostico comigo no Codex.",
         ),
         portal_db_file=os.getenv("PORTAL_DB_FILE", "data/portal.db"),
+        usage_metrics_db_file=os.getenv("USAGE_METRICS_DB_FILE", "data/usage_metrics.db"),
         portal_session_secret=(
             os.getenv("PORTAL_SESSION_SECRET")
             or os.getenv("DASHBOARD_PASSWORD")
@@ -161,6 +171,18 @@ def load_settings() -> Settings:
         mercadopago_access_token=(os.getenv("MERCADOPAGO_ACCESS_TOKEN") or "").strip() or None,
         supabase_url=(os.getenv("SUPABASE_URL") or "").rstrip("/") or None,
         supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY") or None,
+        gemini_input_cost_per_1m_brl=float(os.getenv("GEMINI_INPUT_COST_PER_1M_BRL", "0") or 0),
+        gemini_output_cost_per_1m_brl=float(os.getenv("GEMINI_OUTPUT_COST_PER_1M_BRL", "0") or 0),
+        api_football_cost_per_request_brl=float(os.getenv("API_FOOTBALL_COST_PER_REQUEST_BRL", "0") or 0),
+        football_data_org_cost_per_request_brl=float(
+            os.getenv("FOOTBALL_DATA_ORG_COST_PER_REQUEST_BRL", "0") or 0
+        ),
+        espn_cost_per_request_brl=float(os.getenv("ESPN_COST_PER_REQUEST_BRL", "0") or 0),
+        supabase_cost_per_request_brl=float(os.getenv("SUPABASE_COST_PER_REQUEST_BRL", "0") or 0),
+        stripe_cost_per_request_brl=float(os.getenv("STRIPE_COST_PER_REQUEST_BRL", "0") or 0),
+        mercadopago_cost_per_request_brl=float(
+            os.getenv("MERCADOPAGO_COST_PER_REQUEST_BRL", "0") or 0
+        ),
         auto_simulation_enabled=_as_bool(os.getenv("AUTO_SIMULATION_ENABLED"), True),
         auto_simulation_hour=max(0, min(23, int(os.getenv("AUTO_SIMULATION_HOUR", "6")))),
         auto_simulation_timezone=(

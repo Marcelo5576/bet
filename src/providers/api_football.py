@@ -3,24 +3,38 @@ from __future__ import annotations
 import httpx
 
 from .base import LiveGame, LiveProvider
+from src.usage_metrics import UsageTracker
 
 
 class ApiFootballProvider(LiveProvider):
     label = "API-Football"
 
-    def __init__(self, api_key: str, base_url: str):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        usage_tracker: UsageTracker | None = None,
+        cost_per_request_brl: float = 0.0,
+    ):
         self.api_key = api_key
         self.base_url = base_url
+        self.usage_tracker = usage_tracker
+        self.cost_per_request_brl = float(cost_per_request_brl or 0)
 
     async def get_live_games(self) -> list[LiveGame]:
         headers = {"x-apisports-key": self.api_key}
         async with httpx.AsyncClient(timeout=20) as client:
-            fixtures = await client.get(
-                f"{self.base_url}/fixtures",
-                params={"live": "all"},
-                headers=headers,
-            )
-            fixtures.raise_for_status()
+            try:
+                fixtures = await client.get(
+                    f"{self.base_url}/fixtures",
+                    params={"live": "all"},
+                    headers=headers,
+                )
+                fixtures.raise_for_status()
+            except Exception as exc:
+                self._track(False, operation="fixtures_live", error=exc)
+                raise
+            self._track(True, operation="fixtures_live", response_bytes=len(fixtures.content))
             payload = fixtures.json().get("response", [])
             odds_by_fixture = await self._get_live_odds(client, headers)
 
@@ -61,8 +75,10 @@ class ApiFootballProvider(LiveProvider):
         try:
             response = await client.get(f"{self.base_url}/odds/live", headers=headers)
             response.raise_for_status()
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            self._track(False, operation="odds_live", error=exc)
             return {}
+        self._track(True, operation="odds_live", response_bytes=len(response.content))
         odds_by_fixture: dict[str, dict[str, float]] = {}
         for item in response.json().get("response", []):
             if item.get("blocked") or item.get("finished"):
@@ -78,6 +94,27 @@ class ApiFootballProvider(LiveProvider):
             if parsed:
                 odds_by_fixture[fixture_id] = parsed
         return odds_by_fixture
+
+    def _track(
+        self,
+        success: bool,
+        *,
+        operation: str,
+        response_bytes: int = 0,
+        error: Exception | None = None,
+    ) -> None:
+        if not self.usage_tracker:
+            return
+        self.usage_tracker.record(
+            "api_football",
+            category="api",
+            request_count=1,
+            success=success,
+            response_bytes=response_bytes,
+            estimated_cost_brl=self.cost_per_request_brl if success or error is not None else 0.0,
+            operation=operation,
+            error=str(error)[:240] if error else None,
+        )
 
 
 def _parse_markets(item: dict) -> dict:

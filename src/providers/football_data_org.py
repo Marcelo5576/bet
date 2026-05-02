@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from .base import LiveGame, LiveProvider
+from src.usage_metrics import UsageTracker
 
 
 LIVE_STATUSES = {"IN_PLAY", "PAUSED", "EXTRA_TIME", "PENALTY_SHOOTOUT", "LIVE"}
@@ -13,9 +14,17 @@ LIVE_STATUSES = {"IN_PLAY", "PAUSED", "EXTRA_TIME", "PENALTY_SHOOTOUT", "LIVE"}
 class FootballDataOrgProvider(LiveProvider):
     label = "football-data.org"
 
-    def __init__(self, api_token: str, base_url: str = "https://api.football-data.org/v4"):
+    def __init__(
+        self,
+        api_token: str,
+        base_url: str = "https://api.football-data.org/v4",
+        usage_tracker: UsageTracker | None = None,
+        cost_per_request_brl: float = 0.0,
+    ):
         self.api_token = api_token
         self.base_url = base_url.rstrip("/")
+        self.usage_tracker = usage_tracker
+        self.cost_per_request_brl = float(cost_per_request_brl or 0)
 
     async def get_live_games(self) -> list[LiveGame]:
         payload = await self._fetch_matches({"status": "LIVE"})
@@ -29,9 +38,35 @@ class FootballDataOrgProvider(LiveProvider):
     async def _fetch_matches(self, params: dict[str, str]) -> dict:
         headers = {"X-Auth-Token": self.api_token}
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f"{self.base_url}/matches", params=params, headers=headers)
-            response.raise_for_status()
+            try:
+                response = await client.get(f"{self.base_url}/matches", params=params, headers=headers)
+                response.raise_for_status()
+            except Exception as exc:
+                self._track(False, operation="matches", error=exc)
+                raise
+        self._track(True, operation="matches", response_bytes=len(response.content))
         return response.json()
+
+    def _track(
+        self,
+        success: bool,
+        *,
+        operation: str,
+        response_bytes: int = 0,
+        error: Exception | None = None,
+    ) -> None:
+        if not self.usage_tracker:
+            return
+        self.usage_tracker.record(
+            "football_data_org",
+            category="api",
+            request_count=1,
+            success=success,
+            response_bytes=response_bytes,
+            estimated_cost_brl=self.cost_per_request_brl,
+            operation=operation,
+            error=str(error)[:240] if error else None,
+        )
 
 
 def _parse_matches(matches: list[dict], live_only: bool) -> list[LiveGame]:

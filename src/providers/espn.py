@@ -6,6 +6,7 @@ import re
 import httpx
 
 from .base import LiveGame, LiveProvider
+from src.usage_metrics import UsageTracker
 
 
 DEFAULT_SOCCER_LEAGUES = (
@@ -83,11 +84,15 @@ class EspnProvider(LiveProvider):
         self,
         url: str = "https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard",
         leagues: tuple[str, ...] = DEFAULT_SOCCER_LEAGUES,
+        usage_tracker: UsageTracker | None = None,
+        cost_per_request_brl: float = 0.0,
     ):
         self.urls = [url] + [
             f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
             for league in leagues
         ]
+        self.usage_tracker = usage_tracker
+        self.cost_per_request_brl = float(cost_per_request_brl or 0)
 
     async def get_live_games(self) -> list[LiveGame]:
         return await self._get_games(live_only=True)
@@ -114,9 +119,35 @@ class EspnProvider(LiveProvider):
         return games
 
     async def _fetch_scoreboard(self, client: httpx.AsyncClient, url: str) -> dict:
-        response = await client.get(url)
-        response.raise_for_status()
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+        except Exception as exc:
+            self._track(False, operation="scoreboard", error=exc)
+            raise
+        self._track(True, operation="scoreboard", response_bytes=len(response.content))
         return response.json()
+
+    def _track(
+        self,
+        success: bool,
+        *,
+        operation: str,
+        response_bytes: int = 0,
+        error: Exception | None = None,
+    ) -> None:
+        if not self.usage_tracker:
+            return
+        self.usage_tracker.record(
+            "espn",
+            category="api",
+            request_count=1,
+            success=success,
+            response_bytes=response_bytes,
+            estimated_cost_brl=self.cost_per_request_brl,
+            operation=operation,
+            error=str(error)[:240] if error else None,
+        )
 
 
 def _parse_games(payload: dict, live_only: bool = True) -> list[LiveGame]:

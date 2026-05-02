@@ -44,6 +44,7 @@ from src.providers.football_data_org import FootballDataOrgProvider
 from src.providers.mock_provider import MockProvider
 from src.portal import PortalStore
 from src.storage import StateStore
+from src.usage_metrics import UsageTracker
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -67,12 +68,31 @@ TELEGRAM_DICE = {
 def build_provider(settings: Settings) -> LiveProvider:
     if settings.test_mode:
         return MockProvider()
+    usage_tracker = UsageTracker(settings.usage_metrics_db_file)
     providers: list[LiveProvider] = []
     if settings.api_football_key:
-        providers.append(ApiFootballProvider(settings.api_football_key, settings.api_football_base_url))
-    providers.append(EspnProvider())
+        providers.append(
+            ApiFootballProvider(
+                settings.api_football_key,
+                settings.api_football_base_url,
+                usage_tracker=usage_tracker,
+                cost_per_request_brl=settings.api_football_cost_per_request_brl,
+            )
+        )
+    providers.append(
+        EspnProvider(
+            usage_tracker=usage_tracker,
+            cost_per_request_brl=settings.espn_cost_per_request_brl,
+        )
+    )
     if settings.football_data_org_token:
-        providers.append(FootballDataOrgProvider(settings.football_data_org_token))
+        providers.append(
+            FootballDataOrgProvider(
+                settings.football_data_org_token,
+                usage_tracker=usage_tracker,
+                cost_per_request_brl=settings.football_data_org_cost_per_request_brl,
+            )
+        )
     return FallbackLiveProvider(*providers)
 
 
@@ -762,6 +782,9 @@ async def ia_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context_payload,
         settings.gemini_api_key,
         settings.gemini_model,
+        UsageTracker(settings.usage_metrics_db_file),
+        settings.gemini_input_cost_per_1m_brl,
+        settings.gemini_output_cost_per_1m_brl,
     )
     await update.effective_message.reply_text(answer, reply_markup=ia_menu())
 
@@ -1342,6 +1365,9 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
         settings.gemini_api_key,
         settings.gemini_model,
         signal.get("learning_context"),
+        UsageTracker(settings.usage_metrics_db_file),
+        settings.gemini_input_cost_per_1m_brl,
+        settings.gemini_output_cost_per_1m_brl,
     )
     store.set_active(signal["game"]["game_id"], signal)
     await supabase_sink(context).sync_signal(signal)
