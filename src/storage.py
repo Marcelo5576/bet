@@ -115,6 +115,14 @@ class StateStore:
         self.save(state)
         return state
 
+    def clear_scanner_cache(self) -> BotState:
+        state = self.load()
+        state.candidate_signals = []
+        state.last_games = []
+        state.last_scan_at = datetime.now(timezone.utc).isoformat()
+        self.save(state)
+        return state
+
     def set_scan_preference(self, mode: str) -> BotState:
         state = self.load()
         clean = str(mode or "").strip().lower()

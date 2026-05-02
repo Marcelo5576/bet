@@ -30,7 +30,13 @@ from src.intelligence.manual_import import parse_manual_bets
 from src.intelligence.paper_trading import best_paper_entry, paper_opportunities
 from src.intelligence.rules import ranked_signals
 from src.intelligence.source_catalog import FOOTBALL_DATA_SOURCES
-from src.main import build_provider, prepare_signal, scan_games, _watch_signal_from_game
+from src.main import (
+    build_provider,
+    prepare_signal,
+    scan_games,
+    _watch_signal_from_game,
+    _scanner_cycle_seconds,
+)
 from src.portal import PortalStore, read_session_token
 from src.portal_web import router as portal_router
 from src.storage import StateStore
@@ -254,16 +260,17 @@ def dashboard(request: Request) -> str:
     user = _current_dashboard_user(request, settings)
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     history = state.history or []
-    live_games = _live_games_only(state.last_games or [])
+    live_games = _fresh_live_games(state, settings)
     visible_history = _green_red(history)
     scanner = _scanner_status(state, settings)
     stats = _stats(state, visible_history)
     rows = "\n".join(_row(item) for item in visible_history[:120])
     active_entries = _active_entries(history, state.active_signal)
     active_entry_rows = "\n".join(_active_entry_row(item) for item in active_entries)
-    simulation_signals = _simulation_signals(state)
+    simulation_signals = _simulation_signals(state, settings)
     opportunities = paper_opportunities(simulation_signals)
-    simulation_history_panel = _simulation_history_panel(state.simulation_sessions or [])
+    live_lab_sessions = _visible_live_lab_sessions(state.simulation_sessions or [])
+    simulation_history_panel = _simulation_history_panel(live_lab_sessions)
     simulation_rows = "\n".join(_simulation_row(item) for item in opportunities)
     thermometer_rows = _thermometer_rows(opportunities)
     default_signal = simulation_signals[0] if simulation_signals else None
@@ -272,7 +279,7 @@ def dashboard(request: Request) -> str:
     latest_real_session = next(
         (
             session
-            for session in (state.simulation_sessions or [])
+            for session in live_lab_sessions
             if _safe_int(session.get("source_games")) > 0
         ),
         None,
@@ -2368,6 +2375,7 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     history = state.history or []
     visible_history = _green_red(history)
+    live_signals = _simulation_signals(state, settings)
     return JSONResponse(
         {
             "active_signal": state.active_signal,
@@ -2376,9 +2384,9 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
             "stats": _stats(state, visible_history),
             "learning": _learning_context(state, visible_history),
             "scanner": _scanner_status(state, settings),
-            "paper_opportunities": paper_opportunities(_simulation_signals(state)),
-            "best_paper_entry": best_paper_entry(_simulation_signals(state)),
-            "simulation_sessions": state.simulation_sessions or [],
+            "paper_opportunities": paper_opportunities(live_signals),
+            "best_paper_entry": best_paper_entry(live_signals),
+            "simulation_sessions": _visible_live_lab_sessions(state.simulation_sessions or []),
             "domains": [
                 item.strip()
                 for item in settings.dashboard_domains.split(",")
@@ -2450,7 +2458,16 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
             detail=f"Falha no scanner: {type(exc).__name__}",
         ) from exc
 
-    store.set_last_games([_to_plain_dict(game) for game in games])
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    store.set_last_games(
+        [
+            {
+                **_to_plain_dict(game),
+                "_fetched_at": fetched_at,
+            }
+            for game in games
+        ]
+    )
 
     prepared: list[dict[str, Any]] = []
     raw_signals = ranked_signals(
@@ -2488,9 +2505,10 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
 
 @app.get("/api/simulator")
 def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
-    live_games = _live_games_only(state.last_games or [])
-    simulation_signals = _simulation_signals(state)
+    live_games = _fresh_live_games(state, settings)
+    simulation_signals = _simulation_signals(state, settings)
     opportunities = paper_opportunities(simulation_signals)
     default_signal = simulation_signals[0] if simulation_signals else None
     simulation_rows = "\n".join(
@@ -2577,8 +2595,9 @@ def _fantasy_live_description(items: list[dict[str, Any]]) -> str:
 
 @app.get("/api/fantasy-live-opportunities")
 def api_fantasy_live_opportunities(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
-    signals = _simulation_signals(state)
+    signals = _simulation_signals(state, settings)
     opportunities = paper_opportunities(signals)
     return JSONResponse(
         {
@@ -2621,7 +2640,16 @@ async def api_simulator_session(
         )
 
     if live_games:
-        state = store.set_last_games([_to_plain_dict(game) for game in live_games])
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        state = store.set_last_games(
+            [
+                {
+                    **_to_plain_dict(game),
+                    "_fetched_at": fetched_at,
+                }
+                for game in live_games
+            ]
+        )
 
     prepared: list[dict[str, Any]] = []
     if live_games:
@@ -2634,16 +2662,21 @@ async def api_simulator_session(
         )
         if raw_signals:
             for signal in raw_signals[:12]:
-                prepared.append(prepare_signal(signal, state, settings))
+                enriched = prepare_signal(signal, state, settings)
+                enriched["scan_scope"] = _scan_mode_label(mode)
+                prepared.append(enriched)
         else:
             for game in live_games[:12]:
-                prepared.append(_watch_signal_from_game(game, state, settings))
+                watch = _watch_signal_from_game(game, state, settings)
+                watch["scan_scope"] = _scan_mode_label(mode)
+                prepared.append(watch)
     if not prepared:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Não foi possível montar oportunidades com os jogos ao vivo reais atuais.",
         )
 
+    store.set_candidates(prepared)
     opportunities = paper_opportunities(prepared)
     if not opportunities:
         raise HTTPException(
@@ -2780,9 +2813,10 @@ async def api_fantasy_room_import(
 
 @app.get("/api/match-stats")
 def api_match_stats(game_id: str, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     history = _green_red(state.history or [])
-    signals = _simulation_signals(state)
+    signals = _simulation_signals(state, settings)
     selected = next(
         (
             signal
@@ -3082,11 +3116,17 @@ def _green_red(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in history if item.get("outcome") in {"win", "loss"}]
 
 
-def _simulation_signals(state) -> list[dict[str, Any]]:
+def _simulation_signals(state, settings=None) -> list[dict[str, Any]]:
+    snapshot_stale = bool(settings is not None and _scanner_cache_is_stale(state, settings))
+    fresh_candidates = (
+        _fresh_candidate_signals(state, settings)
+        if settings is not None
+        else (state.candidate_signals or [])
+    )
     signals = []
-    if state.active_signal:
+    if state.active_signal and not snapshot_stale:
         signals.append(state.active_signal)
-    signals.extend(state.candidate_signals or [])
+    signals.extend(fresh_candidates)
     seen = set()
     deduped = []
     for signal in signals:
@@ -3676,24 +3716,27 @@ def _action_badge(action: Any) -> str:
 
 
 def _scanner_status(state, settings=None) -> dict[str, Any]:
-    candidates = len(state.candidate_signals or [])
+    settings = settings or load_settings()
+    candidates = len(_fresh_candidate_signals(state, settings))
     has_active = bool(state.active_signal)
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
-    live_games = _live_games_only(state.last_games or [])
+    live_games = _fresh_live_games(state, settings)
     idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
     active_seconds = int(getattr(settings, "active_scan_interval_seconds", 120) or 120)
-    current_seconds = active_seconds if has_active else idle_seconds
+    current_seconds = _scanner_cycle_seconds(state, settings, idle_interval=idle_seconds, active_interval=active_seconds)
+    if has_active:
+        mode_label = f"{max(1, round(active_seconds / 60))} min com jogo ativo"
+    elif live_games or candidates:
+        mode_label = f"{max(1, round(current_seconds / 60))} min com jogos ao vivo"
+    else:
+        mode_label = f"{max(1, round(idle_seconds / 60))} min aguardando escolha"
     return {
-        "mode": (
-            f"{max(1, round(active_seconds / 60))} min com jogo ativo"
-            if has_active
-            else f"{max(1, round(idle_seconds / 60))} min aguardando escolha"
-        ),
+        "mode": mode_label,
         "last_scan": _short_datetime(state.last_scan_at),
         "last_scan_iso": state.last_scan_at,
         "candidates": candidates,
         "today_games": len(live_games),
-        "status": "monitorando entrada" if has_active else "scanner livre",
+        "status": "monitorando entrada" if has_active else ("radar ao vivo" if live_games or candidates else "scanner livre"),
         "scan_preference": scan_mode,
         "scan_profile": _scan_mode_label(scan_mode),
         "idle_scan_interval_seconds": idle_seconds,
@@ -3755,6 +3798,34 @@ def _short_datetime(value: Any) -> str:
     return str(value).replace("T", " ")[:16]
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _snapshot_age_seconds(last_scan_at: Any) -> int | None:
+    stamp = _parse_iso_datetime(last_scan_at)
+    if not stamp:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds()))
+
+
+def _scanner_cache_is_stale(state, settings) -> bool:
+    age = _snapshot_age_seconds(getattr(state, "last_scan_at", None))
+    if age is None:
+        return False
+    cycle = _scanner_cycle_seconds(state, settings)
+    stale_after = max(180, int(cycle * 2.5))
+    return age > stale_after
+
+
 def _is_live_game(game: dict[str, Any] | None) -> bool:
     if not isinstance(game, dict):
         return False
@@ -3767,6 +3838,32 @@ def _is_live_game(game: dict[str, Any] | None) -> bool:
 
 def _live_games_only(games: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [game for game in games if _is_live_game(game)]
+
+
+def _fresh_live_games(state, settings) -> list[dict[str, Any]]:
+    if _scanner_cache_is_stale(state, settings):
+        return []
+    return _live_games_only(state.last_games or [])
+
+
+def _fresh_candidate_signals(state, settings) -> list[dict[str, Any]]:
+    if _scanner_cache_is_stale(state, settings):
+        return []
+    return [
+        item
+        for item in (state.candidate_signals or [])
+        if isinstance(item, dict) and _is_live_game(item.get("game") or {})
+    ]
+
+
+def _visible_live_lab_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visible: list[dict[str, Any]] = []
+    for item in sessions or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("session_kind") or "") == "live_snapshot":
+            visible.append(item)
+    return visible
 
 
 def _equity_curve(backtest: dict[str, Any]) -> str:
@@ -4110,138 +4207,79 @@ def _simulate_live_session(
     bankroll_units: float = 100.0,
     stake_percent: float = 10.0,
 ) -> dict[str, Any]:
-    games_target = max(30, min(120, _safe_int(total_games) or 30))
-    bankroll_start = max(20.0, min(10000.0, _safe_float(bankroll_units, 100.0)))
+    sample_target = max(8, min(120, _safe_int(total_games) or 30))
+    bankroll_reference = max(20.0, min(10000.0, _safe_float(bankroll_units, 100.0)))
     stake_pct = max(1.0, min(20.0, _safe_float(stake_percent, 10.0)))
     if not opportunities:
         return {
-            "total_games": games_target,
-            "greens": 0,
-            "reds": 0,
-            "hit_rate": 0.0,
-            "start_bankroll": bankroll_start,
-            "end_bankroll": bankroll_start,
-            "profit_units": 0.0,
-            "roi": 0.0,
-            "max_drawdown": 0.0,
-            "max_win_streak": 0,
-            "max_loss_streak": 0,
+            "session_kind": "live_snapshot",
+            "learning_eligible": False,
+            "total_games": 0,
+            "source_games": 0,
+            "actionable": 0,
+            "watchlist": 0,
+            "avg_score": 0.0,
+            "avg_risk": 0.0,
+            "avg_confidence": 0.0,
+            "bankroll_reference": bankroll_reference,
             "stake_percent": stake_pct,
             "rows": [],
-            "note": "Sem jogos ao vivo para simular agora. Rode o scanner e tente novamente.",
+            "note": "Sem jogos ao vivo reais para leitura neste ciclo. O laboratorio nao fabrica dados.",
         }
 
     ranked = sorted(
         opportunities,
         key=lambda item: (
-            -_safe_int(item.get("score")),
-            _safe_int(item.get("risk")),
-            str(item.get("match") or ""),
-            str(item.get("market") or ""),
+            _action_weight(item.get("action")),
+            _safe_int(item.get("score")) - _safe_int(item.get("risk")),
+            _safe_int(item.get("score")),
         ),
+        reverse=True,
     )
-    seed_material = "|".join(
-        f"{item.get('game_id')}:{item.get('market')}:{item.get('selection')}:{item.get('minute')}"
-        for item in ranked[:48]
-    ) or "sim-session-default"
-    seed_value = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:16], 16)
-    rng = random.Random(seed_value)
-
-    bankroll = bankroll_start
-    peak = bankroll_start
-    max_drawdown = 0.0
-    greens = 0
-    reds = 0
-    current_win_streak = 0
-    current_loss_streak = 0
-    max_win_streak = 0
-    max_loss_streak = 0
-    total_staked = 0.0
-    rows: list[dict[str, Any]] = []
-
-    for idx in range(games_target):
-        pick = ranked[idx % len(ranked)]
-        score = max(1, min(100, _safe_int(pick.get("score"))))
-        risk = max(1, min(100, _safe_int(pick.get("risk")) or (100 - score)))
-        confidence = max(1, min(100, _safe_int(pick.get("confidence")) or score))
-        odds = _safe_float(pick.get("odds"))
-        if not odds:
-            odds = _synthetic_live_odds(score, risk, rng)
-
-        win_prob = _probability_from_live_read(score, risk, confidence, pick, rng)
-        stake = round(max(0.2, bankroll * (stake_pct / 100.0)), 2)
-        total_staked += stake
-        won = rng.random() <= win_prob
-
-        if won:
-            payout = round(stake * max(0.01, odds - 1.0), 2)
-            bankroll = round(bankroll + payout, 2)
-            greens += 1
-            current_win_streak += 1
-            current_loss_streak = 0
-            max_win_streak = max(max_win_streak, current_win_streak)
-            outcome = "GREEN"
-            profit = payout
-        else:
-            bankroll = round(max(0.0, bankroll - stake), 2)
-            reds += 1
-            current_loss_streak += 1
-            current_win_streak = 0
-            max_loss_streak = max(max_loss_streak, current_loss_streak)
-            outcome = "RED"
-            profit = -stake
-
-        peak = max(peak, bankroll)
-        drawdown = peak - bankroll
-        max_drawdown = max(max_drawdown, drawdown)
-        entry_minute = _sim_entry_minute(pick, rng)
-        exit_minute = _sim_exit_minute(entry_minute, won, risk, rng)
-
-        rows.append(
-            {
-                "idx": idx + 1,
-                "match": pick.get("match") or "-",
-                "market": pick.get("market") or "-",
-                "selection": pick.get("selection") or "-",
-                "line": pick.get("line") or "-",
-                "minute": pick.get("minute") or "-",
-                "scoreline": pick.get("scoreline") or "-",
-                "odds": round(odds, 3),
-                "stake": stake,
-                "outcome": outcome,
-                "profit": round(profit, 2),
-                "bankroll": bankroll,
-                "win_prob_pct": round(win_prob * 100.0, 1),
-                "entry_minute": entry_minute,
-                "exit_minute": exit_minute,
-                "exit_action": _sim_exit_action(won, score, risk),
-                "exit_reason": _sim_exit_reason(won, score, risk, pick),
-            }
-        )
-
-    hit_rate = round((greens / max(1, games_target)) * 100.0, 1)
-    profit_units = round(bankroll - bankroll_start, 2)
-    roi = round((profit_units / max(1.0, total_staked)) * 100.0, 1)
+    selected = ranked[:sample_target]
     created_at = datetime.now(timezone.utc).isoformat()
+    unique_games = {
+        str(item.get("game_id") or item.get("match") or "")
+        for item in selected
+        if str(item.get("game_id") or item.get("match") or "").strip()
+    }
+    actionable = sum(1 for item in selected if str(item.get("action") or "").upper() == "ENTRAR")
+    rows = [
+        {
+            "idx": idx + 1,
+            "match": item.get("match") or "-",
+            "market": item.get("market") or "-",
+            "selection": item.get("selection") or "-",
+            "line": item.get("line") or "-",
+            "minute": item.get("minute") or "-",
+            "scoreline": item.get("scoreline") or "-",
+            "odds": item.get("odds") or "-",
+            "score": _safe_int(item.get("score")),
+            "risk": _safe_int(item.get("risk")),
+            "confidence": _safe_int(item.get("confidence")),
+            "action": str(item.get("action") or "-").upper(),
+            "reason": item.get("reason") or "-",
+            "entry": item.get("entry") or "-",
+            "league": item.get("league") or "-",
+        }
+        for idx, item in enumerate(selected)
+    ]
     return {
-        "simulation_id": hashlib.sha256(f"{created_at}|{seed_material}".encode("utf-8")).hexdigest()[:24],
+        "session_kind": "live_snapshot",
+        "learning_eligible": False,
+        "simulation_id": hashlib.sha256(f"{created_at}|{len(selected)}|{len(unique_games)}".encode("utf-8")).hexdigest()[:24],
         "created_at": created_at,
-        "total_games": games_target,
-        "greens": greens,
-        "reds": reds,
-        "hit_rate": hit_rate,
-        "start_bankroll": round(bankroll_start, 2),
-        "end_bankroll": round(bankroll, 2),
-        "profit_units": profit_units,
-        "roi": roi,
-        "max_drawdown": round(max_drawdown, 2),
-        "max_win_streak": max_win_streak,
-        "max_loss_streak": max_loss_streak,
+        "total_games": len(selected),
+        "source_games": len(unique_games),
+        "actionable": actionable,
+        "watchlist": max(0, len(selected) - actionable),
+        "avg_score": round(sum(_safe_int(item.get("score")) for item in selected) / max(1, len(selected)), 1),
+        "avg_risk": round(sum(_safe_int(item.get("risk")) for item in selected) / max(1, len(selected)), 1),
+        "avg_confidence": round(sum(_safe_int(item.get("confidence")) for item in selected) / max(1, len(selected)), 1),
+        "bankroll_reference": round(bankroll_reference, 2),
         "stake_percent": stake_pct,
-        "avg_confidence": round(sum(_safe_int(item.get("confidence")) for item in ranked) / max(1, len(ranked)), 2),
-        "avg_edge": round(sum(_safe_float(item.get("edge") or item.get("value_edge"), 0.0) for item in ranked) / max(1, len(ranked)), 4),
         "rows": rows,
-        "note": "Simulacao paper/live com entrada, acompanhamento e saida dinamica. Usa jogos reais do scanner e nao executa aposta real.",
+        "note": "Snapshot 100% real do scanner ao vivo. Sem mock, sem resultado inventado e sem green/red sintetico.",
     }
 
 
@@ -4304,6 +4342,27 @@ def _simulation_session_panel(session: dict[str, Any]) -> str:
     rows = session.get("rows") or []
     if not rows:
         return f"<p class='muted'>{_esc(session.get('note') or 'Sem dados para simulacao.')}</p>"
+    if str(session.get("session_kind") or "") == "live_snapshot":
+        return (
+            "<div class='sim-lab-grid'>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Jogos ao vivo</div><div class='metric'>{_esc(session.get('source_games', 0))}</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Mercados lidos</div><div class='metric'>{_esc(session.get('total_games', 0))}</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Entrar agora</div><div class='metric green'>{_esc(session.get('actionable', 0))}</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Radar</div><div class='metric'>{_esc(session.get('watchlist', 0))}</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Score medio</div><div class='metric'>{_esc(session.get('avg_score', 0))}/100</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Risco medio</div><div class='metric'>{_esc(session.get('avg_risk', 0))}/100</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Confianca media</div><div class='metric'>{_esc(session.get('avg_confidence', 0))}%</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Banca ref.</div><div class='metric'>{_esc(_format_brl(session.get('bankroll_reference', 0)))}</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Stake padrao</div><div class='metric'>{_esc(session.get('stake_percent', 0))}%</div></div>"
+            "</div>"
+            "<div class='sim-lab-table-wrap'>"
+            "<table>"
+            "<thead><tr><th>#</th><th>Jogo</th><th>Mercado</th><th>Entrada real</th><th>Odd</th><th>Score</th><th>Risco</th><th>Leitura</th></tr></thead>"
+            f"<tbody>{_sim_result_rows_html(rows, session_kind='live_snapshot')}</tbody>"
+            "</table>"
+            "</div>"
+            f"<p class='muted sim-lab-note'>{_esc(session.get('note'))}</p>"
+        )
     return (
         "<div class='sim-lab-grid'>"
         f"<div class='sim-lab-kpi'><div class='muted'>Jogos simulados</div><div class='metric'>{_esc(session.get('total_games', 0))}</div></div>"
@@ -4328,43 +4387,53 @@ def _simulation_session_panel(session: dict[str, Any]) -> str:
 
 def _simulation_history_panel(sessions: list[dict[str, Any]]) -> str:
     if not sessions:
-        return "<p class='muted'>Ainda sem simulacoes salvas. Rode a sessao de 30 jogos para iniciar o historico.</p>"
+        return "<p class='muted'>Ainda sem snapshots ao vivo salvos. Rode o laboratorio para registrar leituras reais do momento.</p>"
     rows: list[str] = []
     for idx, session in enumerate(sessions[:40], start=1):
         created_at = _short_datetime(session.get("created_at"))
         total_games = _safe_int(session.get("total_games"))
-        greens = _safe_int(session.get("greens"))
-        reds = _safe_int(session.get("reds"))
-        hit_rate = _safe_float(session.get("hit_rate"))
-        profit = _safe_float(session.get("profit_units"))
-        end_bankroll = _safe_float(session.get("end_bankroll"))
-        drawdown = _safe_float(session.get("max_drawdown"))
+        source_games = _safe_int(session.get("source_games"))
+        actionable = _safe_int(session.get("actionable"))
+        avg_score = _safe_float(session.get("avg_score"))
+        avg_risk = _safe_float(session.get("avg_risk"))
         rows.append(
             "<tr>"
             f"<td>{idx}</td>"
             f"<td>{_esc(created_at)}</td>"
+            f"<td>{_esc(source_games)}</td>"
             f"<td>{_esc(total_games)}</td>"
-            f"<td class='win'>{_esc(greens)}</td>"
-            f"<td class='loss'>{_esc(reds)}</td>"
-            f"<td>{_esc(round(hit_rate, 1))}%</td>"
-            f"<td class='{_value_class(profit)}'>{_esc(_format_brl(round(profit, 2)))}</td>"
-            f"<td>{_esc(_format_brl(round(end_bankroll, 2)))}</td>"
-            f"<td class='red'>{_esc(_format_brl(round(drawdown, 2)))}</td>"
+            f"<td class='win'>{_esc(actionable)}</td>"
+            f"<td>{_esc(round(avg_score, 1))}/100</td>"
+            f"<td class='red'>{_esc(round(avg_risk, 1))}/100</td>"
             "</tr>"
         )
     return (
         "<div class='sim-history-wrap'>"
         "<table>"
-        "<thead><tr><th>#</th><th>Data</th><th>Jogos</th><th>Green</th><th>Red</th><th>Hit</th><th>Lucro</th><th>Banca final</th><th>DD max</th></tr></thead>"
+        "<thead><tr><th>#</th><th>Data</th><th>Jogos live</th><th>Mercados</th><th>Entrar</th><th>Score medio</th><th>Risco medio</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</div>"
     )
 
 
-def _sim_result_rows_html(rows: list[dict[str, Any]]) -> str:
+def _sim_result_rows_html(rows: list[dict[str, Any]], session_kind: str = "") -> str:
     html_rows: list[str] = []
     for row in rows:
+        if session_kind == "live_snapshot":
+            html_rows.append(
+                "<tr>"
+                f"<td>{_esc(row.get('idx'))}</td>"
+                f"<td>{_esc(row.get('match'))}<br><span class='muted'>{_esc(row.get('league'))} | {_esc(row.get('minute'))}' | {_esc(row.get('scoreline'))}</span></td>"
+                f"<td>{_esc(row.get('market'))}</td>"
+                f"<td>{_esc(row.get('selection'))} {_esc(row.get('line'))}<br><span class='muted'>{_esc(row.get('entry'))}</span></td>"
+                f"<td>{_esc(row.get('odds'))}</td>"
+                f"<td>{_esc(row.get('score'))}/100</td>"
+                f"<td>{_esc(row.get('risk'))}/100</td>"
+                f"<td>{_esc(row.get('action'))}<br><span class='muted'>{_esc(row.get('reason'))}</span></td>"
+                "</tr>"
+            )
+            continue
         outcome = str(row.get("outcome") or "").upper()
         outcome_cls = "win" if outcome == "GREEN" else "loss"
         html_rows.append(

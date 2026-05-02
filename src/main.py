@@ -1180,12 +1180,15 @@ async def run_scan(
                 _watch_signal_from_game(game, state, settings)
                 for game in games[:8]
             ]
+            for signal in watchlist:
+                signal["scan_scope"] = scan_scope
             store.set_candidates(watchlist)
             await supabase_sink(context).sync_signals(watchlist)
             return (
                 "Modo radar ativo: sem gatilho forte agora, mas os jogos seguem monitorados.\n\n"
                 + candidate_list_text(watchlist)
             )
+        store.set_candidates([])
         return (
             "Nenhum jogo ao vivo real passou nos filtros agora.\n\n"
             f"Busca usada: {scan_scope}.\n"
@@ -1376,13 +1379,47 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
 
 async def update_last_games(context: ContextTypes.DEFAULT_TYPE, live_games: list) -> None:
     store: StateStore = context.application.bot_data["store"]
-    store.set_last_games([_to_dict(game) for game in live_games])
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    store.set_last_games(
+        [
+            {
+                **_to_dict(game),
+                "_fetched_at": fetched_at,
+            }
+            for game in live_games
+        ]
+    )
 
 
 def _to_dict(item) -> dict:
     if is_dataclass(item):
         return asdict(item)
     return dict(item)
+
+
+def _scan_state_has_live_snapshot(state) -> bool:
+    if bool(state.active_game_id and state.active_signal):
+        return True
+    if any(isinstance(item, dict) for item in (state.candidate_signals or [])):
+        return True
+    return any(isinstance(item, dict) for item in (state.last_games or []))
+
+
+def _scanner_cycle_seconds(
+    state,
+    settings: Settings,
+    *,
+    idle_interval: int | None = None,
+    active_interval: int | None = None,
+) -> int:
+    idle_seconds = max(30, int(idle_interval or settings.idle_scan_interval_seconds or 1800))
+    active_seconds = max(30, int(active_interval or settings.active_scan_interval_seconds or 120))
+    live_board_seconds = max(30, int(settings.scan_interval_seconds or active_seconds))
+    if state.active_game_id and state.active_signal:
+        return active_seconds
+    if _scan_state_has_live_snapshot(state):
+        return min(active_seconds, live_board_seconds)
+    return idle_seconds
 
 
 def candidate_list_text(signals: list[dict]) -> str:
@@ -1601,7 +1638,11 @@ def _notification_chat_ids(settings: Settings | None, state) -> set[int]:
 
 
 def _simulation_learning_summary(sessions: list[dict]) -> dict:
-    recent = [item for item in sessions if isinstance(item, dict)][:30]
+    recent = [
+        item
+        for item in sessions
+        if isinstance(item, dict) and bool(item.get("learning_eligible"))
+    ][:30]
     if not recent:
         return {
             "sessions": 0,
@@ -1652,6 +1693,65 @@ def _simulation_signals_from_state(state) -> list[dict]:
         seen.add(key)
         deduped.append(signal)
     return deduped
+
+
+def _build_live_snapshot_session(
+    opportunities: list[dict],
+    *,
+    bankroll_units: float,
+    stake_percent: float,
+    source_games: int,
+    scan_scope: str,
+) -> dict:
+    bankroll_reference = max(20.0, min(10000.0, _safe_float(bankroll_units, 100.0)))
+    stake_pct = max(1.0, min(20.0, _safe_float(stake_percent, 10.0)))
+    ranked = sorted(
+        opportunities,
+        key=lambda item: (
+            str(item.get("action") or "").upper() != "ENTRAR",
+            -_safe_int(item.get("score"), 0),
+            _safe_int(item.get("risk"), 100),
+        ),
+    )[:30]
+    created_at = datetime.now(timezone.utc).isoformat()
+    actionable = sum(1 for item in ranked if str(item.get("action") or "").upper() == "ENTRAR")
+    rows = [
+        {
+            "idx": idx + 1,
+            "match": item.get("match") or "-",
+            "market": item.get("market") or "-",
+            "selection": item.get("selection") or "-",
+            "line": item.get("line") or "-",
+            "minute": item.get("minute") or "-",
+            "scoreline": item.get("scoreline") or "-",
+            "odds": item.get("odds") or "-",
+            "score": _safe_int(item.get("score"), 0),
+            "risk": _safe_int(item.get("risk"), 0),
+            "confidence": _safe_int(item.get("confidence"), 0),
+            "action": str(item.get("action") or "-").upper(),
+            "reason": item.get("reason") or "-",
+            "entry": item.get("entry") or "-",
+            "league": item.get("league") or "-",
+        }
+        for idx, item in enumerate(ranked)
+    ]
+    return {
+        "session_kind": "live_snapshot",
+        "learning_eligible": False,
+        "created_at": created_at,
+        "total_games": len(rows),
+        "source_games": int(source_games or 0),
+        "actionable": actionable,
+        "watchlist": max(0, len(rows) - actionable),
+        "avg_score": round(sum(_safe_int(item.get("score"), 0) for item in rows) / max(1, len(rows)), 1),
+        "avg_risk": round(sum(_safe_int(item.get("risk"), 0) for item in rows) / max(1, len(rows)), 1),
+        "avg_confidence": round(sum(_safe_int(item.get("confidence"), 0) for item in rows) / max(1, len(rows)), 1),
+        "bankroll_reference": round(bankroll_reference, 2),
+        "stake_percent": stake_pct,
+        "scan_scope": scan_scope,
+        "rows": rows,
+        "note": "Snapshot diario 100% real com jogos ao vivo e oportunidades atuais. Sem mock e sem resultado sintetico.",
+    }
 
 
 def _sim_probability(score: int, risk: int, confidence: int, action: str, rng: random.Random) -> float:
@@ -1855,6 +1955,21 @@ def _safe_float(value, default: float = 0.0) -> float:
 
 
 def _simulation_summary_text(session: dict, when_local: datetime, timezone_label: str) -> str:
+    if str(session.get("session_kind") or "") == "live_snapshot":
+        return _shorten(
+            "\n".join(
+                [
+                    "🧠 SNAPSHOT DIARIO IA CONCLUIDO",
+                    f"Horario local: {when_local.strftime('%d/%m/%Y %H:%M')} ({timezone_label})",
+                    f"Jogos ao vivo: {session.get('source_games', 0)}",
+                    f"Mercados lidos: {session.get('total_games', 0)}",
+                    f"Entrar agora: {session.get('actionable', 0)} | Radar: {session.get('watchlist', 0)}",
+                    f"Score medio: {session.get('avg_score', 0)}/100 | Risco medio: {session.get('avg_risk', 0)}/100",
+                    "Sessao salva como leitura real do momento, sem green/red sintetico.",
+                ]
+            ),
+            TELEGRAM_TEXT_LIMIT,
+        )
     return _shorten(
         "\n".join(
             [
@@ -1942,16 +2057,14 @@ async def run_daily_auto_simulation(
     opportunities = paper_opportunities(signals)
     if not opportunities:
         return False, None
-    session = _simulate_learning_session(
+    session = _build_live_snapshot_session(
         opportunities,
-        total_games=settings.auto_simulation_games,
         bankroll_units=settings.auto_simulation_bankroll,
         stake_percent=settings.auto_simulation_stake_percent,
-        seed_key=f"{today_key}|{scan_scope}",
+        source_games=len(games),
+        scan_scope=scan_scope,
     )
-    session["scan_scope"] = scan_scope
     session["trigger"] = "manual" if manual else "daily_auto"
-    session["source_games"] = len(games)
     try:
         await supabase_sink(context).sync_simulation_session(session)
     except Exception as exc:
@@ -1990,10 +2103,11 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception as exc:
         logger.info("Nao consegui aplicar preferencias de scanner por usuario: %s", exc)
-    interval = (
-        active_interval
-        if state.active_game_id
-        else idle_interval
+    interval = _scanner_cycle_seconds(
+        state,
+        settings,
+        idle_interval=idle_interval,
+        active_interval=active_interval,
     )
     context.job_queue.run_once(scheduled_scan, when=interval)
     if not chat_ids and not scan_requested:

@@ -70,6 +70,8 @@ def summarize_history_with_simulation(
 
 
 def _session_is_live(session: dict[str, Any]) -> bool:
+    if not bool(session.get("learning_eligible")):
+        return False
     scan_scope = str(session.get("scan_scope") or "").lower()
     if "ao vivo" in scan_scope or "live" in scan_scope:
         return True
