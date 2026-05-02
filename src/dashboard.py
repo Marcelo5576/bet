@@ -14,6 +14,7 @@ import re
 import secrets
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -2514,6 +2515,15 @@ def jogos_do_dia_page(request: Request) -> str:
       display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .comparison .card { padding: 14px; }
+    .skills-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .skill-card {
+      display: grid; gap: 8px;
+      border: 1px solid #263445; border-radius: 10px; background: #0d131b; padding: 12px;
+    }
+    .skill-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+    .skill-card strong { font-size: 16px; }
+    .skill-snapshot { color: #d6e2f1; font-size: 13px; line-height: 1.4; }
+    .skill-fact { color: var(--muted); font-size: 12px; }
     .market-board { display: grid; gap: 10px; }
     .market-line {
       display: grid; gap: 10px; grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .6fr));
@@ -2538,12 +2548,12 @@ def jogos_do_dia_page(request: Request) -> str:
       .toolbar { grid-template-columns: 1fr 1fr; }
       .game-list { max-height: none; }
       .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .comparison, .market-line { grid-template-columns: 1fr; }
+      .comparison, .market-line, .skills-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 640px) {
       .topin { align-items: start; flex-direction: column; }
       .nav { width: 100%; overflow: auto; flex-wrap: nowrap; }
-      .metrics, .toolbar, .detail-grid, .odds-row, .pressure-row { grid-template-columns: 1fr; }
+      .metrics, .toolbar, .detail-grid, .odds-row, .pressure-row, .skills-grid { grid-template-columns: 1fr; }
       .headline h1 { font-size: 28px; }
     }
   </style>
@@ -2694,10 +2704,10 @@ def jogos_do_dia_page(request: Request) -> str:
       document.getElementById('metricEnter').textContent = safeNum(metrics.enter_count);
       document.getElementById('metricWatch').textContent = safeNum(metrics.watch_count);
       const scanner = payload.scanner || {};
-      document.getElementById('heroLastScan').textContent = scanner.last_scan || '-';
+      document.getElementById('heroLastScan').textContent = scanner.last_scan_brt || payload.generated_at_brt || scanner.last_scan || '-';
       document.getElementById('heroMode').textContent = scanner.mode || '-';
       document.getElementById('heroStatus').textContent = scanner.status || '-';
-      document.getElementById('heroNote').textContent = `Perfil ${scanner.scan_profile || '-'} · ${safeNum(scanner.candidates)} candidatos vivos`;
+      document.getElementById('heroNote').textContent = `Horario Brasil · perfil ${scanner.scan_profile || '-'} · ${safeNum(scanner.candidates)} candidatos vivos`;
       const highlights = (payload.highlights || []).length
         ? payload.highlights.map(item => `<span>${escapeHtml(item)}</span>`).join('')
         : '<span>Sem destaques agora. O modulo continua aguardando o proximo ciclo real.</span>';
@@ -2767,6 +2777,21 @@ def jogos_do_dia_page(request: Request) -> str:
             <div><span class="pill ${actionClass(rec.action)}">${escapeHtml(rec.action || 'SEM DADOS')}</span></div>
           </div>`).join('')
         : '<div class="empty">A fonte real nao trouxe leitura de mercado suficiente para este jogo.</div>';
+      const skills = (game.market_skills || []).length
+        ? game.market_skills.map(skill => `<article class="skill-card">
+            <div class="skill-head">
+              <div>
+                <div class="eyebrow">skill ia</div>
+                <strong>${escapeHtml(skill.title || '-')}</strong>
+              </div>
+              <span class="pill ${actionClass(skill.action)}">${escapeHtml(skill.action || 'SEM DADOS')}</span>
+            </div>
+            <div class="skill-snapshot">${escapeHtml(skill.snapshot || 'Sem linha ao vivo')}</div>
+            <div class="subline">${escapeHtml(skill.entry || '-')}</div>
+            <div class="skill-fact">${escapeHtml(skill.fact || '-')}</div>
+            <div class="muted">${escapeHtml(skill.reason || '-')}</div>
+          </article>`).join('')
+        : '<div class="empty">Nenhuma skill de mercado disponivel para este jogo agora.</div>';
       const marketTags = (game.market_tags || []).length
         ? game.market_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
         : '<span>Sem mercados extras</span>';
@@ -2795,19 +2820,22 @@ def jogos_do_dia_page(request: Request) -> str:
             </div>
           </section>
           <section class="card">
-            <div class="eyebrow">Resumo de pressao</div>
-            <div class="subline" style="margin-top:8px">${escapeHtml(game.summary || 'Sem resumo extra.')}</div>
-            <div class="progress"><span style="width:${Math.min(100, Number(game.heat_index || 0))}%"></span></div>
-            <div class="muted" style="margin-top:8px">Indice de calor calculado a partir da pressao e chutes no alvo do feed real.</div>
+            <div class="eyebrow">Contexto factual</div>
+            <div class="subline" style="margin-top:8px">Minuto ${safeNum(game.minute)}' · placar ${scoreText(game)} · pressao ${safeNum(game.home_pressure)} x ${safeNum(game.away_pressure)} · chutes no alvo ${safeNum(game.home_shots_on)} x ${safeNum(game.away_shots_on)}</div>
+            <div class="muted" style="margin-top:8px">Sem indice sintetico nesta tela. Aqui entram apenas fatos do feed ao vivo e leituras reais do scanner.</div>
           </section>
         </div>
+        <section class="card">
+          <div class="eyebrow">Skills IA por mercado</div>
+          <div class="skills-grid" style="margin-top:10px">${skills}</div>
+        </section>
         <section class="market-board">
           <div class="eyebrow">Mercados monitorados</div>
           ${recommendations}
         </section>
         <section class="card">
           <div class="eyebrow">Leitura operacional</div>
-          <div class="subline" style="margin-top:8px">${escapeHtml(best ? best.reason : game.summary || 'Aguardando leitura mais forte do scanner.')}</div>
+          <div class="subline" style="margin-top:8px">${escapeHtml(best ? best.reason : 'Aguardando leitura mais forte do scanner.')}</div>
           <div class="subline" style="margin-top:8px">${escapeHtml(best ? (best.risk_note || best.note || '') : '')}</div>
         </section>
       `;
@@ -4353,6 +4381,25 @@ def _short_datetime(value: Any) -> str:
     return str(value).replace("T", " ")[:16]
 
 
+def _brazil_timezone(settings: Settings | None = None) -> ZoneInfo:
+    tz_name = str(getattr(settings, "auto_simulation_timezone", "") or "America/Sao_Paulo").strip()
+    try:
+        return ZoneInfo(tz_name or "America/Sao_Paulo")
+    except Exception:
+        return ZoneInfo("America/Sao_Paulo")
+
+
+def _brazil_datetime_label(value: Any, settings: Settings | None = None) -> str:
+    if not value:
+        return "-"
+    stamp = value if isinstance(value, datetime) else _parse_iso_datetime(value)
+    if not stamp:
+        return "-"
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(_brazil_timezone(settings)).strftime("%d/%m/%Y %H:%M")
+
+
 def _parse_iso_datetime(value: Any) -> datetime | None:
     raw = str(value or "").strip()
     if not raw:
@@ -4459,6 +4506,115 @@ def _jogosdodia_best_signal(signals: list[dict[str, Any]]) -> dict[str, Any] | N
     }
 
 
+def _match_market_rec(
+    recommendations: list[dict[str, Any]],
+    *tokens: str,
+) -> dict[str, Any] | None:
+    normalized = [token.strip().lower() for token in tokens if token.strip()]
+    for rec in recommendations or []:
+        name = str(rec.get("market") or "").strip().lower()
+        if any(token in name for token in normalized):
+            return rec
+    return None
+
+
+def _market_price_text(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return "Sem linha ao vivo"
+    line = _market_line_label(item.get("line"))
+    odds = _safe_float(item.get("odds"), default=-1.0)
+    odds_label = f"{odds:.2f}" if odds > 0 else "-"
+    return f"linha {line} · odd {odds_label}"
+
+
+def _market_line_label(value: Any) -> str:
+    text = str(value or "-").strip()
+    lower = text.lower()
+    if len(text) > 1 and lower[0] in {"o", "u"} and any(char.isdigit() for char in text[1:]):
+        return text[1:]
+    return text
+
+
+def _market_snapshot(game: dict[str, Any], key: str) -> str:
+    markets = game.get("markets") or {}
+    market = markets.get(key) or {}
+    if key == "1x2":
+        home = _safe_float((market or {}).get("home"), default=-1.0)
+        draw = _safe_float((market or {}).get("draw"), default=-1.0)
+        away = _safe_float((market or {}).get("away"), default=-1.0)
+        if home <= 0 and draw <= 0 and away <= 0:
+            home = _safe_float(game.get("odds_home"), default=-1.0)
+            draw = _safe_float(game.get("odds_draw"), default=-1.0)
+            away = _safe_float(game.get("odds_away"), default=-1.0)
+        if home <= 0 and draw <= 0 and away <= 0:
+            return "Sem odds ao vivo"
+        return (
+            f"{game.get('home') or 'Casa'} {home:.2f} | "
+            f"Empate {draw:.2f} | "
+            f"{game.get('away') or 'Fora'} {away:.2f}"
+        )
+    if key in {"goals", "corners", "cards"}:
+        over = _market_price_text((market or {}).get("over"))
+        under = _market_price_text((market or {}).get("under"))
+        if over == "Sem linha ao vivo" and under == "Sem linha ao vivo":
+            return "Sem linha ao vivo"
+        return f"Over {over} | Under {under}"
+    if key == "asian":
+        home = _market_price_text((market or {}).get("home"))
+        away = _market_price_text((market or {}).get("away"))
+        if home == "Sem linha ao vivo" and away == "Sem linha ao vivo":
+            return "Sem linha ao vivo"
+        return (
+            f"{game.get('home') or 'Casa'} {home} | "
+            f"{game.get('away') or 'Fora'} {away}"
+        )
+    return "Sem linha ao vivo"
+
+
+def _jogosdodia_market_skills(
+    game: dict[str, Any],
+    recommendations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    minute = _safe_int(game.get("minute"))
+    score = f"{_safe_int(game.get('home_goals'))}x{_safe_int(game.get('away_goals'))}"
+    facts = {
+        "1x2": f"min {minute}' · placar {score}",
+        "goals": f"chutes no alvo { _safe_int(game.get('home_shots_on')) }/{ _safe_int(game.get('away_shots_on')) }",
+        "corners": f"pressao { _safe_int(game.get('home_pressure')) }/{ _safe_int(game.get('away_pressure')) }",
+        "asian": f"odd principal alinhada ao time em leitura",
+        "cards": f"mercado auxiliar do feed ao vivo",
+    }
+    specs = [
+        ("1x2", "1X2", ("1x2",)),
+        ("goals", "Gols", ("gols", "goals")),
+        ("corners", "Escanteios", ("escanteios", "corners")),
+        ("asian", "Handicap", ("asiatica", "handicap", "asian")),
+        ("cards", "Cartoes", ("cartoes", "cards")),
+    ]
+    skills: list[dict[str, Any]] = []
+    for market_key, title, tokens in specs:
+        rec = _match_market_rec(recommendations, *tokens)
+        snapshot = _market_snapshot(game, market_key)
+        available = snapshot != "Sem linha ao vivo" and snapshot != "Sem odds ao vivo"
+        action = str(rec.get("action") or "") if rec else ""
+        if not action:
+            action = "MONITORAR" if available else "SEM DADOS"
+        skill = {
+            "slug": market_key,
+            "title": title,
+            "action": action,
+            "entry": str((rec or {}).get("entry") or snapshot),
+            "reason": str(
+                (rec or {}).get("reason")
+                or ("Mercado ao vivo entregue pela fonte atual." if available else "Mercado nao entregue ao vivo pela fonte atual.")
+            ),
+            "snapshot": snapshot,
+            "fact": facts.get(market_key, "-"),
+        }
+        skills.append(skill)
+    return skills
+
+
 def _jogosdodia_recommendations(signal: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(signal, dict):
         return []
@@ -4499,33 +4655,17 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         related = grouped.get(game_id, [])
         best_signal_raw = related[0] if related else None
         best_signal = _jogosdodia_best_signal(related)
+        recommendations = _jogosdodia_recommendations(best_signal_raw)
+        market_skills = _jogosdodia_market_skills(game, recommendations)
         if best_signal and best_signal.get("action") == "ENTRAR":
             enter_count += 1
         elif best_signal:
             watch_count += 1
-        heat_index = min(
-            100,
-            int(
-                (
-                    max(_safe_int(game.get("home_pressure")), _safe_int(game.get("away_pressure"))) * 0.7
-                )
-                + (
-                    (_safe_int(game.get("home_shots_on")) + _safe_int(game.get("away_shots_on"))) * 3
-                )
-            ),
-        )
         if best_signal:
             highlights.append(
                 f"{game.get('home') or '-'} x {game.get('away') or '-'} · "
                 f"{best_signal.get('action')} · {best_signal.get('market') or '-'}"
             )
-        pressure_diff = _safe_int(game.get("home_pressure")) - _safe_int(game.get("away_pressure"))
-        if pressure_diff > 0:
-            summary = f"{game.get('home') or 'Casa'} pressiona mais neste momento ({pressure_diff:+d})."
-        elif pressure_diff < 0:
-            summary = f"{game.get('away') or 'Visitante'} pressiona mais neste momento ({pressure_diff:+d})."
-        else:
-            summary = "Pressao equilibrada ate aqui."
         games_payload.append(
             {
                 "game_id": game_id,
@@ -4545,9 +4685,8 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
                 "market_tags": _jogosdodia_market_tags(game),
                 "signal_count": len(related),
                 "best_signal": best_signal,
-                "recommendations": _jogosdodia_recommendations(best_signal_raw),
-                "heat_index": heat_index,
-                "summary": summary,
+                "recommendations": recommendations,
+                "market_skills": market_skills,
             }
         )
 
@@ -4556,13 +4695,15 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
             _action_weight((item.get("best_signal") or {}).get("action")),
             _safe_int((item.get("best_signal") or {}).get("confidence")),
             item.get("minute") or 0,
-            item.get("heat_index") or 0,
+            max(_safe_int(item.get("home_pressure")), _safe_int(item.get("away_pressure"))),
         ),
         reverse=True,
     )
     scanner = _scanner_status(state, settings)
+    scanner["last_scan_brt"] = _brazil_datetime_label(scanner.get("last_scan_iso"), settings)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at_brt": _brazil_datetime_label(datetime.now(timezone.utc), settings),
         "scanner": scanner,
         "metrics": {
             "live_games": len(games_payload),
@@ -4576,7 +4717,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         "notes": {
             "mode": "real_live_only",
             "mock": False,
-            "message": "Modulo isolado, alimentado apenas por jogos ao vivo reais do scanner principal.",
+            "message": "Modulo isolado, exibindo apenas dados factuais do feed ao vivo e leituras reais do scanner principal.",
         },
     }
 
