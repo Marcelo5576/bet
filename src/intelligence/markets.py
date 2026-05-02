@@ -21,8 +21,8 @@ def _one_x_two(signal: dict) -> dict:
         "line": "-",
         "odds": signal.get("target_odds"),
         "action": signal.get("action", "AGUARDAR"),
-        "entry": f"Entrar em vitoria de {selection}",
-        "reason": "mercado principal calculado pela leitura de pressao, finalizacoes e odds.",
+        "entry": _entry_text("1X2", selection, "-", signal.get("target_odds")),
+        "reason": "Leitura combina pressao, finalizacoes e preco do mercado.",
     }
 
 
@@ -36,10 +36,10 @@ def _goals(signal: dict, goals: dict) -> dict:
     if not over and not under:
         return _missing("Gols")
     if confidence >= 65 and total_goals == 0 and minute <= 70 and over:
-        return _rec("Gols", "Over", over, "AGUARDAR", "pressao favorece gol, mas confirmar ritmo antes de entrar.")
+        return _rec("Gols", "Over", over, "AGUARDAR", "Pressao favorece gol, mas ainda pede confirmacao do ritmo.")
     if minute >= 70 and total_goals == 0 and under:
-        return _rec("Gols", "Under", under, "AGUARDAR", "minuto avancado sem gol favorece protecao no under.")
-    return _rec("Gols", "Over" if over else "Under", over or under, "AGUARDAR", "mercado disponivel, mas sem gatilho forte.")
+        return _rec("Gols", "Under", under, "AGUARDAR", "Minuto avancado sem gol sustenta protecao no under.")
+    return _rec("Gols", "Over" if over else "Under", over or under, "AGUARDAR", "Linha aberta, mas sem vantagem clara agora.")
 
 
 def _corners(signal: dict, corners: dict) -> dict:
@@ -49,8 +49,8 @@ def _corners(signal: dict, corners: dict) -> dict:
     if not over and not under:
         return _missing("Escanteios")
     if confidence >= 65 and over:
-        return _rec("Escanteios", "Over", over, "AGUARDAR", "pressao ofensiva pode favorecer cantos.")
-    return _rec("Escanteios", "Over" if over else "Under", over or under, "AGUARDAR", "sem pressao suficiente para entrada imediata.")
+        return _rec("Escanteios", "Over", over, "AGUARDAR", "Volume ofensivo pode empurrar o over de cantos.")
+    return _rec("Escanteios", "Over" if over else "Under", over or under, "AGUARDAR", "Linha aberta, mas sem aceleracao suficiente.")
 
 
 def _corners_periods(signal: dict, corners: dict) -> list[dict]:
@@ -61,11 +61,11 @@ def _corners_periods(signal: dict, corners: dict) -> list[dict]:
     second_half = corners.get("second_half") or {}
     if first_half:
         action = "AGUARDAR" if minute <= 45 else "SEM DADOS"
-        reason = "linha de escanteios do 1T disponivel no feed ao vivo." if minute <= 45 else "1T encerrado; usar apenas como referencia historica do jogo."
+        reason = "Linha de escanteios do 1T disponivel no ao vivo." if minute <= 45 else "1T encerrado; manter apenas como referencia."
         rows.append(_rec("Escanteios 1T", "Over" if first_half.get("over") else "Under", first_half.get("over") or first_half.get("under"), action, reason))
     if second_half:
         action = "AGUARDAR" if minute >= 46 else "SEM DADOS"
-        reason = "linha de escanteios do 2T disponivel para acompanhamento em tempo real." if minute >= 46 else "mercado do 2T ja listado, mas o jogo ainda nao entrou no segundo tempo."
+        reason = "Linha de escanteios do 2T pronta para leitura ao vivo." if minute >= 46 else "Mercado do 2T aberto, mas o jogo ainda nao voltou."
         rows.append(_rec("Escanteios 2T", "Over" if second_half.get("over") else "Under", second_half.get("over") or second_half.get("under"), action, reason))
     return rows
 
@@ -79,7 +79,7 @@ def _asian(signal: dict, asian: dict) -> dict:
     if not item:
         return _missing("Asiatica/Handicap")
     action = "AGUARDAR" if signal.get("action") != "ENTRAR" else "ENTRAR"
-    return _rec("Asiatica/Handicap", team or side, item, action, "handicap alinhado ao time alvo da leitura.")
+    return _rec("Asiatica/Handicap", team or side, item, action, "Linha acompanha o lado mais forte da leitura ao vivo.")
 
 
 def _cards(signal: dict, cards: dict) -> dict:
@@ -87,7 +87,7 @@ def _cards(signal: dict, cards: dict) -> dict:
     under = cards.get("under")
     if not over and not under:
         return _missing("Cartoes")
-    return _rec("Cartoes", "Over" if over else "Under", over or under, "AGUARDAR", "mercado auxiliar de disciplina disponivel na fonte atual.")
+    return _rec("Cartoes", "Over" if over else "Under", over or under, "AGUARDAR", "Mercado disciplinar disponivel, sem gatilho forte agora.")
 
 
 def _missing(market: str) -> dict:
@@ -97,8 +97,8 @@ def _missing(market: str) -> dict:
         "line": "-",
         "odds": None,
         "action": "SEM DADOS",
-        "entry": f"Nao entrar em {market}: odds indisponiveis",
-        "reason": "a fonte atual nao entregou odds desse mercado.",
+        "entry": f"Sem entrada em {market}",
+        "reason": "A fonte atual nao entregou odds desse mercado.",
     }
 
 
@@ -117,11 +117,52 @@ def _rec(market: str, selection: str, item: dict, action: str, reason: str) -> d
 
 
 def _entry_text(market: str, selection: str, line: str, odds) -> str:
-    odd_text = odds if odds is not None else "-"
+    odd_text = f"@ {odds}" if odds is not None else ""
+    clean_line = _clean_line(selection, line)
+    pretty = _pretty_selection(selection)
+    if market == "1X2":
+        return _compact_text(selection, "para vencer", odd_text)
     if market == "Gols":
-        return f"Entrar em Gols {selection} {line} na odd {odd_text}"
+        return _totals_text(pretty, clean_line, "gols", odd_text)
     if market == "Escanteios":
-        return f"Entrar em Escanteios {selection} {line} na odd {odd_text}"
+        return _totals_text(pretty, clean_line, "escanteios", odd_text)
+    if market == "Escanteios 1T":
+        return _totals_text(pretty, clean_line, "escanteios 1T", odd_text)
+    if market == "Escanteios 2T":
+        return _totals_text(pretty, clean_line, "escanteios 2T", odd_text)
     if market == "Asiatica/Handicap":
-        return f"Entrar em Handicap Asiatico {selection} {line} na odd {odd_text}"
-    return f"Entrar em {market} {selection} {line} na odd {odd_text}"
+        return _compact_text(selection, "AH", clean_line, odd_text)
+    if market == "Cartoes":
+        return _totals_text(pretty, clean_line, "cartoes", odd_text)
+    return _compact_text(market, pretty, clean_line, odd_text)
+
+
+def _pretty_selection(selection: str) -> str:
+    value = str(selection or "").strip()
+    if value.lower() == "over":
+        return "Mais de"
+    if value.lower() == "under":
+        return "Menos de"
+    return value or "-"
+
+
+def _clean_line(selection: str, line: str) -> str:
+    value = str(line or "").strip()
+    if not value or value == "-":
+        return ""
+    lower_selection = str(selection or "").strip().lower()
+    if lower_selection == "over" and value[:1].lower() == "o":
+        return value[1:]
+    if lower_selection == "under" and value[:1].lower() == "u":
+        return value[1:]
+    return value
+
+
+def _compact_text(*parts: str) -> str:
+    return " ".join(part for part in parts if str(part or "").strip())
+
+
+def _totals_text(prefix: str, line: str, subject: str, odd_text: str) -> str:
+    if prefix in {"Mais de", "Menos de"} and line:
+        return _compact_text(prefix, line, subject, odd_text)
+    return _compact_text(prefix, subject, line, odd_text)
