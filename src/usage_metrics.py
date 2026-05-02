@@ -68,6 +68,7 @@ class UsagePricing:
     gemini_output_cost_per_1m_brl: float = 0.0
     api_football_cost_per_request_brl: float = 0.0
     football_data_org_cost_per_request_brl: float = 0.0
+    odds_api_io_cost_per_request_brl: float = 0.0
     espn_cost_per_request_brl: float = 0.0
     supabase_cost_per_request_brl: float = 0.0
     stripe_cost_per_request_brl: float = 0.0
@@ -77,6 +78,7 @@ class UsagePricing:
         mapping = {
             "api_football": self.api_football_cost_per_request_brl,
             "football_data_org": self.football_data_org_cost_per_request_brl,
+            "odds_api_io": self.odds_api_io_cost_per_request_brl,
             "espn": self.espn_cost_per_request_brl,
             "supabase": self.supabase_cost_per_request_brl,
             "stripe": self.stripe_cost_per_request_brl,
@@ -95,6 +97,7 @@ class UsagePricing:
             "gemini_output_cost_per_1m_brl": self.gemini_output_cost_per_1m_brl,
             "api_football_cost_per_request_brl": self.api_football_cost_per_request_brl,
             "football_data_org_cost_per_request_brl": self.football_data_org_cost_per_request_brl,
+            "odds_api_io_cost_per_request_brl": self.odds_api_io_cost_per_request_brl,
             "espn_cost_per_request_brl": self.espn_cost_per_request_brl,
             "supabase_cost_per_request_brl": self.supabase_cost_per_request_brl,
             "stripe_cost_per_request_brl": self.stripe_cost_per_request_brl,

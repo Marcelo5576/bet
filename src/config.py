@@ -37,6 +37,9 @@ class Settings:
     api_football_key: str | None
     api_football_base_url: str
     football_data_org_token: str | None
+    odds_api_io_key: str | None
+    odds_api_io_base_url: str
+    odds_api_io_bookmakers: str
     gemini_api_key: str | None
     gemini_model: str
     state_file: str
@@ -81,6 +84,7 @@ class Settings:
     gemini_output_cost_per_1m_brl: float
     api_football_cost_per_request_brl: float
     football_data_org_cost_per_request_brl: float
+    odds_api_io_cost_per_request_brl: float
     espn_cost_per_request_brl: float
     supabase_cost_per_request_brl: float
     stripe_cost_per_request_brl: float
@@ -117,6 +121,13 @@ def load_settings() -> Settings:
             "API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io"
         ).rstrip("/"),
         football_data_org_token=(os.getenv("FOOTBALL_DATA_ORG_TOKEN") or "").strip() or None,
+        odds_api_io_key=(os.getenv("ODDS_API_IO_KEY") or "").strip() or None,
+        odds_api_io_base_url=os.getenv(
+            "ODDS_API_IO_BASE_URL", "https://api.odds-api.io/v3"
+        ).rstrip("/"),
+        odds_api_io_bookmakers=(
+            os.getenv("ODDS_API_IO_BOOKMAKERS", "Bet365").strip() or "Bet365"
+        ),
         gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         state_file=os.getenv("STATE_FILE", "data/state.json"),
@@ -176,6 +187,9 @@ def load_settings() -> Settings:
         api_football_cost_per_request_brl=float(os.getenv("API_FOOTBALL_COST_PER_REQUEST_BRL", "0") or 0),
         football_data_org_cost_per_request_brl=float(
             os.getenv("FOOTBALL_DATA_ORG_COST_PER_REQUEST_BRL", "0") or 0
+        ),
+        odds_api_io_cost_per_request_brl=float(
+            os.getenv("ODDS_API_IO_COST_PER_REQUEST_BRL", "0") or 0
         ),
         espn_cost_per_request_brl=float(os.getenv("ESPN_COST_PER_REQUEST_BRL", "0") or 0),
         supabase_cost_per_request_brl=float(os.getenv("SUPABASE_COST_PER_REQUEST_BRL", "0") or 0),

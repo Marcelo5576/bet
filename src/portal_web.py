@@ -622,6 +622,7 @@ def _usage_pricing(settings: Settings) -> UsagePricing:
         gemini_output_cost_per_1m_brl=settings.gemini_output_cost_per_1m_brl,
         api_football_cost_per_request_brl=settings.api_football_cost_per_request_brl,
         football_data_org_cost_per_request_brl=settings.football_data_org_cost_per_request_brl,
+        odds_api_io_cost_per_request_brl=settings.odds_api_io_cost_per_request_brl,
         espn_cost_per_request_brl=settings.espn_cost_per_request_brl,
         supabase_cost_per_request_brl=settings.supabase_cost_per_request_brl,
         stripe_cost_per_request_brl=settings.stripe_cost_per_request_brl,
@@ -634,6 +635,7 @@ def _usage_service_label(service: str) -> str:
         "gemini": "Gemini IA",
         "api_football": "API-Football",
         "football_data_org": "football-data.org",
+        "odds_api_io": "Odds-API.io",
         "espn": "ESPN Scoreboard",
         "supabase": "Supabase",
         "stripe": "Stripe",
@@ -1363,7 +1365,7 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
         else f"<span id='profile-avatar-fallback'>{_esc(avatar_label)}</span>"
     )
     body = f"""
-<header class='top'><div class='topin'><div class='brand'>Area do Cliente</div><nav class='nav nav-scroll'><a class='btn' href='/fantasy-ia'>Fantasy IA</a><a class='btn' href='/dashboard'>Dashboard Trade</a>{admin_link}<button class='btn red' onclick='logoutNow()'>Sair</button></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Area do Cliente</div><nav class='nav nav-scroll'><a class='btn' href='/app/jogosdodia'>Jogos do Dia</a><a class='btn' href='/fantasy-ia'>Fantasy IA</a><a class='btn' href='/dashboard'>Dashboard Trade</a>{admin_link}<button class='btn red' onclick='logoutNow()'>Sair</button></nav></div></header>
 <main class='wrap'>
   <section class='grid g3'>
     <div class='card'><div class='muted'>Conta</div><div class='kpi'>{_esc(user.get('name'))}</div><div class='muted'>{_esc(user.get('email'))}</div></div>
@@ -1558,7 +1560,7 @@ Pedro, ATA, Flamengo, preço 12.5, proj 8.2, risco 46
 Bruno Henrique, ATA, Flamengo, preço 10.8, proj 7.1, risco 50
 Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
     body = f"""
-<header class='top'><div class='topin'><div class='brand'>Fantasy IA</div><nav class='nav nav-scroll'><a class='btn' href='/app'>Área do Cliente</a><a class='btn' href='/dashboard'>Dashboard Trade</a></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Fantasy IA</div><nav class='nav nav-scroll'><a class='btn' href='/app'>Area do Cliente</a><a class='btn' href='/app/jogosdodia'>Jogos do Dia</a><a class='btn' href='/dashboard'>Dashboard Trade</a></nav></div></header>
 <main class='wrap'>
   <section class='section fantasy-board'>
     <aside class='card'>
@@ -2015,6 +2017,7 @@ async function loadSystemHealth() {
   const rows = [
     tokenRow('Telegram Bot', integrations.telegram_bot, `chat ids: ${state.chat_ids || 0}`),
     tokenRow('Gemini', integrations.gemini_key, integrations.gemini_model || '-'),
+    tokenRow('Odds-API.io', integrations.odds_api_io_key, integrations.odds_api_io_bookmakers || 'bookmaker nao configurado'),
     tokenRow('Supabase', integrations.supabase_key, integrations.supabase_url || 'URL nao configurada'),
     tokenRow('Stripe', integrations.stripe_key, integrations.payment_gateway || '-'),
     tokenRow('Mercado Pago', integrations.mercadopago_key, integrations.payment_gateway || '-'),
@@ -2343,6 +2346,8 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
         "telegram_bot": _mask_secret(settings.telegram_bot_token),
         "gemini_key": _mask_secret(settings.gemini_api_key),
         "gemini_model": settings.gemini_model,
+        "odds_api_io_key": _mask_secret(settings.odds_api_io_key),
+        "odds_api_io_bookmakers": settings.odds_api_io_bookmakers,
         "supabase_key": _mask_secret(settings.supabase_service_role_key),
         "supabase_url": settings.supabase_url or "",
         "stripe_key": _mask_secret(settings.stripe_secret_key),

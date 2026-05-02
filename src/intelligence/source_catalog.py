@@ -46,7 +46,7 @@ FOOTBALL_DATA_SOURCES: list[dict[str, Any]] = [
         "role": "odds_realtime_multicasa",
         "coverage": "odds em tempo real de 250+ bookmakers, 100+ mercados, scores e props conforme plano",
         "best_for": "odds ao vivo, comparacao entre casas e deteccao de value/arbitragem.",
-        "integration": "adicionar como provider de odds quando houver chave",
+        "integration": "suportado via ODDS_API_IO_KEY como enriquecedor oficial de odds",
         "priority": 4,
     },
     {

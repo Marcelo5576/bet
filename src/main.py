@@ -42,6 +42,7 @@ from src.providers.espn import EspnProvider
 from src.providers.fallback import FallbackLiveProvider
 from src.providers.football_data_org import FootballDataOrgProvider
 from src.providers.mock_provider import MockProvider
+from src.providers.odds_api_io import OddsApiIoEnricher
 from src.portal import PortalStore
 from src.storage import StateStore
 from src.usage_metrics import UsageTracker
@@ -93,7 +94,17 @@ def build_provider(settings: Settings) -> LiveProvider:
                 cost_per_request_brl=settings.football_data_org_cost_per_request_brl,
             )
         )
-    return FallbackLiveProvider(*providers)
+    provider: LiveProvider = FallbackLiveProvider(*providers)
+    if settings.odds_api_io_key:
+        provider = OddsApiIoEnricher(
+            provider,
+            settings.odds_api_io_key,
+            base_url=settings.odds_api_io_base_url,
+            bookmakers=settings.odds_api_io_bookmakers,
+            usage_tracker=usage_tracker,
+            cost_per_request_brl=settings.odds_api_io_cost_per_request_brl,
+        )
+    return provider
 
 
 def supabase_sink(context: ContextTypes.DEFAULT_TYPE) -> SupabaseSink:

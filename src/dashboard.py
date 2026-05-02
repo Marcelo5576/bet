@@ -38,6 +38,7 @@ from src.main import (
     _scanner_cycle_seconds,
 )
 from src.portal import PortalStore, read_session_token
+from src.providers.base import provider_label
 from src.portal_web import router as portal_router
 from src.storage import StateStore
 
@@ -1476,6 +1477,7 @@ def dashboard(request: Request) -> str:
   {account_panel}
   <nav class="mobile-nav">
     <a class="nav-link" href="#scanner">Scanner</a>
+    <a class="nav-link" href="/app/jogosdodia">Jogos do Dia</a>
     <a class="nav-link" href="#mercado">Mercado</a>
     <a class="nav-link" href="#simulador">Ao vivo</a>
     <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
@@ -1490,6 +1492,7 @@ def dashboard(request: Request) -> str:
   <aside class="sidebar">
     <p class="nav-title">Operacao</p>
     <a class="nav-link" href="#scanner">Scanner</a>
+    <a class="nav-link" href="/app/jogosdodia">Jogos do Dia</a>
     <a class="nav-link" href="#mercado">Mercado</a>
     <a class="nav-link" href="#simulador">Ao vivo</a>
     <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
@@ -1710,6 +1713,7 @@ def dashboard(request: Request) -> str:
   <div class="fab-shell" id="fab-menu">
     <div class="fab-links">
       <a class="fab-link" href="#scanner">Scanner</a>
+      <a class="fab-link" href="/app/jogosdodia">Jogos do Dia</a>
       <a class="fab-link" href="#mercado">Mercado</a>
     <a class="fab-link" href="#simulador">Ao vivo</a>
       <a class="fab-link" href="/fantasy-ia">Fantasy IA</a>
@@ -2369,6 +2373,516 @@ def dashboard(request: Request) -> str:
 </html>"""
 
 
+@app.get("/jogosdodia", response_class=HTMLResponse)
+@app.get("/app/jogosdodia", response_class=HTMLResponse)
+def jogos_do_dia_page(request: Request) -> str:
+    settings = load_settings()
+    if not _can_open_dashboard(request, settings):
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    product_name = _esc(settings.product_name)
+    build_stamp = _build_stamp()
+    page = """<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__ | Jogos do Dia</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #0b0e11;
+      --panel: #141a22;
+      --panel-2: #1a202a;
+      --line: #293241;
+      --text: #ecf1f7;
+      --muted: #90a0b5;
+      --green: #0ecb81;
+      --amber: #f0c14b;
+      --red: #f6465d;
+      --blue: #72a8ff;
+      --cyan: #47c3ff;
+      --shadow: 0 20px 42px rgba(0,0,0,.28);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    a { color: inherit; text-decoration: none; }
+    .top {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(11,14,17,.94);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid #1f2732;
+    }
+    .topin {
+      max-width: 1440px; margin: 0 auto; padding: 14px 18px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .brand-wrap { display: grid; gap: 4px; }
+    .brand { font-weight: 900; letter-spacing: .2px; }
+    .eyebrow { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.1px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 40px; padding: 0 14px; border-radius: 10px;
+      background: #111925; border: 1px solid #324256; color: #dce8f7;
+      font-size: 13px; font-weight: 800; cursor: pointer;
+      transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+      box-shadow: 0 8px 18px rgba(0,0,0,.16);
+    }
+    .btn:hover { transform: translateY(-1px); border-color: #4f6b89; }
+    .btn.primary { background: linear-gradient(180deg, #f5d14f, #d7aa27); border-color: #c7951f; color: #111; }
+    .btn.ghost { background: #0f151d; }
+    .wrap { max-width: 1440px; margin: 0 auto; padding: 18px; }
+    .hero {
+      display: grid; gap: 16px; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+      align-items: stretch; margin-bottom: 16px;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(20,26,34,.97), rgba(15,20,27,.97));
+      border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+      padding: 16px;
+    }
+    .headline { display: grid; gap: 14px; min-width: 0; }
+    .headline h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: .98; }
+    .headline p { margin: 0; color: #c3d0e2; max-width: 760px; }
+    .headline .micro {
+      display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 12px; font-weight: 700;
+    }
+    .micro span {
+      border: 1px solid #2a3a4f; border-radius: 999px; background: #101721;
+      padding: 6px 10px;
+    }
+    .hero-side { display: grid; gap: 10px; }
+    .hero-side .mini { background: #10161e; border: 1px solid #273345; border-radius: 10px; padding: 12px; }
+    .hero-side .mini strong { display: block; font-size: 24px; }
+    .metrics { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
+    .metric strong { display: block; font-size: 28px; }
+    .metric .muted { margin-top: 4px; }
+    .toolbar {
+      display: grid; gap: 10px; grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, .7fr)) auto;
+      align-items: end; margin-bottom: 16px;
+    }
+    .field { display: grid; gap: 6px; min-width: 0; }
+    .field span { color: var(--muted); font-size: 12px; font-weight: 700; }
+    input, select {
+      width: 100%; min-width: 0;
+      border-radius: 10px; border: 1px solid #314055; background: #0e141c; color: var(--text);
+      padding: 12px 12px; font: inherit;
+    }
+    .board {
+      display: grid; gap: 16px; grid-template-columns: minmax(360px, .92fr) minmax(0, 1.08fr);
+      align-items: start;
+    }
+    .game-list { display: grid; gap: 10px; max-height: calc(100vh - 290px); overflow: auto; padding-right: 4px; }
+    .game-card {
+      border: 1px solid #263445; border-radius: 12px; background: #0f151d;
+      padding: 14px; cursor: pointer; transition: border-color .16s ease, transform .16s ease, background .16s ease;
+    }
+    .game-card:hover { border-color: #3c546f; transform: translateY(-1px); }
+    .game-card.active { border-color: #f0c14b; background: #121a24; }
+    .game-top, .game-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .league { color: var(--muted); font-size: 12px; }
+    .scoreline { display: flex; gap: 8px; align-items: center; font-weight: 900; }
+    .teams { display: grid; gap: 6px; margin: 10px 0 12px; }
+    .teams strong { font-size: 17px; line-height: 1.15; }
+    .subline { color: #c1cede; font-size: 13px; }
+    .pill {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 28px; padding: 0 10px; border-radius: 999px;
+      border: 1px solid #2f445d; background: #111925; color: #d6e6f8;
+      font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: .8px;
+    }
+    .pill.enter { color: #08180e; background: var(--green); border-color: #0ecb81; }
+    .pill.wait { color: #2c2100; background: var(--amber); border-color: #f0c14b; }
+    .pill.hold { color: #d6e6f8; }
+    .odds-row, .pressure-row { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .odd-box, .pressure-box {
+      border: 1px solid #263445; border-radius: 10px; background: #0c1219; padding: 10px;
+    }
+    .odd-box strong, .pressure-box strong { display: block; font-size: 17px; }
+    .progress {
+      margin-top: 8px; background: #19212b; border-radius: 999px; overflow: hidden; height: 8px;
+    }
+    .progress span { display: block; height: 100%; background: linear-gradient(90deg, var(--green), var(--amber)); }
+    .detail { display: grid; gap: 12px; }
+    .detail-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: start; }
+    .detail-head h2 { margin: 0; font-size: clamp(22px, 2.6vw, 32px); line-height: 1.05; }
+    .detail-grid { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .detail-grid .mini { background: #10161e; border: 1px solid #273345; border-radius: 10px; padding: 12px; }
+    .detail-grid .mini strong { display: block; font-size: 22px; }
+    .comparison {
+      display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .comparison .card { padding: 14px; }
+    .market-board { display: grid; gap: 10px; }
+    .market-line {
+      display: grid; gap: 10px; grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .6fr));
+      align-items: center; border: 1px solid #263445; border-radius: 10px; background: #0d131b; padding: 12px;
+    }
+    .market-line strong { display: block; }
+    .market-tags, .ticker { display: flex; gap: 8px; flex-wrap: wrap; }
+    .market-tags span, .ticker span {
+      border: 1px solid #243547; border-radius: 999px; padding: 6px 10px; font-size: 11px; color: #bbd1e8; background: #0e151d;
+    }
+    .empty {
+      border: 1px dashed #314055; border-radius: 12px; padding: 24px; text-align: center; color: var(--muted);
+      background: rgba(12,18,25,.5);
+    }
+    .footer-note { margin-top: 14px; color: var(--muted); font-size: 12px; }
+    .status-good { color: var(--green); }
+    .status-warn { color: var(--amber); }
+    .status-bad { color: var(--red); }
+    @media (max-width: 1100px) {
+      .hero, .board { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { grid-template-columns: 1fr 1fr; }
+      .game-list { max-height: none; }
+      .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .comparison, .market-line { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .topin { align-items: start; flex-direction: column; }
+      .nav { width: 100%; overflow: auto; flex-wrap: nowrap; }
+      .metrics, .toolbar, .detail-grid, .odds-row, .pressure-row { grid-template-columns: 1fr; }
+      .headline h1 { font-size: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="topin">
+      <div class="brand-wrap">
+        <div class="eyebrow">Modulo isolado · sem tocar no scanner principal</div>
+        <div class="brand">__TITLE__ · Jogos do Dia</div>
+      </div>
+      <nav class="nav">
+        <a class="btn ghost" href="/app">Area do Cliente</a>
+        <a class="btn ghost" href="/dashboard">Dashboard Trade</a>
+        <a class="btn ghost" href="/fantasy-ia">Fantasy IA</a>
+        <button class="btn primary" type="button" id="refreshBoardBtn">Atualizar agora</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="hero">
+      <article class="card headline">
+        <div class="eyebrow">inspirado em workflows de analise operacional, sem copiar conteudo de terceiros</div>
+        <h1>Radar operacional para jogos ao vivo reais</h1>
+        <p>Essa pagina usa somente o feed ao vivo do ApexGol. Nada mockado, nada pre-live, nada fabricado. A gente filtra, destaca os jogos mais quentes e entrega uma leitura visual mais limpa para operar sem bagunca.</p>
+        <div class="micro">
+          <span>Scanner real do backend</span>
+          <span>Filtros por liga, acao e busca</span>
+          <span>Painel lateral de leitura</span>
+          <span>Sem substituir o dashboard atual</span>
+        </div>
+        <div class="ticker" id="boardHighlights"><span>Carregando leitura ao vivo...</span></div>
+      </article>
+      <aside class="hero-side">
+        <div class="mini"><div class="eyebrow">ultimo ciclo</div><strong id="heroLastScan">-</strong><div class="subline" id="heroMode">scanner livre</div></div>
+        <div class="mini"><div class="eyebrow">status</div><strong id="heroStatus">-</strong><div class="subline" id="heroNote">O scanner principal continua sendo a fonte oficial.</div></div>
+      </aside>
+    </section>
+
+    <section class="metrics">
+      <article class="card metric"><strong id="metricLive">0</strong><div class="muted">Jogos ao vivo</div></article>
+      <article class="card metric"><strong id="metricCandidateGames">0</strong><div class="muted">Jogos com leitura</div></article>
+      <article class="card metric"><strong id="metricEnter">0</strong><div class="muted">Entradas fortes</div></article>
+      <article class="card metric"><strong id="metricWatch">0</strong><div class="muted">Aguardar / monitorar</div></article>
+    </section>
+
+    <section class="toolbar">
+      <label class="field">
+        <span>Buscar time ou liga</span>
+        <input id="filterSearch" type="search" placeholder="Ex: Corinthians, Serie A, Libertadores" />
+      </label>
+      <label class="field">
+        <span>Liga</span>
+        <select id="filterLeague"><option value="all">Todas</option></select>
+      </label>
+      <label class="field">
+        <span>Acao</span>
+        <select id="filterAction">
+          <option value="all">Todas</option>
+          <option value="ENTRAR">Entrar</option>
+          <option value="AGUARDAR">Aguardar</option>
+          <option value="SEM DADOS">Sem dados</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Minuto minimo</span>
+        <select id="filterMinute">
+          <option value="0">Todos</option>
+          <option value="10">10+</option>
+          <option value="20">20+</option>
+          <option value="30">30+</option>
+          <option value="45">45+</option>
+          <option value="60">60+</option>
+        </select>
+      </label>
+      <button class="btn ghost" type="button" id="scanNowBtn">Executar scanner</button>
+    </section>
+
+    <section class="board">
+      <section class="game-list card" id="gameList">
+        <div class="empty">Carregando jogos ao vivo...</div>
+      </section>
+      <aside class="detail card" id="gameDetail">
+        <div class="empty">Selecione um jogo para ver a leitura detalhada.</div>
+      </aside>
+    </section>
+    <p class="footer-note">Build __BUILD__. Essa pagina foi criada como modulo separado para ampliar a experiencia sem alterar o fluxo principal do scanner e da IA.</p>
+  </main>
+  <script>
+    const boardState = {
+      payload: null,
+      selectedGameId: null,
+      refreshTimer: null
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    function brMoney(value) {
+      const num = Number(value || 0);
+      return new Intl.NumberFormat('pt-BR', { style:'currency', currency:'BRL' }).format(num);
+    }
+    function safeNum(value, digits = 0) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '-';
+      return digits ? num.toFixed(digits) : String(Math.round(num));
+    }
+    function scoreText(game) {
+      return `${safeNum(game.home_goals)} x ${safeNum(game.away_goals)}`;
+    }
+    function actionClass(action) {
+      if (action === 'ENTRAR') return 'enter';
+      if (action === 'AGUARDAR') return 'wait';
+      return 'hold';
+    }
+    function readingLabel(game) {
+      if (!game.best_signal) return 'Sem sinal forte';
+      return `${game.best_signal.action} · conf ${safeNum(game.best_signal.confidence)}%`;
+    }
+    function filteredGames() {
+      const payload = boardState.payload || {};
+      const games = payload.games || [];
+      const term = (document.getElementById('filterSearch')?.value || '').trim().toLowerCase();
+      const league = document.getElementById('filterLeague')?.value || 'all';
+      const action = document.getElementById('filterAction')?.value || 'all';
+      const minMinute = Number(document.getElementById('filterMinute')?.value || '0');
+      return games.filter(game => {
+        const hay = `${game.home} ${game.away} ${game.league}`.toLowerCase();
+        const actionValue = (game.best_signal && game.best_signal.action) || 'SEM DADOS';
+        return (!term || hay.includes(term))
+          && (league === 'all' || game.league === league)
+          && (action === 'all' || actionValue === action)
+          && Number(game.minute || 0) >= minMinute;
+      });
+    }
+    function renderLeagueFilter(games) {
+      const select = document.getElementById('filterLeague');
+      if (!select) return;
+      const current = select.value || 'all';
+      const leagues = ['all', ...new Set((games || []).map(game => game.league).filter(Boolean))];
+      select.innerHTML = leagues.map(item => `<option value="${escapeHtml(item)}">${item === 'all' ? 'Todas' : escapeHtml(item)}</option>`).join('');
+      if (leagues.includes(current)) select.value = current;
+    }
+    function renderMetrics(payload) {
+      const metrics = payload.metrics || {};
+      document.getElementById('metricLive').textContent = safeNum(metrics.live_games);
+      document.getElementById('metricCandidateGames').textContent = safeNum(metrics.candidate_games);
+      document.getElementById('metricEnter').textContent = safeNum(metrics.enter_count);
+      document.getElementById('metricWatch').textContent = safeNum(metrics.watch_count);
+      const scanner = payload.scanner || {};
+      document.getElementById('heroLastScan').textContent = scanner.last_scan || '-';
+      document.getElementById('heroMode').textContent = scanner.mode || '-';
+      document.getElementById('heroStatus').textContent = scanner.status || '-';
+      document.getElementById('heroNote').textContent = `Perfil ${scanner.scan_profile || '-'} · ${safeNum(scanner.candidates)} candidatos vivos`;
+      const highlights = (payload.highlights || []).length
+        ? payload.highlights.map(item => `<span>${escapeHtml(item)}</span>`).join('')
+        : '<span>Sem destaques agora. O modulo continua aguardando o proximo ciclo real.</span>';
+      document.getElementById('boardHighlights').innerHTML = highlights;
+    }
+    function renderGameList() {
+      const mount = document.getElementById('gameList');
+      const games = filteredGames();
+      if (!games.length) {
+        mount.innerHTML = '<div class="empty">Nenhum jogo ao vivo real passou pelos filtros neste momento.</div>';
+        renderDetail(null);
+        return;
+      }
+      if (!games.some(game => game.game_id === boardState.selectedGameId)) {
+        boardState.selectedGameId = games[0].game_id;
+      }
+      mount.innerHTML = games.map(game => {
+        const active = game.game_id === boardState.selectedGameId ? ' active' : '';
+        const best = game.best_signal;
+        const bestOdds = best && Number.isFinite(Number(best.odds)) ? Number(best.odds).toFixed(2) : '-';
+        return `<article class="game-card${active}" data-game-id="${escapeHtml(game.game_id)}">
+          <div class="game-top">
+            <span class="league">${escapeHtml(game.league || '-')}</span>
+            <span class="pill ${actionClass(best ? best.action : '')}">${escapeHtml(best ? best.action : 'SEM DADOS')}</span>
+          </div>
+          <div class="teams">
+            <div><strong>${escapeHtml(game.home)}</strong></div>
+            <div><strong>${escapeHtml(game.away)}</strong></div>
+          </div>
+          <div class="game-bottom">
+            <div class="scoreline"><span>${scoreText(game)}</span><span class="subline">${safeNum(game.minute)}'</span></div>
+            <div class="subline">${escapeHtml(readingLabel(game))}</div>
+          </div>
+          <div class="pressure-row" style="margin-top:10px">
+            <div class="pressure-box"><div class="eyebrow">Pressao casa</div><strong>${safeNum(game.home_pressure)}</strong><div class="progress"><span style="width:${Math.min(100, Number(game.home_pressure || 0))}%"></span></div></div>
+            <div class="pressure-box"><div class="eyebrow">Pressao fora</div><strong>${safeNum(game.away_pressure)}</strong><div class="progress"><span style="width:${Math.min(100, Number(game.away_pressure || 0))}%"></span></div></div>
+            <div class="pressure-box"><div class="eyebrow">Melhor odd</div><strong>${bestOdds}</strong><div class="muted">${escapeHtml(best ? best.market : 'monitorando')}</div></div>
+          </div>
+        </article>`;
+      }).join('');
+      mount.querySelectorAll('.game-card').forEach(card => {
+        card.addEventListener('click', () => {
+          boardState.selectedGameId = card.dataset.gameId;
+          renderGameList();
+          renderDetail(findSelectedGame());
+        });
+      });
+      renderDetail(findSelectedGame());
+    }
+    function findSelectedGame() {
+      const games = (boardState.payload && boardState.payload.games) || [];
+      return games.find(game => game.game_id === boardState.selectedGameId) || null;
+    }
+    function renderDetail(game) {
+      const mount = document.getElementById('gameDetail');
+      if (!game) {
+        mount.innerHTML = '<div class="empty">Selecione um jogo para ver a leitura detalhada.</div>';
+        return;
+      }
+      const best = game.best_signal;
+      const recommendations = (game.recommendations || []).length
+        ? game.recommendations.map(rec => `<div class="market-line">
+            <div><strong>${escapeHtml(rec.market)}</strong><div class="muted">${escapeHtml(rec.entry || rec.reason || '-')}</div></div>
+            <div><strong>${escapeHtml(rec.selection || '-')}</strong><div class="muted">selecao</div></div>
+            <div><strong>${escapeHtml(rec.line || '-')}</strong><div class="muted">linha</div></div>
+            <div><strong>${Number.isFinite(Number(rec.odds)) ? Number(rec.odds).toFixed(2) : '-'}</strong><div class="muted">odd</div></div>
+            <div><span class="pill ${actionClass(rec.action)}">${escapeHtml(rec.action || 'SEM DADOS')}</span></div>
+          </div>`).join('')
+        : '<div class="empty">A fonte real nao trouxe leitura de mercado suficiente para este jogo.</div>';
+      const marketTags = (game.market_tags || []).length
+        ? game.market_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
+        : '<span>Sem mercados extras</span>';
+      mount.innerHTML = `
+        <div class="detail-head">
+          <div>
+            <div class="eyebrow">Jogo escolhido</div>
+            <h2>${escapeHtml(game.home)} x ${escapeHtml(game.away)}</h2>
+            <div class="subline">${escapeHtml(game.league || '-')} · ${safeNum(game.minute)}' · ${scoreText(game)}</div>
+          </div>
+          <div class="market-tags">${marketTags}</div>
+        </div>
+        <div class="detail-grid">
+          <div class="mini"><div class="eyebrow">Pressao casa</div><strong>${safeNum(game.home_pressure)}</strong><div class="muted">${escapeHtml(game.home)}</div></div>
+          <div class="mini"><div class="eyebrow">Pressao fora</div><strong>${safeNum(game.away_pressure)}</strong><div class="muted">${escapeHtml(game.away)}</div></div>
+          <div class="mini"><div class="eyebrow">Chutes no alvo</div><strong>${safeNum(game.home_shots_on)} / ${safeNum(game.away_shots_on)}</strong><div class="muted">casa / fora</div></div>
+          <div class="mini"><div class="eyebrow">Leitura IA</div><strong>${escapeHtml(best ? best.action : 'SEM DADOS')}</strong><div class="muted">${escapeHtml(best ? (best.market || '-') : 'apenas monitorando')}</div></div>
+        </div>
+        <div class="comparison">
+          <section class="card">
+            <div class="eyebrow">Odds 1x2</div>
+            <div class="odds-row" style="margin-top:10px">
+              <div class="odd-box"><div class="muted">${escapeHtml(game.home)}</div><strong>${Number.isFinite(Number(game.odds_home)) ? Number(game.odds_home).toFixed(2) : '-'}</strong></div>
+              <div class="odd-box"><div class="muted">Empate</div><strong>${Number.isFinite(Number(game.odds_draw)) ? Number(game.odds_draw).toFixed(2) : '-'}</strong></div>
+              <div class="odd-box"><div class="muted">${escapeHtml(game.away)}</div><strong>${Number.isFinite(Number(game.odds_away)) ? Number(game.odds_away).toFixed(2) : '-'}</strong></div>
+            </div>
+          </section>
+          <section class="card">
+            <div class="eyebrow">Resumo de pressao</div>
+            <div class="subline" style="margin-top:8px">${escapeHtml(game.summary || 'Sem resumo extra.')}</div>
+            <div class="progress"><span style="width:${Math.min(100, Number(game.heat_index || 0))}%"></span></div>
+            <div class="muted" style="margin-top:8px">Indice de calor calculado a partir da pressao e chutes no alvo do feed real.</div>
+          </section>
+        </div>
+        <section class="market-board">
+          <div class="eyebrow">Mercados monitorados</div>
+          ${recommendations}
+        </section>
+        <section class="card">
+          <div class="eyebrow">Leitura operacional</div>
+          <div class="subline" style="margin-top:8px">${escapeHtml(best ? best.reason : game.summary || 'Aguardando leitura mais forte do scanner.')}</div>
+          <div class="subline" style="margin-top:8px">${escapeHtml(best ? (best.risk_note || best.note || '') : '')}</div>
+        </section>
+      `;
+    }
+    async function loadBoardData(silent = false) {
+      const button = document.getElementById('refreshBoardBtn');
+      if (button) button.disabled = true;
+      try {
+        const res = await fetch('/api/jogosdodia-board', { cache: 'no-store' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Falha ao carregar painel.');
+        boardState.payload = data;
+        renderLeagueFilter(data.games || []);
+        renderMetrics(data);
+        renderGameList();
+        scheduleRefresh();
+      } catch (error) {
+        const mount = document.getElementById('gameList');
+        if (mount) mount.innerHTML = `<div class="empty">${escapeHtml(error.message || 'Nao consegui carregar os jogos ao vivo.')}</div>`;
+        if (!silent) {
+          document.getElementById('heroStatus').textContent = 'falha de leitura';
+          document.getElementById('heroNote').textContent = error.message || 'Nao consegui carregar os jogos ao vivo.';
+        }
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+    function scheduleRefresh() {
+      if (boardState.refreshTimer) clearTimeout(boardState.refreshTimer);
+      const scanner = (boardState.payload && boardState.payload.scanner) || {};
+      const seconds = Math.max(45, Number(scanner.auto_scan_interval_seconds || 120));
+      boardState.refreshTimer = setTimeout(() => loadBoardData(true), seconds * 1000);
+    }
+    async function runScannerNow() {
+      const button = document.getElementById('scanNowBtn');
+      const refresh = document.getElementById('refreshBoardBtn');
+      if (button) button.disabled = true;
+      if (refresh) refresh.disabled = true;
+      try {
+        const res = await fetch('/api/scanner-run', {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Falha ao executar o scanner.');
+        await loadBoardData(true);
+      } catch (error) {
+        document.getElementById('heroStatus').textContent = 'scanner com erro';
+        document.getElementById('heroNote').textContent = error.message || 'Nao consegui executar o scanner.';
+      } finally {
+        if (button) button.disabled = false;
+        if (refresh) refresh.disabled = false;
+      }
+    }
+    ['filterSearch', 'filterLeague', 'filterAction', 'filterMinute'].forEach(id => {
+      window.addEventListener('load', () => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', renderGameList);
+        if (el && el.tagName === 'SELECT') el.addEventListener('change', renderGameList);
+      });
+    });
+    window.addEventListener('load', () => {
+      document.getElementById('refreshBoardBtn')?.addEventListener('click', () => loadBoardData(false));
+      document.getElementById('scanNowBtn')?.addEventListener('click', runScannerNow);
+      loadBoardData(false);
+    });
+  </script>
+</body>
+</html>"""
+    return (
+        page.replace("__TITLE__", product_name)
+        .replace("__BUILD__", _esc(build_stamp))
+    )
+
+
 @app.get("/api/state")
 def api_state(_: None = Depends(_auth)) -> JSONResponse:
     settings = load_settings()
@@ -2394,6 +2908,47 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
             ],
         }
     )
+
+
+@app.get("/api/healthz")
+def api_healthz() -> JSONResponse:
+    settings = load_settings()
+    state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    provider = build_provider(settings)
+    scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
+    return JSONResponse(
+        {
+            "ok": True,
+            "build": _build_stamp(),
+            "product": settings.product_name,
+            "provider": provider_label(provider),
+            "test_mode": bool(settings.test_mode),
+            "scan_mode": scan_mode,
+            "scan_mode_label": _scan_mode_label(scan_mode),
+            "state": {
+                "history": len(state.history or []),
+                "candidate_signals": len(state.candidate_signals or []),
+                "last_games": len(state.last_games or []),
+                "last_scan_at": state.last_scan_at,
+                "scan_requested_at": state.scan_requested_at,
+            },
+            "integrations": {
+                "telegram": bool(settings.telegram_bot_token),
+                "api_football": bool(settings.api_football_key),
+                "football_data_org": bool(settings.football_data_org_token),
+                "odds_api_io": bool(settings.odds_api_io_key),
+                "gemini": bool(settings.gemini_api_key),
+                "supabase": bool(settings.supabase_url and settings.supabase_service_role_key),
+            },
+        }
+    )
+
+
+@app.get("/api/jogosdodia-board")
+def api_jogosdodia_board(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    return JSONResponse(_jogosdodia_board_payload(state, settings))
 
 
 @app.get("/api/scanner-preference")
@@ -3856,6 +4411,176 @@ def _fresh_candidate_signals(state, settings) -> list[dict[str, Any]]:
     ]
 
 
+def _jogosdodia_market_tags(game: dict[str, Any]) -> list[str]:
+    markets = game.get("markets") or {}
+    tags: list[str] = []
+    if isinstance(markets.get("1x2"), dict):
+        tags.append("1X2")
+    if isinstance(markets.get("goals"), dict):
+        tags.append("Gols")
+    if isinstance(markets.get("asian"), dict):
+        tags.append("Handicap")
+    if isinstance(markets.get("corners"), dict):
+        tags.append("Escanteios")
+    if isinstance(markets.get("cards"), dict):
+        tags.append("Cartoes")
+    return tags
+
+
+def _jogosdodia_best_signal(signals: list[dict[str, Any]]) -> dict[str, Any] | None:
+    ranked = [
+        item
+        for item in (signals or [])
+        if isinstance(item, dict)
+    ]
+    if not ranked:
+        return None
+    ranked.sort(
+        key=lambda item: (
+            _action_weight(item.get("action")),
+            _safe_int(item.get("confidence")),
+            _safe_int(item.get("entry_score")),
+            -_safe_int(item.get("risk_score")),
+        ),
+        reverse=True,
+    )
+    signal = ranked[0]
+    return {
+        "action": str(signal.get("action") or "SEM DADOS"),
+        "market": str(signal.get("market") or "-"),
+        "selection": str(signal.get("team") or signal.get("selection") or "-"),
+        "odds": _safe_float(signal.get("target_odds")),
+        "confidence": _safe_int(signal.get("confidence")),
+        "entry_score": _safe_int(signal.get("entry_score")),
+        "risk_score": _safe_int(signal.get("risk_score")),
+        "reason": str(signal.get("reason") or ""),
+        "risk_note": str(signal.get("risk_note") or ""),
+        "note": str(signal.get("score_note") or ""),
+    }
+
+
+def _jogosdodia_recommendations(signal: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(signal, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for rec in signal.get("market_recommendations") or []:
+        if not isinstance(rec, dict):
+            continue
+        rows.append(
+            {
+                "market": str(rec.get("market") or "-"),
+                "selection": str(rec.get("selection") or "-"),
+                "line": str(rec.get("line") or "-"),
+                "odds": _safe_float(rec.get("odds"), default=-1.0),
+                "action": str(rec.get("action") or "SEM DADOS"),
+                "entry": str(rec.get("entry") or ""),
+                "reason": str(rec.get("reason") or ""),
+            }
+        )
+    return rows
+
+
+def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
+    live_games = _fresh_live_games(state, settings)
+    candidate_signals = _fresh_candidate_signals(state, settings)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for signal in candidate_signals:
+        game = signal.get("game") or {}
+        game_id = str(game.get("game_id") or "").strip()
+        if game_id:
+            grouped[game_id].append(signal)
+
+    games_payload: list[dict[str, Any]] = []
+    enter_count = 0
+    watch_count = 0
+    highlights: list[str] = []
+    for game in live_games:
+        game_id = str(game.get("game_id") or "").strip()
+        related = grouped.get(game_id, [])
+        best_signal_raw = related[0] if related else None
+        best_signal = _jogosdodia_best_signal(related)
+        if best_signal and best_signal.get("action") == "ENTRAR":
+            enter_count += 1
+        elif best_signal:
+            watch_count += 1
+        heat_index = min(
+            100,
+            int(
+                (
+                    max(_safe_int(game.get("home_pressure")), _safe_int(game.get("away_pressure"))) * 0.7
+                )
+                + (
+                    (_safe_int(game.get("home_shots_on")) + _safe_int(game.get("away_shots_on"))) * 3
+                )
+            ),
+        )
+        if best_signal:
+            highlights.append(
+                f"{game.get('home') or '-'} x {game.get('away') or '-'} · "
+                f"{best_signal.get('action')} · {best_signal.get('market') or '-'}"
+            )
+        pressure_diff = _safe_int(game.get("home_pressure")) - _safe_int(game.get("away_pressure"))
+        if pressure_diff > 0:
+            summary = f"{game.get('home') or 'Casa'} pressiona mais neste momento ({pressure_diff:+d})."
+        elif pressure_diff < 0:
+            summary = f"{game.get('away') or 'Visitante'} pressiona mais neste momento ({pressure_diff:+d})."
+        else:
+            summary = "Pressao equilibrada ate aqui."
+        games_payload.append(
+            {
+                "game_id": game_id,
+                "league": str(game.get("division") or game.get("league") or "-"),
+                "home": str(game.get("home") or "-"),
+                "away": str(game.get("away") or "-"),
+                "minute": _safe_int(game.get("minute")),
+                "home_goals": _safe_int(game.get("home_goals")),
+                "away_goals": _safe_int(game.get("away_goals")),
+                "home_pressure": _safe_int(game.get("home_pressure")),
+                "away_pressure": _safe_int(game.get("away_pressure")),
+                "home_shots_on": _safe_int(game.get("home_shots_on")),
+                "away_shots_on": _safe_int(game.get("away_shots_on")),
+                "odds_home": _safe_float(game.get("odds_home"), default=-1.0),
+                "odds_draw": _safe_float(game.get("odds_draw"), default=-1.0),
+                "odds_away": _safe_float(game.get("odds_away"), default=-1.0),
+                "market_tags": _jogosdodia_market_tags(game),
+                "signal_count": len(related),
+                "best_signal": best_signal,
+                "recommendations": _jogosdodia_recommendations(best_signal_raw),
+                "heat_index": heat_index,
+                "summary": summary,
+            }
+        )
+
+    games_payload.sort(
+        key=lambda item: (
+            _action_weight((item.get("best_signal") or {}).get("action")),
+            _safe_int((item.get("best_signal") or {}).get("confidence")),
+            item.get("minute") or 0,
+            item.get("heat_index") or 0,
+        ),
+        reverse=True,
+    )
+    scanner = _scanner_status(state, settings)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scanner": scanner,
+        "metrics": {
+            "live_games": len(games_payload),
+            "candidate_games": sum(1 for item in games_payload if item.get("best_signal")),
+            "enter_count": enter_count,
+            "watch_count": watch_count,
+        },
+        "highlights": highlights[:10],
+        "games": games_payload,
+        "selected_game_id": games_payload[0]["game_id"] if games_payload else None,
+        "notes": {
+            "mode": "real_live_only",
+            "mock": False,
+            "message": "Modulo isolado, alimentado apenas por jogos ao vivo reais do scanner principal.",
+        },
+    }
+
+
 def _visible_live_lab_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     visible: list[dict[str, Any]] = []
     for item in sessions or []:
@@ -4607,6 +5332,8 @@ def _source_status(source: dict[str, Any], settings: Settings) -> str:
         return "ativo no provider chain" if settings.api_football_key else "pronto quando preencher API_FOOTBALL_KEY"
     if source_id == "football_data_org":
         return "ativo no provider chain" if settings.football_data_org_token else "pronto quando preencher FOOTBALL_DATA_ORG_TOKEN"
+    if source_id == "odds_api_io":
+        return "ativo como enrich de odds" if settings.odds_api_io_key else "pronto quando preencher ODDS_API_IO_KEY"
     if source_id == "flashscore":
         return "bloqueado por licenca/API publica ausente"
     return str(source.get("integration") or "planejado")
