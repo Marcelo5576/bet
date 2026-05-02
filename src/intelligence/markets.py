@@ -7,7 +7,9 @@ def market_recommendations(signal: dict) -> list[dict]:
     recommendations = [_one_x_two(signal)]
     recommendations.append(_goals(signal, markets.get("goals") or {}))
     recommendations.append(_corners(signal, markets.get("corners") or {}))
+    recommendations.extend(_corners_periods(signal, markets.get("corners") or {}))
     recommendations.append(_asian(signal, markets.get("asian") or {}))
+    recommendations.append(_cards(signal, markets.get("cards") or {}))
     return recommendations
 
 
@@ -51,6 +53,23 @@ def _corners(signal: dict, corners: dict) -> dict:
     return _rec("Escanteios", "Over" if over else "Under", over or under, "AGUARDAR", "sem pressao suficiente para entrada imediata.")
 
 
+def _corners_periods(signal: dict, corners: dict) -> list[dict]:
+    game = signal.get("game", {})
+    minute = int(game.get("minute") or 0)
+    rows: list[dict] = []
+    first_half = corners.get("first_half") or {}
+    second_half = corners.get("second_half") or {}
+    if first_half:
+        action = "AGUARDAR" if minute <= 45 else "SEM DADOS"
+        reason = "linha de escanteios do 1T disponivel no feed ao vivo." if minute <= 45 else "1T encerrado; usar apenas como referencia historica do jogo."
+        rows.append(_rec("Escanteios 1T", "Over" if first_half.get("over") else "Under", first_half.get("over") or first_half.get("under"), action, reason))
+    if second_half:
+        action = "AGUARDAR" if minute >= 46 else "SEM DADOS"
+        reason = "linha de escanteios do 2T disponivel para acompanhamento em tempo real." if minute >= 46 else "mercado do 2T ja listado, mas o jogo ainda nao entrou no segundo tempo."
+        rows.append(_rec("Escanteios 2T", "Over" if second_half.get("over") else "Under", second_half.get("over") or second_half.get("under"), action, reason))
+    return rows
+
+
 def _asian(signal: dict, asian: dict) -> dict:
     team = signal.get("team")
     game = signal.get("game", {})
@@ -61,6 +80,14 @@ def _asian(signal: dict, asian: dict) -> dict:
         return _missing("Asiatica/Handicap")
     action = "AGUARDAR" if signal.get("action") != "ENTRAR" else "ENTRAR"
     return _rec("Asiatica/Handicap", team or side, item, action, "handicap alinhado ao time alvo da leitura.")
+
+
+def _cards(signal: dict, cards: dict) -> dict:
+    over = cards.get("over")
+    under = cards.get("under")
+    if not over and not under:
+        return _missing("Cartoes")
+    return _rec("Cartoes", "Over" if over else "Under", over or under, "AGUARDAR", "mercado auxiliar de disciplina disponivel na fonte atual.")
 
 
 def _missing(market: str) -> dict:

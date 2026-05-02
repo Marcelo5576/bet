@@ -2792,6 +2792,7 @@ def jogos_do_dia_page(request: Request) -> str:
             <div class="muted">${escapeHtml(skill.reason || '-')}</div>
           </article>`).join('')
         : '<div class="empty">Nenhuma skill de mercado disponivel para este jogo agora.</div>';
+      const corners = game.corners_collection || {};
       const marketTags = (game.market_tags || []).length
         ? game.market_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
         : '<span>Sem mercados extras</span>';
@@ -2828,6 +2829,15 @@ def jogos_do_dia_page(request: Request) -> str:
         <section class="card">
           <div class="eyebrow">Skills IA por mercado</div>
           <div class="skills-grid" style="margin-top:10px">${skills}</div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">Coleta de escanteios</div>
+          <div class="detail-grid" style="margin-top:10px">
+            <div class="mini"><div class="eyebrow">Ao vivo</div><strong>${escapeHtml(corners.live || 'Sem contagem factual no feed')}</strong><div class="muted">casa · fora · total</div></div>
+            <div class="mini"><div class="eyebrow">Jogo todo</div><strong>${escapeHtml(corners.full_time || 'Sem linha ao vivo')}</strong><div class="muted">over / under</div></div>
+            <div class="mini"><div class="eyebrow">1T</div><strong>${escapeHtml(corners.first_half || 'Sem linha ao vivo')}</strong><div class="muted">escanteios 1 tempo</div></div>
+            <div class="mini"><div class="eyebrow">2T</div><strong>${escapeHtml(corners.second_half || 'Sem linha ao vivo')}</strong><div class="muted">escanteios 2 tempo</div></div>
+          </div>
         </section>
         <section class="market-board">
           <div class="eyebrow">Mercados monitorados</div>
@@ -4571,30 +4581,63 @@ def _market_snapshot(game: dict[str, Any], key: str) -> str:
     return "Sem linha ao vivo"
 
 
+def _market_period_snapshot(game: dict[str, Any], key: str, period: str) -> str:
+    markets = game.get("markets") or {}
+    market = ((markets.get(key) or {}).get(period) or {})
+    over = _market_price_text((market or {}).get("over"))
+    under = _market_price_text((market or {}).get("under"))
+    if over == "Sem linha ao vivo" and under == "Sem linha ao vivo":
+        return "Sem linha ao vivo"
+    return f"Over {over} | Under {under}"
+
+
+def _jogosdodia_corners_collection(game: dict[str, Any]) -> dict[str, str]:
+    corners = ((game.get("markets") or {}).get("corners") or {})
+    live = corners.get("live") or {}
+    home_live = _safe_int(live.get("home"))
+    away_live = _safe_int(live.get("away"))
+    total_live = _safe_int(live.get("total"))
+    if total_live <= 0:
+        total_live = home_live + away_live
+    factual = "Sem contagem factual no feed"
+    if home_live or away_live or total_live:
+        factual = f"{game.get('home') or 'Casa'} {home_live} · {game.get('away') or 'Fora'} {away_live} · total {total_live}"
+    return {
+        "live": factual,
+        "full_time": _market_snapshot(game, "corners"),
+        "first_half": _market_period_snapshot(game, "corners", "first_half"),
+        "second_half": _market_period_snapshot(game, "corners", "second_half"),
+    }
+
+
 def _jogosdodia_market_skills(
     game: dict[str, Any],
     recommendations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     minute = _safe_int(game.get("minute"))
     score = f"{_safe_int(game.get('home_goals'))}x{_safe_int(game.get('away_goals'))}"
+    corners_data = _jogosdodia_corners_collection(game)
     facts = {
         "1x2": f"min {minute}' · placar {score}",
         "goals": f"chutes no alvo { _safe_int(game.get('home_shots_on')) }/{ _safe_int(game.get('away_shots_on')) }",
-        "corners": f"pressao { _safe_int(game.get('home_pressure')) }/{ _safe_int(game.get('away_pressure')) }",
+        "corners": f"escanteios ao vivo · {corners_data['live']}",
+        "corners_first_half": "mercado de escanteios exclusivo do 1T",
+        "corners_second_half": "mercado de escanteios exclusivo do 2T",
         "asian": f"odd principal alinhada ao time em leitura",
         "cards": f"mercado auxiliar do feed ao vivo",
     }
     specs = [
-        ("1x2", "1X2", ("1x2",)),
-        ("goals", "Gols", ("gols", "goals")),
-        ("corners", "Escanteios", ("escanteios", "corners")),
-        ("asian", "Handicap", ("asiatica", "handicap", "asian")),
-        ("cards", "Cartoes", ("cartoes", "cards")),
+        ("1x2", "1X2", ("1x2",), _market_snapshot(game, "1x2")),
+        ("goals", "Gols", ("gols", "goals"), _market_snapshot(game, "goals")),
+        ("corners", "Escanteios", ("escanteios", "corners"), corners_data["full_time"]),
+        ("corners_first_half", "Escanteios 1T", ("escanteios 1t", "corners 1t", "corners 1h", "1st half corners"), corners_data["first_half"]),
+        ("corners_second_half", "Escanteios 2T", ("escanteios 2t", "corners 2t", "corners 2h", "2nd half corners"), corners_data["second_half"]),
+        ("asian", "Handicap", ("asiatica", "handicap", "asian"), _market_snapshot(game, "asian")),
+        ("cards", "Cartoes", ("cartoes", "cards"), _market_snapshot(game, "cards")),
     ]
     skills: list[dict[str, Any]] = []
-    for market_key, title, tokens in specs:
+    for market_key, title, tokens, snapshot in specs:
         rec = _match_market_rec(recommendations, *tokens)
-        snapshot = _market_snapshot(game, market_key)
         available = snapshot != "Sem linha ao vivo" and snapshot != "Sem odds ao vivo"
         action = str(rec.get("action") or "") if rec else ""
         if not action:
@@ -4657,6 +4700,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         best_signal = _jogosdodia_best_signal(related)
         recommendations = _jogosdodia_recommendations(best_signal_raw)
         market_skills = _jogosdodia_market_skills(game, recommendations)
+        corners_collection = _jogosdodia_corners_collection(game)
         if best_signal and best_signal.get("action") == "ENTRAR":
             enter_count += 1
         elif best_signal:
@@ -4687,6 +4731,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
                 "best_signal": best_signal,
                 "recommendations": recommendations,
                 "market_skills": market_skills,
+                "corners_collection": corners_collection,
             }
         )
 

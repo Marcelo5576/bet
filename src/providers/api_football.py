@@ -126,11 +126,16 @@ def _parse_markets(item: dict) -> dict:
             if any(token in bet_name for token in ("match winner", "1x2", "winner")):
                 parsed["1x2"] = _parse_1x2_values(values)
             elif any(token in bet_name for token in ("over/under", "goals", "total goals")):
-                parsed.setdefault("goals", {}).update(_parse_total_values(values))
+                target = parsed.setdefault("goals", {})
+                _merge_period_market(target, bet_name, _parse_total_values(values))
             elif any(token in bet_name for token in ("asian handicap", "handicap", "spread")):
                 parsed.setdefault("asian", {}).update(_parse_handicap_values(values))
             elif "corner" in bet_name:
-                parsed.setdefault("corners", {}).update(_parse_total_values(values))
+                target = parsed.setdefault("corners", {})
+                _merge_period_market(target, bet_name, _parse_total_values(values))
+            elif any(token in bet_name for token in ("card", "cart")):
+                target = parsed.setdefault("cards", {})
+                _merge_period_market(target, bet_name, _parse_total_values(values))
     return {key: value for key, value in parsed.items() if value}
 
 
@@ -162,6 +167,19 @@ def _parse_total_values(values: list[dict]) -> dict:
             continue
         parsed[side] = {"line": _extract_line(label), "odds": odd}
     return parsed
+
+
+def _merge_period_market(target: dict, market_name: str, payload: dict) -> None:
+    if not payload:
+        return
+    lowered = str(market_name or "").lower()
+    if any(token in lowered for token in ("1st half", "first half", "1h", "1º tempo", "1 tempo")):
+        target.setdefault("first_half", {}).update(payload)
+        return
+    if any(token in lowered for token in ("2nd half", "second half", "2h", "2º tempo", "2 tempo")):
+        target.setdefault("second_half", {}).update(payload)
+        return
+    target.update(payload)
 
 
 def _parse_handicap_values(values: list[dict]) -> dict:

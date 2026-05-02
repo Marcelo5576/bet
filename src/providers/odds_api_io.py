@@ -247,6 +247,16 @@ def _parse_bookmaker_markets(rows: list[tuple[str, object]]) -> dict[str, dict]:
                 totals = _parse_totals_market(entries)
                 if totals:
                     parsed["goals"] = totals
+            elif "corner" in name:
+                totals = _parse_totals_market(entries)
+                if totals:
+                    target = parsed.setdefault("corners", {})
+                    _merge_period_market(target, name, totals)
+            elif any(token in name for token in ("card", "yellow cards", "booking")):
+                totals = _parse_totals_market(entries)
+                if totals:
+                    target = parsed.setdefault("cards", {})
+                    _merge_period_market(target, name, totals)
     return parsed
 
 
@@ -294,6 +304,19 @@ def _parse_totals_market(entries: object) -> dict[str, dict[str, float | str | N
         "over": {"line": line_str, "odds": picked.get("over")},
         "under": {"line": line_str, "odds": picked.get("under")},
     }
+
+
+def _merge_period_market(target: dict, market_name: str, payload: dict) -> None:
+    if not payload:
+        return
+    lowered = str(market_name or "").lower()
+    if any(token in lowered for token in ("1st half", "first half", "1h", "1st-half", "first-half")):
+        target.setdefault("first_half", {}).update(payload)
+        return
+    if any(token in lowered for token in ("2nd half", "second half", "2h", "2nd-half", "second-half")):
+        target.setdefault("second_half", {}).update(payload)
+        return
+    target.update(payload)
 
 
 def _event_match_score(game: LiveGame, event: dict) -> float:

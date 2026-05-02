@@ -169,6 +169,7 @@ def _parse_games(payload: dict, live_only: bool = True) -> list[LiveGame]:
             home_stats = _stats(home.get("statistics", []))
             away_stats = _stats(away.get("statistics", []))
             markets = _markets(competition.get("odds", []))
+            markets = _attach_live_facts(markets, home_stats, away_stats)
             odds = markets.get("1x2", {})
             league = _league(event, competition, league_names)
             division = _division(league, home, away)
@@ -206,6 +207,19 @@ def _teams_by_side(competitors: list[dict]) -> dict[str, dict]:
 
 def _stats(raw: list[dict]) -> dict[str, str]:
     return {item.get("name", ""): item.get("displayValue", "0") for item in raw}
+
+
+def _attach_live_facts(markets: dict, home_stats: dict[str, str], away_stats: dict[str, str]) -> dict:
+    enriched = dict(markets or {})
+    home_corners = _as_int(home_stats.get("wonCorners"))
+    away_corners = _as_int(away_stats.get("wonCorners"))
+    enriched.setdefault("corners", {})
+    enriched["corners"]["live"] = {
+        "home": home_corners,
+        "away": away_corners,
+        "total": max(0, home_corners + away_corners),
+    }
+    return enriched
 
 
 def _pressure(stats: dict[str, str]) -> int:
