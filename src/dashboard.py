@@ -4685,6 +4685,34 @@ def _jogosdodia_best_signal(signals: list[dict[str, Any]]) -> dict[str, Any] | N
     }
 
 
+def _jogosdodia_focus_signal(
+    base_signal: dict[str, Any] | None,
+    recommendations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(base_signal, dict):
+        return None
+    ranked = [item for item in recommendations or [] if isinstance(item, dict)]
+    ranked.sort(
+        key=lambda item: (
+            _action_weight(item.get("action")),
+            _safe_float(item.get("odds"), default=0.0),
+            len(str(item.get("reason") or "")),
+        ),
+        reverse=True,
+    )
+    top = ranked[0] if ranked else None
+    if not top or _action_weight(top.get("action")) < _action_weight(base_signal.get("action")):
+        return base_signal
+    return {
+        **base_signal,
+        "action": str(top.get("action") or base_signal.get("action") or "SEM DADOS"),
+        "market": str(top.get("market") or base_signal.get("market") or "-"),
+        "selection": str(top.get("selection") or base_signal.get("selection") or "-"),
+        "odds": _safe_float(top.get("odds"), default=base_signal.get("odds") or -1.0),
+        "reason": str(top.get("reason") or base_signal.get("reason") or ""),
+    }
+
+
 def _match_market_rec(
     recommendations: list[dict[str, Any]],
     *tokens: str,
@@ -4970,6 +4998,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         best_signal_raw = related[0] if related else None
         best_signal = _jogosdodia_best_signal(related)
         recommendations = _jogosdodia_recommendations(best_signal_raw)
+        best_signal = _jogosdodia_focus_signal(best_signal, recommendations)
         market_skills = _jogosdodia_market_skills(game, recommendations)
         corners_collection = _jogosdodia_corners_collection(game)
         pressure_bar = _jogosdodia_pressure_bar(game)
