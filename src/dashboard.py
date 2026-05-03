@@ -2423,6 +2423,17 @@ def jogos_do_dia_page(request: Request) -> str:
     .brand { font-weight: 900; letter-spacing: .2px; }
     .eyebrow { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.1px; }
     .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .top-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+    .status-strip { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .status-chip {
+      display:inline-flex; align-items:center; justify-content:center;
+      min-height:32px; padding:0 10px; border-radius:999px;
+      border:1px solid #293a4d; background:#0f151d; color:#d9e8f8;
+      font-size:11px; font-weight:900; letter-spacing:.7px; text-transform:uppercase;
+    }
+    .status-chip.live { background: rgba(14,203,129,.12); border-color: rgba(14,203,129,.32); color: #8df1c4; }
+    .status-chip.watch { background: rgba(240,193,75,.12); border-color: rgba(240,193,75,.34); color: #f3d887; }
+    .status-chip.idle { background: rgba(114,168,255,.12); border-color: rgba(114,168,255,.34); color: #b9d3ff; }
     .btn {
       display: inline-flex; align-items: center; justify-content: center;
       min-height: 40px; padding: 0 14px; border-radius: 10px;
@@ -2460,6 +2471,13 @@ def jogos_do_dia_page(request: Request) -> str:
     .metrics { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
     .metric strong { display: block; font-size: 28px; }
     .metric .muted { margin-top: 4px; }
+    .market-focus { margin-bottom: 16px; }
+    .market-quick { display:flex; gap:10px; flex-wrap:wrap; }
+    .market-quick .chip {
+      display:inline-flex; align-items:center; gap:8px; border:1px solid #26384c; background:#0d141c;
+      color:#d6e5f6; border-radius:999px; padding:8px 12px; font-size:12px; font-weight:800;
+    }
+    .market-quick .chip b { color:#f0c14b; font-size:13px; }
     .pregame-section { margin-bottom: 16px; }
     .pregame-strip {
       display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -2575,32 +2593,40 @@ def jogos_do_dia_page(request: Request) -> str:
   <header class="top">
     <div class="topin">
       <div class="brand-wrap">
-        <div class="eyebrow">Modulo isolado · sem tocar no scanner principal</div>
+        <div class="eyebrow">ApexGol live center</div>
         <div class="brand">__TITLE__ · Jogos do Dia</div>
       </div>
-      <nav class="nav">
-        <a class="btn ghost" href="/app">Area do Cliente</a>
-        <a class="btn ghost" href="/dashboard">Dashboard Trade</a>
-        <a class="btn ghost" href="/fantasy-ia">Fantasy IA</a>
-        <button class="btn primary" type="button" id="refreshBoardBtn">Atualizar agora</button>
-      </nav>
+      <div class="top-actions">
+        <div class="status-strip">
+          <span class="status-chip live" id="topLiveBadge">Ao vivo 0</span>
+          <span class="status-chip watch" id="topPregameBadge">Pre 0</span>
+          <span class="status-chip idle" id="topAutoScan">proxima leitura --</span>
+        </div>
+        <nav class="nav">
+          <a class="btn ghost" href="/app">Area do Cliente</a>
+          <a class="btn ghost" href="/dashboard">Dashboard Trade</a>
+          <a class="btn ghost" href="/fantasy-ia">Fantasy IA</a>
+          <button class="btn primary" type="button" id="refreshBoardBtn">Atualizar agora</button>
+        </nav>
+      </div>
     </div>
   </header>
   <main class="wrap">
     <section class="hero">
       <article class="card headline">
-        <div class="eyebrow">inspirado em workflows de analise operacional, sem copiar conteudo de terceiros</div>
-        <h1>Radar operacional para jogos ao vivo reais</h1>
-        <p>Essa pagina trabalha em duas etapas: primeiro a IA faz a busca de pre-jogo por horario e shortlist promissora; depois, quando a partida entra ao vivo, o ApexGol liga a coleta operacional real e prioriza esses jogos sem inventar dado nenhum.</p>
+        <div class="eyebrow">radar pre-jogo -> coleta ao vivo -> leitura por mercado</div>
+        <h1>Central operacional para jogos promissores e leitura ao vivo real</h1>
+        <p>O ApexGol varre a agenda, monta uma watchlist por horario e so liga a coleta forte quando os jogos escolhidos realmente entram ao vivo. A leitura prioriza gols, escanteios, handicap, cartoes e 1X2 com dados reais do feed.</p>
         <div class="micro">
           <span>Scanner real do backend</span>
           <span>Watchlist pre-jogo por horario</span>
+          <span>Execucao automatica quando o ciclo vence</span>
           <span>Filtros por liga, acao e busca</span>
           <span>Painel lateral de leitura</span>
           <span>Barra de pressao e corrida para o gol</span>
           <span>Alertas IA por mercado</span>
           <span>Leitura de escanteios FT, 1T e 2T</span>
-          <span>Sem substituir o dashboard atual</span>
+          <span>Horario Brasil</span>
         </div>
         <div class="ticker" id="boardHighlights"><span>Carregando leitura ao vivo...</span></div>
       </article>
@@ -2616,6 +2642,12 @@ def jogos_do_dia_page(request: Request) -> str:
       <article class="card metric"><strong id="metricCandidateGames">0</strong><div class="muted">Jogos com leitura</div></article>
       <article class="card metric"><strong id="metricEnter">0</strong><div class="muted">Entradas fortes</div></article>
       <article class="card metric"><strong id="metricWatch">0</strong><div class="muted">Aguardar / monitorar</div></article>
+    </section>
+
+    <section class="card market-focus">
+      <div class="eyebrow">Mercados em foco</div>
+      <div class="subline" style="margin:6px 0 12px">Resumo dos mercados vivos no radar atual para acelerar a leitura e a escolha do jogo.</div>
+      <div class="market-quick" id="marketQuick"><span class="chip">Carregando mercados...</span></div>
     </section>
 
     <section class="card pregame-section">
@@ -2666,14 +2698,15 @@ def jogos_do_dia_page(request: Request) -> str:
         <div class="empty">Selecione um jogo para ver a leitura detalhada.</div>
       </aside>
     </section>
-    <p class="footer-note">Build __BUILD__. Essa pagina foi criada como modulo separado para ampliar a experiencia sem alterar o fluxo principal do scanner e da IA.</p>
+    <p class="footer-note">Build __BUILD__. Horario Brasil ativo. Essa tela usa pre-jogo para shortlist e coleta forte apenas quando o jogo realmente vira ao vivo.</p>
   </main>
   <script>
     const boardState = {
       payload: null,
       selectedGameId: null,
       refreshTimer: null,
-      bootstrapped: false
+      bootstrapped: false,
+      scanInFlight: false
     };
 
     function escapeHtml(value) {
@@ -2687,6 +2720,19 @@ def jogos_do_dia_page(request: Request) -> str:
       const num = Number(value);
       if (!Number.isFinite(num)) return '-';
       return digits ? num.toFixed(digits) : String(Math.round(num));
+    }
+    function isoAgeSeconds(value) {
+      if (!value) return Number.POSITIVE_INFINITY;
+      const ms = Date.parse(String(value));
+      if (!Number.isFinite(ms)) return Number.POSITIVE_INFINITY;
+      return Math.max(0, (Date.now() - ms) / 1000);
+    }
+    function formatDuration(seconds) {
+      const total = Math.max(0, Math.round(Number(seconds) || 0));
+      const minutes = Math.floor(total / 60);
+      const secs = total % 60;
+      if (minutes <= 0) return `${secs}s`;
+      return `${minutes}m ${String(secs).padStart(2,'0')}s`;
     }
     function scoreText(game) {
       return `${safeNum(game.home_goals)} x ${safeNum(game.away_goals)}`;
@@ -2726,11 +2772,11 @@ def jogos_do_dia_page(request: Request) -> str:
     }
     function renderMetrics(payload) {
       const metrics = payload.metrics || {};
+      const scanner = payload.scanner || {};
       document.getElementById('metricLive').textContent = safeNum(metrics.live_games);
       document.getElementById('metricCandidateGames').textContent = safeNum(metrics.candidate_games);
       document.getElementById('metricEnter').textContent = safeNum(metrics.enter_count);
       document.getElementById('metricWatch').textContent = safeNum(metrics.watch_count);
-      const scanner = payload.scanner || {};
       document.getElementById('heroLastScan').textContent = scanner.last_scan_brt || payload.generated_at_brt || scanner.last_scan || '-';
       document.getElementById('heroMode').textContent = scanner.mode || '-';
       document.getElementById('heroStatus').textContent = scanner.status || '-';
@@ -2743,6 +2789,53 @@ def jogos_do_dia_page(request: Request) -> str:
         ? payload.highlights.map(item => `<span>${escapeHtml(item)}</span>`).join('')
         : '<span>Sem destaques agora. O modulo continua aguardando o proximo ciclo real.</span>';
       document.getElementById('boardHighlights').innerHTML = highlights;
+      document.getElementById('topLiveBadge').textContent = `Ao vivo ${safeNum(metrics.live_games)}`;
+      document.getElementById('topPregameBadge').textContent = `Pre ${safeNum(metrics.pregame_watchlist)}`;
+    }
+    function renderMarketQuick(payload) {
+      const mount = document.getElementById('marketQuick');
+      const items = payload.market_overview || [];
+      if (!items.length) {
+        mount.innerHTML = '<span class="chip">Sem mercados destacados agora</span>';
+        return;
+      }
+      mount.innerHTML = items.map(item => `<span class="chip">${escapeHtml(item.market)} <b>${safeNum(item.games)}</b></span>`).join('');
+    }
+    function shouldTriggerScanner(payload) {
+      const scanner = (payload && payload.scanner) || {};
+      const metrics = (payload && payload.metrics) || {};
+      const liveGames = Number(metrics.live_games || 0);
+      const pregameGames = Number(metrics.pregame_watchlist || 0);
+      const candidateGames = Number(metrics.candidate_games || 0);
+      const liveAge = isoAgeSeconds(scanner.last_scan_iso);
+      const pregameAge = isoAgeSeconds(scanner.pregame_last_scan_iso);
+      const liveInterval = Math.max(45, Number(scanner.auto_scan_interval_seconds || 120));
+      const pregameInterval = Math.max(60, Number(scanner.pregame_scan_interval_seconds || liveInterval));
+      if (liveGames > 0 || candidateGames > 0) return liveAge >= liveInterval;
+      if (pregameGames > 0) return pregameAge >= pregameInterval;
+      return liveAge >= liveInterval;
+    }
+    function renderNextScanLabel() {
+      const payload = boardState.payload || {};
+      const scanner = payload.scanner || {};
+      const label = document.getElementById('topAutoScan');
+      if (!label) return;
+      if (boardState.scanInFlight) {
+        label.textContent = 'scanner rodando';
+        return;
+      }
+      const metrics = payload.metrics || {};
+      const liveGames = Number(metrics.live_games || 0);
+      const candidateGames = Number(metrics.candidate_games || 0);
+      const pregameGames = Number(metrics.pregame_watchlist || 0);
+      const liveAge = isoAgeSeconds(scanner.last_scan_iso);
+      const pregameAge = isoAgeSeconds(scanner.pregame_last_scan_iso);
+      const liveInterval = Math.max(45, Number(scanner.auto_scan_interval_seconds || 120));
+      const pregameInterval = Math.max(60, Number(scanner.pregame_scan_interval_seconds || liveInterval));
+      const remaining = (liveGames > 0 || candidateGames > 0)
+        ? Math.max(0, liveInterval - liveAge)
+        : (pregameGames > 0 ? Math.max(0, pregameInterval - pregameAge) : Math.max(0, liveInterval - liveAge));
+      label.textContent = remaining <= 0 ? 'scanner vencido' : `proxima leitura ${formatDuration(remaining)}`;
     }
     function renderPregameWatchlist(payload) {
       const mount = document.getElementById('pregameBoard');
@@ -2951,13 +3044,16 @@ def jogos_do_dia_page(request: Request) -> str:
         boardState.payload = data;
         renderLeagueFilter(data.games || []);
         renderMetrics(data);
+        renderMarketQuick(data);
         renderPregameWatchlist(data);
         renderGameList();
+        renderNextScanLabel();
         scheduleRefresh();
         const metrics = data.metrics || {};
-        if (!boardState.bootstrapped && Number(metrics.live_games || 0) === 0 && Number(metrics.pregame_watchlist || 0) === 0) {
+        if ((!boardState.bootstrapped && Number(metrics.live_games || 0) === 0 && Number(metrics.pregame_watchlist || 0) === 0) || shouldTriggerScanner(data)) {
           boardState.bootstrapped = true;
-          runScannerNow();
+          await runScannerNow(true);
+          return;
         }
       } catch (error) {
         const mount = document.getElementById('gameList');
@@ -2972,13 +3068,24 @@ def jogos_do_dia_page(request: Request) -> str:
     }
     function scheduleRefresh() {
       if (boardState.refreshTimer) clearTimeout(boardState.refreshTimer);
-      const scanner = (boardState.payload && boardState.payload.scanner) || {};
-      const seconds = Math.max(45, Number(scanner.auto_scan_interval_seconds || 120));
-      boardState.refreshTimer = setTimeout(() => loadBoardData(true), seconds * 1000);
+      boardState.refreshTimer = setTimeout(async () => {
+        renderNextScanLabel();
+        if (boardState.scanInFlight) {
+          scheduleRefresh();
+          return;
+        }
+        if (shouldTriggerScanner(boardState.payload)) {
+          await runScannerNow(true);
+        } else {
+          await loadBoardData(true);
+        }
+      }, 15000);
     }
-    async function runScannerNow() {
+    async function runScannerNow(silent = false) {
       const button = document.getElementById('scanNowBtn');
       const refresh = document.getElementById('refreshBoardBtn');
+      boardState.scanInFlight = true;
+      renderNextScanLabel();
       if (button) button.disabled = true;
       if (refresh) refresh.disabled = true;
       try {
@@ -2990,9 +3097,13 @@ def jogos_do_dia_page(request: Request) -> str:
         if (!res.ok) throw new Error(data.detail || 'Falha ao executar o scanner.');
         await loadBoardData(true);
       } catch (error) {
-        document.getElementById('heroStatus').textContent = 'scanner com erro';
-        document.getElementById('heroNote').textContent = error.message || 'Nao consegui executar o scanner.';
+        if (!silent) {
+          document.getElementById('heroStatus').textContent = 'scanner com erro';
+          document.getElementById('heroNote').textContent = error.message || 'Nao consegui executar o scanner.';
+        }
       } finally {
+        boardState.scanInFlight = false;
+        renderNextScanLabel();
         if (button) button.disabled = false;
         if (refresh) refresh.disabled = false;
       }
@@ -4981,6 +5092,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
     live_games = _fresh_live_games(state, settings)
     pregame_games = _fresh_pregame_watchlist(state, settings)
     candidate_signals = _fresh_candidate_signals(state, settings)
+    market_counter: Counter[str] = Counter()
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for signal in candidate_signals:
         game = signal.get("game") or {}
@@ -5000,6 +5112,10 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         recommendations = _jogosdodia_recommendations(best_signal_raw)
         best_signal = _jogosdodia_focus_signal(best_signal, recommendations)
         market_skills = _jogosdodia_market_skills(game, recommendations)
+        for rec in recommendations:
+            market_name = str(rec.get("market") or "").strip()
+            if market_name:
+                market_counter[market_name] += 1
         corners_collection = _jogosdodia_corners_collection(game)
         pressure_bar = _jogosdodia_pressure_bar(game)
         race_to_goal = _jogosdodia_race_to_goal(game)
@@ -5087,6 +5203,10 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
             "pregame_watchlist": len(pregame_payload),
         },
         "highlights": highlights[:10],
+        "market_overview": [
+            {"market": market, "games": count}
+            for market, count in market_counter.most_common(8)
+        ],
         "pregame_watchlist": pregame_payload,
         "games": games_payload,
         "selected_game_id": games_payload[0]["game_id"] if games_payload else None,
