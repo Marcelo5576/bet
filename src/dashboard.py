@@ -33,6 +33,7 @@ from src.intelligence.rules import ranked_signals
 from src.intelligence.source_catalog import FOOTBALL_DATA_SOURCES
 from src.main import (
     build_provider,
+    discover_pregame_watchlist,
     prepare_signal,
     scan_games,
     _watch_signal_from_game,
@@ -2459,6 +2460,18 @@ def jogos_do_dia_page(request: Request) -> str:
     .metrics { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
     .metric strong { display: block; font-size: 28px; }
     .metric .muted { margin-top: 4px; }
+    .pregame-section { margin-bottom: 16px; }
+    .pregame-strip {
+      display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+    .pregame-card {
+      border: 1px solid #2b3950; border-radius: 12px; background: #0f151d; padding: 14px;
+      display: grid; gap: 8px;
+    }
+    .pregame-top { display:flex; justify-content:space-between; gap:10px; align-items:start; }
+    .pregame-card strong { font-size: 16px; line-height: 1.18; }
+    .pregame-time { color: #d8e6f8; font-size: 13px; font-weight: 800; }
+    .pregame-focus { color: #c9d6e6; font-size: 13px; }
     .toolbar {
       display: grid; gap: 10px; grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, .7fr)) auto;
       align-items: end; margin-bottom: 16px;
@@ -2578,9 +2591,10 @@ def jogos_do_dia_page(request: Request) -> str:
       <article class="card headline">
         <div class="eyebrow">inspirado em workflows de analise operacional, sem copiar conteudo de terceiros</div>
         <h1>Radar operacional para jogos ao vivo reais</h1>
-        <p>Essa pagina usa somente o feed ao vivo do ApexGol. Nada mockado, nada pre-live, nada fabricado. A gente filtra, destaca os jogos mais quentes e entrega uma leitura visual mais limpa para operar sem bagunca.</p>
+        <p>Essa pagina trabalha em duas etapas: primeiro a IA faz a busca de pre-jogo por horario e shortlist promissora; depois, quando a partida entra ao vivo, o ApexGol liga a coleta operacional real e prioriza esses jogos sem inventar dado nenhum.</p>
         <div class="micro">
           <span>Scanner real do backend</span>
+          <span>Watchlist pre-jogo por horario</span>
           <span>Filtros por liga, acao e busca</span>
           <span>Painel lateral de leitura</span>
           <span>Barra de pressao e corrida para o gol</span>
@@ -2593,6 +2607,7 @@ def jogos_do_dia_page(request: Request) -> str:
       <aside class="hero-side">
         <div class="mini"><div class="eyebrow">ultimo ciclo</div><strong id="heroLastScan">-</strong><div class="subline" id="heroMode">scanner livre</div></div>
         <div class="mini"><div class="eyebrow">status</div><strong id="heroStatus">-</strong><div class="subline" id="heroNote">O scanner principal continua sendo a fonte oficial.</div></div>
+        <div class="mini"><div class="eyebrow">pre-jogo promissor</div><strong id="heroPregame">0</strong><div class="subline" id="heroPregameNote">Aguardando agenda do dia.</div></div>
       </aside>
     </section>
 
@@ -2601,6 +2616,14 @@ def jogos_do_dia_page(request: Request) -> str:
       <article class="card metric"><strong id="metricCandidateGames">0</strong><div class="muted">Jogos com leitura</div></article>
       <article class="card metric"><strong id="metricEnter">0</strong><div class="muted">Entradas fortes</div></article>
       <article class="card metric"><strong id="metricWatch">0</strong><div class="muted">Aguardar / monitorar</div></article>
+    </section>
+
+    <section class="card pregame-section">
+      <div class="eyebrow">Watchlist pre-jogo</div>
+      <div class="subline" style="margin:6px 0 12px">A IA vasculha a grade, escolhe os jogos mais promissores e só dispara a coleta forte quando eles realmente entram ao vivo.</div>
+      <div class="pregame-strip" id="pregameBoard">
+        <div class="empty">Carregando watchlist pre-jogo...</div>
+      </div>
     </section>
 
     <section class="toolbar">
@@ -2649,7 +2672,8 @@ def jogos_do_dia_page(request: Request) -> str:
     const boardState = {
       payload: null,
       selectedGameId: null,
-      refreshTimer: null
+      refreshTimer: null,
+      bootstrapped: false
     };
 
     function escapeHtml(value) {
@@ -2711,10 +2735,40 @@ def jogos_do_dia_page(request: Request) -> str:
       document.getElementById('heroMode').textContent = scanner.mode || '-';
       document.getElementById('heroStatus').textContent = scanner.status || '-';
       document.getElementById('heroNote').textContent = `Horario Brasil · perfil ${scanner.scan_profile || '-'} · ${safeNum(scanner.candidates)} candidatos vivos`;
+      document.getElementById('heroPregame').textContent = safeNum(metrics.pregame_watchlist);
+      document.getElementById('heroPregameNote').textContent = scanner.pregame_last_scan_brt
+        ? `Agenda lida em ${scanner.pregame_last_scan_brt}`
+        : 'Aguardando agenda do dia.';
       const highlights = (payload.highlights || []).length
         ? payload.highlights.map(item => `<span>${escapeHtml(item)}</span>`).join('')
         : '<span>Sem destaques agora. O modulo continua aguardando o proximo ciclo real.</span>';
       document.getElementById('boardHighlights').innerHTML = highlights;
+    }
+    function renderPregameWatchlist(payload) {
+      const mount = document.getElementById('pregameBoard');
+      const items = payload.pregame_watchlist || [];
+      if (!items.length) {
+        mount.innerHTML = '<div class="empty">Nenhum jogo pre-jogo promissor na janela atual. O modulo fica de guarda e volta a olhar a agenda no proximo ciclo.</div>';
+        return;
+      }
+      mount.innerHTML = items.map(item => {
+        const tags = (item.markets || []).length
+          ? item.markets.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
+          : '<span>mercados abrindo</span>';
+        return `<article class="pregame-card">
+          <div class="pregame-top">
+            <div>
+              <div class="league">${escapeHtml(item.league || '-')}</div>
+              <strong>${escapeHtml(item.home)} x ${escapeHtml(item.away)}</strong>
+            </div>
+            <span class="pill hold">${safeNum(item.promising_score)}/100</span>
+          </div>
+          <div class="pregame-time">${escapeHtml(item.kickoff_brt || '-')} · ${escapeHtml(item.starts_in_label || '-')}</div>
+          <div class="pregame-focus">Foco: ${escapeHtml(item.focus || 'mercados abrindo')}</div>
+          <div class="market-tags">${tags}</div>
+          <div class="muted">${escapeHtml(item.note || 'Watchlist pronta para virar live.')}</div>
+        </article>`;
+      }).join('');
     }
     function renderGameList() {
       const mount = document.getElementById('gameList');
@@ -2897,8 +2951,14 @@ def jogos_do_dia_page(request: Request) -> str:
         boardState.payload = data;
         renderLeagueFilter(data.games || []);
         renderMetrics(data);
+        renderPregameWatchlist(data);
         renderGameList();
         scheduleRefresh();
+        const metrics = data.metrics || {};
+        if (!boardState.bootstrapped && Number(metrics.live_games || 0) === 0 && Number(metrics.pregame_watchlist || 0) === 0) {
+          boardState.bootstrapped = true;
+          runScannerNow();
+        }
       } catch (error) {
         const mount = document.getElementById('gameList');
         if (mount) mount.innerHTML = `<div class="empty">${escapeHtml(error.message || 'Nao consegui carregar os jogos ao vivo.')}</div>`;
@@ -2973,6 +3033,7 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
             "stats": _stats(state, visible_history),
             "learning": _learning_context(state, visible_history),
             "scanner": _scanner_status(state, settings),
+            "pregame_watchlist": _fresh_pregame_watchlist(state, settings),
             "paper_opportunities": paper_opportunities(live_signals),
             "best_paper_entry": best_paper_entry(live_signals),
             "simulation_sessions": _visible_live_lab_sessions(state.simulation_sessions or []),
@@ -3004,7 +3065,9 @@ def api_healthz() -> JSONResponse:
                 "history": len(state.history or []),
                 "candidate_signals": len(state.candidate_signals or []),
                 "last_games": len(state.last_games or []),
+                "pregame_watchlist": len(getattr(state, "pregame_watchlist", None) or []),
                 "last_scan_at": state.last_scan_at,
+                "pregame_last_scan_at": getattr(state, "pregame_last_scan_at", None),
                 "scan_requested_at": state.scan_requested_at,
             },
             "integrations": {
@@ -3076,11 +3139,29 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
     state = store.load()
     provider = build_provider(settings)
     mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
+    pregame_watchlist: list[dict[str, Any]] = []
+    pregame_scope = "agenda indisponivel"
+    try:
+        pregame_watchlist, pregame_scope = await discover_pregame_watchlist(
+            provider,
+            settings,
+            mode=mode,
+            block_esports=settings.block_esports,
+        )
+    except Exception:
+        pregame_watchlist = []
+    store.set_pregame_watchlist(pregame_watchlist)
+    preferred_game_ids = {
+        str(item.get("game_id") or "").strip()
+        for item in pregame_watchlist
+        if str(item.get("game_id") or "").strip()
+    }
     try:
         games, scan_scope = await scan_games(
             provider,
             mode,
             block_esports=settings.block_esports,
+            preferred_game_ids=preferred_game_ids,
         )
     except Exception as exc:
         raise HTTPException(
@@ -3120,15 +3201,22 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
 
     store.set_candidates(prepared)
     store.request_scan_now()
+    message = f"Scanner executado agora: {scan_scope}."
+    if not games and pregame_watchlist:
+        message = (
+            f"Sem live valida agora. Watchlist pre-jogo pronta com {len(pregame_watchlist)} jogos promissores ({pregame_scope})."
+        )
     return JSONResponse(
         {
             "ok": True,
             "scan_scope": scan_scope,
+            "pregame_scope": pregame_scope,
             "mode": mode,
             "mode_label": _scan_mode_label(mode),
             "games": len(games),
             "candidates": len(prepared),
-            "message": f"Scanner executado agora: {scan_scope}.",
+            "pregame_watchlist": len(pregame_watchlist),
+            "message": message,
         }
     )
 
@@ -4351,26 +4439,37 @@ def _scanner_status(state, settings=None) -> dict[str, Any]:
     has_active = bool(state.active_signal)
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
     live_games = _fresh_live_games(state, settings)
+    pregame_games = _fresh_pregame_watchlist(state, settings)
     idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
     active_seconds = int(getattr(settings, "active_scan_interval_seconds", 120) or 120)
+    pregame_seconds = int(getattr(settings, "pregame_scan_interval_seconds", 300) or 300)
     current_seconds = _scanner_cycle_seconds(state, settings, idle_interval=idle_seconds, active_interval=active_seconds)
     if has_active:
         mode_label = f"{max(1, round(active_seconds / 60))} min com jogo ativo"
     elif live_games or candidates:
         mode_label = f"{max(1, round(current_seconds / 60))} min com jogos ao vivo"
+    elif pregame_games:
+        mode_label = f"{max(1, round(pregame_seconds / 60))} min aguardando inicio dos promissores"
     else:
         mode_label = f"{max(1, round(idle_seconds / 60))} min aguardando escolha"
     return {
         "mode": mode_label,
         "last_scan": _short_datetime(state.last_scan_at),
         "last_scan_iso": state.last_scan_at,
+        "pregame_last_scan_iso": getattr(state, "pregame_last_scan_at", None),
         "candidates": candidates,
         "today_games": len(live_games),
-        "status": "monitorando entrada" if has_active else ("radar ao vivo" if live_games or candidates else "scanner livre"),
+        "pregame_games": len(pregame_games),
+        "status": (
+            "monitorando entrada"
+            if has_active
+            else ("radar ao vivo" if live_games or candidates else ("watchlist pre-jogo" if pregame_games else "scanner livre"))
+        ),
         "scan_preference": scan_mode,
         "scan_profile": _scan_mode_label(scan_mode),
         "idle_scan_interval_seconds": idle_seconds,
         "active_scan_interval_seconds": active_seconds,
+        "pregame_scan_interval_seconds": pregame_seconds,
         "auto_scan_interval_seconds": current_seconds,
     }
 
@@ -4502,6 +4601,39 @@ def _fresh_candidate_signals(state, settings) -> list[dict[str, Any]]:
         item
         for item in (state.candidate_signals or [])
         if isinstance(item, dict) and _is_live_game(item.get("game") or {})
+    ]
+
+
+def _is_upcoming_game(game: dict[str, Any] | None) -> bool:
+    if not isinstance(game, dict):
+        return False
+    if _is_live_game(game):
+        return False
+    kickoff = _parse_iso_datetime(game.get("kickoff_at"))
+    if not kickoff:
+        return False
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=timezone.utc)
+    delta_minutes = int((kickoff.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() // 60)
+    return -10 <= delta_minutes <= 12 * 60
+
+
+def _pregame_watchlist_is_stale(state, settings) -> bool:
+    age = _snapshot_age_seconds(getattr(state, "pregame_last_scan_at", None))
+    if age is None:
+        return False
+    cycle = max(60, int(getattr(settings, "pregame_scan_interval_seconds", 300) or 300))
+    stale_after = max(300, int(cycle * 2.5))
+    return age > stale_after
+
+
+def _fresh_pregame_watchlist(state, settings) -> list[dict[str, Any]]:
+    if _pregame_watchlist_is_stale(state, settings):
+        return []
+    return [
+        item
+        for item in (getattr(state, "pregame_watchlist", None) or [])
+        if isinstance(item, dict) and _is_upcoming_game(item)
     ]
 
 
@@ -4819,6 +4951,7 @@ def _jogosdodia_recommendations(signal: dict[str, Any] | None) -> list[dict[str,
 
 def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
     live_games = _fresh_live_games(state, settings)
+    pregame_games = _fresh_pregame_watchlist(state, settings)
     candidate_signals = _fresh_candidate_signals(state, settings)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for signal in candidate_signals:
@@ -4890,8 +5023,29 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         ),
         reverse=True,
     )
+    pregame_payload = [
+        {
+            "game_id": str(item.get("game_id") or ""),
+            "league": str(item.get("league") or "-"),
+            "home": str(item.get("home") or "-"),
+            "away": str(item.get("away") or "-"),
+            "kickoff_at": item.get("kickoff_at"),
+            "kickoff_brt": item.get("kickoff_brt") or _brazil_datetime_label(item.get("kickoff_at"), settings),
+            "starts_in_minutes": _safe_int(item.get("starts_in_minutes"), 0),
+            "starts_in_label": str(item.get("starts_in_label") or "-"),
+            "promising_score": _safe_int(item.get("promising_score"), 0),
+            "focus": str(item.get("focus") or "mercados abrindo"),
+            "markets": [str(tag) for tag in (item.get("markets") or []) if str(tag).strip()],
+            "note": str(item.get("note") or "Watchlist pre-jogo aguardando kickoff."),
+            "home_price": _safe_float(item.get("home_price"), default=-1.0),
+            "draw_price": _safe_float(item.get("draw_price"), default=-1.0),
+            "away_price": _safe_float(item.get("away_price"), default=-1.0),
+        }
+        for item in pregame_games
+    ]
     scanner = _scanner_status(state, settings)
     scanner["last_scan_brt"] = _brazil_datetime_label(scanner.get("last_scan_iso"), settings)
+    scanner["pregame_last_scan_brt"] = _brazil_datetime_label(scanner.get("pregame_last_scan_iso"), settings)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "generated_at_brt": _brazil_datetime_label(datetime.now(timezone.utc), settings),
@@ -4901,14 +5055,16 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
             "candidate_games": sum(1 for item in games_payload if item.get("best_signal")),
             "enter_count": enter_count,
             "watch_count": watch_count,
+            "pregame_watchlist": len(pregame_payload),
         },
         "highlights": highlights[:10],
+        "pregame_watchlist": pregame_payload,
         "games": games_payload,
         "selected_game_id": games_payload[0]["game_id"] if games_payload else None,
         "notes": {
-            "mode": "real_live_only",
+            "mode": "pregame_then_real_live",
             "mock": False,
-            "message": "Modulo isolado, exibindo apenas dados factuais do feed ao vivo e leituras reais do scanner principal.",
+            "message": "Modulo isolado com watchlist de pre-jogo e leitura apenas quando o jogo realmente vira ao vivo.",
         },
     }
 

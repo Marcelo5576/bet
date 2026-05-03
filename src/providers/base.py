@@ -16,6 +16,9 @@ class LiveGame:
     away_pressure: int
     home_shots_on: int
     away_shots_on: int
+    kickoff_at: str | None = None
+    status: str | None = None
+    state: str | None = None
     odds_home: float | None = None
     odds_draw: float | None = None
     odds_away: float | None = None

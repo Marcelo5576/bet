@@ -186,6 +186,15 @@ def _parse_games(payload: dict, live_only: bool = True) -> list[LiveGame]:
                     away_pressure=_pressure(away_stats),
                     home_shots_on=_as_int(home_stats.get("shotsOnTarget")),
                     away_shots_on=_as_int(away_stats.get("shotsOnTarget")),
+                    kickoff_at=str(event.get("date") or competition.get("date") or "").strip() or None,
+                    status=str(
+                        status_type.get("shortDetail")
+                        or status_type.get("detail")
+                        or status_type.get("description")
+                        or status_type.get("name")
+                        or ""
+                    ).strip() or None,
+                    state=str(status_type.get("state") or "").strip() or None,
                     odds_home=odds.get("home"),
                     odds_draw=odds.get("draw"),
                     odds_away=odds.get("away"),

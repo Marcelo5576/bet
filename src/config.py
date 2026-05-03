@@ -33,6 +33,9 @@ class Settings:
     scan_interval_seconds: int
     idle_scan_interval_seconds: int
     active_scan_interval_seconds: int
+    pregame_scan_interval_seconds: int
+    pregame_lead_minutes: int
+    pregame_shortlist_limit: int
     test_mode: bool
     api_football_key: str | None
     api_football_base_url: str
@@ -115,6 +118,9 @@ def load_settings() -> Settings:
         scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "300")),
         idle_scan_interval_seconds=int(os.getenv("IDLE_SCAN_INTERVAL_SECONDS", "60")),
         active_scan_interval_seconds=int(os.getenv("ACTIVE_SCAN_INTERVAL_SECONDS", "120")),
+        pregame_scan_interval_seconds=int(os.getenv("PREGAME_SCAN_INTERVAL_SECONDS", "300")),
+        pregame_lead_minutes=max(15, min(360, int(os.getenv("PREGAME_LEAD_MINUTES", "150")))),
+        pregame_shortlist_limit=max(4, min(24, int(os.getenv("PREGAME_SHORTLIST_LIMIT", "12")))),
         test_mode=_as_bool(os.getenv("TEST_MODE"), False),
         api_football_key=os.getenv("API_FOOTBALL_KEY") or None,
         api_football_base_url=os.getenv(

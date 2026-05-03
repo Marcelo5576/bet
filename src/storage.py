@@ -17,11 +17,13 @@ class BotState:
     history: list[dict[str, Any]] | None = None
     candidate_signals: list[dict[str, Any]] | None = None
     last_games: list[dict[str, Any]] | None = None
+    pregame_watchlist: list[dict[str, Any]] | None = None
     simulation_sessions: list[dict[str, Any]] | None = None
     last_auto_simulation_date: str | None = None
     last_auto_simulation_at: str | None = None
     scan_preference: str = "brazil_first"
     scan_requested_at: str | None = None
+    pregame_last_scan_at: str | None = None
 
 
 class StateStore:
@@ -55,10 +57,19 @@ class StateStore:
             raw["simulation_sessions"] = [
                 item for item in sessions if isinstance(item, dict)
             ][:120]
+        watchlist = raw.get("pregame_watchlist")
+        if not isinstance(watchlist, list):
+            raw["pregame_watchlist"] = []
+        else:
+            raw["pregame_watchlist"] = [
+                item for item in watchlist if isinstance(item, dict)
+            ][:24]
         if raw.get("last_auto_simulation_date") is not None:
             raw["last_auto_simulation_date"] = str(raw.get("last_auto_simulation_date"))
         if raw.get("last_auto_simulation_at") is not None:
             raw["last_auto_simulation_at"] = str(raw.get("last_auto_simulation_at"))
+        if raw.get("pregame_last_scan_at") is not None:
+            raw["pregame_last_scan_at"] = str(raw.get("pregame_last_scan_at"))
 
         active_signal = raw.get("active_signal")
         if isinstance(active_signal, dict):
@@ -115,11 +126,20 @@ class StateStore:
         self.save(state)
         return state
 
+    def set_pregame_watchlist(self, games: list[dict[str, Any]]) -> BotState:
+        state = self.load()
+        state.pregame_watchlist = games[:24]
+        state.pregame_last_scan_at = datetime.now(timezone.utc).isoformat()
+        self.save(state)
+        return state
+
     def clear_scanner_cache(self) -> BotState:
         state = self.load()
         state.candidate_signals = []
         state.last_games = []
+        state.pregame_watchlist = []
         state.last_scan_at = datetime.now(timezone.utc).isoformat()
+        state.pregame_last_scan_at = datetime.now(timezone.utc).isoformat()
         self.save(state)
         return state
 

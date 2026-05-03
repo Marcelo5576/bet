@@ -1166,11 +1166,29 @@ async def run_scan(
         return await refresh_active_signal(context, state)
 
     store.touch_scan()
+    pregame_watchlist: list[dict] = []
+    pregame_scope = "agenda indisponivel"
+    try:
+        pregame_watchlist, pregame_scope = await discover_pregame_watchlist(
+            provider,
+            settings,
+            mode=state.scan_preference,
+            block_esports=settings.block_esports,
+        )
+    except Exception as exc:
+        logger.info("Falha ao montar watchlist de pre-jogo: %s", exc)
+    store.set_pregame_watchlist(pregame_watchlist)
+    preferred_game_ids = {
+        str(item.get("game_id") or "").strip()
+        for item in pregame_watchlist
+        if str(item.get("game_id") or "").strip()
+    }
     try:
         games, scan_scope = await scan_games(
             provider,
             state.scan_preference,
             block_esports=settings.block_esports,
+            preferred_game_ids=preferred_game_ids,
         )
     except Exception as exc:
         logger.warning("Falha ao buscar jogos ao vivo: %s", exc)
@@ -1200,6 +1218,8 @@ async def run_scan(
                 + candidate_list_text(watchlist)
             )
         store.set_candidates([])
+        if pregame_watchlist:
+            return _pregame_watchlist_text(pregame_watchlist, pregame_scope)
         return (
             "Nenhum jogo ao vivo real passou nos filtros agora.\n\n"
             f"Busca usada: {scan_scope}.\n"
@@ -1228,6 +1248,7 @@ async def scan_games(
     provider: LiveProvider,
     mode: str = "brazil_first",
     block_esports: bool = True,
+    preferred_game_ids: set[str] | None = None,
 ) -> tuple[list, str]:
     mode = str(mode or "brazil_first").strip().lower()
     if mode not in {"brazil_first", "world_first", "live_only"}:
@@ -1239,6 +1260,28 @@ async def scan_games(
             for game in live_games
             if not is_forbidden_esports_game(_to_dict(game))
         ]
+    preferred_game_ids = {
+        str(item).strip()
+        for item in (preferred_game_ids or set())
+        if str(item).strip()
+    }
+    if preferred_game_ids:
+        preferred_live = [
+            game for game in live_games if str(getattr(game, "game_id", "") or "").strip() in preferred_game_ids
+        ]
+        if preferred_live:
+            preferred_brazil = [game for game in preferred_live if _is_brazil_priority(game)]
+            if mode == "live_only":
+                if preferred_brazil:
+                    return preferred_brazil, "Watchlist promissora ao vivo (Brasil)"
+                return preferred_live, "Watchlist promissora ao vivo (Mundo)"
+            if mode == "world_first":
+                return preferred_live, "Watchlist promissora ao vivo"
+            return preferred_brazil or preferred_live, (
+                "Watchlist promissora ao vivo (Brasil)"
+                if preferred_brazil
+                else "Watchlist promissora ao vivo (Mundo)"
+            )
     brazil_live = [game for game in live_games if _is_brazil_priority(game)]
     if mode == "live_only":
         if brazil_live:
@@ -1276,6 +1319,54 @@ def _has_odds_or_markets(game) -> bool:
     )
 
 
+def _dict_to_namespace(data: dict[str, Any]):
+    return type("GameSnapshot", (), dict(data or {}))()
+
+
+def _parse_game_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_live_game_dict(game: dict[str, Any]) -> bool:
+    minute = _safe_int(game.get("minute"), 0)
+    if minute > 0:
+        return True
+    state = str(game.get("state") or "").strip().lower()
+    if state == "in":
+        return True
+    status = str(game.get("status") or "").strip().lower()
+    return status in {"live", "inplay", "1h", "2h", "ht", "intervalo"}
+
+
+def _brazil_datetime_label(value: Any, settings: Settings) -> str:
+    parsed = value if isinstance(value, datetime) else _parse_game_datetime(value)
+    if parsed is None:
+        return "-"
+    try:
+        local_tz = ZoneInfo(settings.auto_simulation_timezone or "America/Sao_Paulo")
+    except Exception:
+        local_tz = ZoneInfo("America/Sao_Paulo")
+    return parsed.astimezone(local_tz).strftime("%d/%m %H:%M")
+
+
+def _starts_in_label(minutes: int) -> str:
+    if minutes <= 0:
+        return "deve iniciar agora"
+    hours, mins = divmod(int(minutes), 60)
+    if hours > 0:
+        return f"em {hours}h{mins:02d}"
+    return f"em {mins} min"
+
+
 def _watch_signal_from_game(game, state, settings: Settings) -> dict:
     signal = analyze_game(
         game,
@@ -1299,6 +1390,146 @@ def _watch_signal_from_game(game, state, settings: Settings) -> dict:
     ).strip()
     signal["market_recommendations"] = market_recommendations(signal)
     return signal
+
+
+async def discover_pregame_watchlist(
+    provider: LiveProvider,
+    settings: Settings,
+    *,
+    mode: str = "brazil_first",
+    block_esports: bool = True,
+) -> tuple[list[dict[str, Any]], str]:
+    get_today = getattr(provider, "get_today_games", None)
+    if not callable(get_today):
+        return [], "agenda indisponivel"
+    games = await get_today()
+    upcoming: list[dict[str, Any]] = []
+    for game in games:
+        raw = _to_dict(game)
+        if block_esports and is_forbidden_esports_game(raw):
+            continue
+        if not _is_upcoming_game(raw):
+            continue
+        entry = _pregame_watch_entry(raw, settings)
+        if entry:
+            upcoming.append(entry)
+    if not upcoming:
+        return [], "sem promissores no pre-jogo"
+    upcoming.sort(
+        key=lambda item: (
+            -_safe_int(item.get("promising_score"), 0),
+            _safe_int(item.get("starts_in_minutes"), 9999),
+            _safe_int(item.get("priority"), 50),
+            str(item.get("league") or ""),
+        )
+    )
+    shortlisted = upcoming[: settings.pregame_shortlist_limit]
+    scope = (
+        "pre-jogo Brasil -> Mundo"
+        if str(mode or "").strip().lower() != "world_first"
+        else "pre-jogo Mundo -> Brasil"
+    )
+    return shortlisted, scope
+
+
+def _is_upcoming_game(game: dict[str, Any]) -> bool:
+    if _is_live_game_dict(game):
+        return False
+    kickoff = _parse_game_datetime(game.get("kickoff_at"))
+    if kickoff is None:
+        return False
+    delta_minutes = int((kickoff - datetime.now(timezone.utc)).total_seconds() // 60)
+    return -10 <= delta_minutes <= 12 * 60
+
+
+def _pregame_watch_entry(game: dict[str, Any], settings: Settings) -> dict[str, Any] | None:
+    kickoff = _parse_game_datetime(game.get("kickoff_at"))
+    if kickoff is None:
+        return None
+    starts_in_minutes = int((kickoff - datetime.now(timezone.utc)).total_seconds() // 60)
+    if starts_in_minutes < -10 or starts_in_minutes > settings.pregame_lead_minutes:
+        return None
+    markets = game.get("markets") or {}
+    tags: list[str] = []
+    if isinstance(markets.get("1x2"), dict) or any(game.get(key) for key in ("odds_home", "odds_draw", "odds_away")):
+        tags.append("1X2")
+    if isinstance(markets.get("goals"), dict):
+        tags.append("Gols")
+    if isinstance(markets.get("corners"), dict):
+        tags.append("Escanteios")
+    if isinstance(markets.get("asian"), dict):
+        tags.append("Handicap")
+    if isinstance(markets.get("cards"), dict):
+        tags.append("Cartoes")
+    proximity_bonus = 0
+    if starts_in_minutes <= 15:
+        proximity_bonus = 18
+    elif starts_in_minutes <= 45:
+        proximity_bonus = 14
+    elif starts_in_minutes <= 90:
+        proximity_bonus = 10
+    elif starts_in_minutes <= 150:
+        proximity_bonus = 6
+    score = 34 + proximity_bonus
+    if _is_brazil_priority(_dict_to_namespace(game)):
+        score += 12
+    if _has_odds_or_markets(_dict_to_namespace(game)):
+        score += 14
+    score += min(18, len(tags) * 4)
+    odds_home = _safe_float(game.get("odds_home"), 0.0)
+    odds_away = _safe_float(game.get("odds_away"), 0.0)
+    if odds_home > 0 and odds_away > 0 and abs(odds_home - odds_away) <= 1.2:
+        score += 6
+    focus = " / ".join(tags[:4]) if tags else "mercados abrindo"
+    return {
+        "game_id": str(game.get("game_id") or "").strip(),
+        "league": str(game.get("division") or game.get("league") or "-"),
+        "home": str(game.get("home") or "-"),
+        "away": str(game.get("away") or "-"),
+        "kickoff_at": kickoff.isoformat(),
+        "kickoff_brt": _brazil_datetime_label(kickoff, settings),
+        "starts_in_minutes": max(-10, starts_in_minutes),
+        "starts_in_label": _starts_in_label(starts_in_minutes),
+        "promising_score": max(1, min(99, score)),
+        "priority": _safe_int(game.get("priority"), 50),
+        "focus": focus,
+        "markets": tags,
+        "home_price": odds_home if odds_home > 0 else None,
+        "draw_price": _safe_float(game.get("odds_draw"), 0.0) or None,
+        "away_price": odds_away if odds_away > 0 else None,
+        "note": (
+            f"Watchlist pre-jogo: monitorar abertura ao vivo em {focus.lower()} quando a partida iniciar."
+            if tags
+            else "Watchlist pre-jogo: aguardar abertura do ao vivo para leitura operacional."
+        ),
+    }
+
+
+def _pregame_watchlist_text(items: list[dict[str, Any]], scope: str) -> str:
+    lines = [
+        "🟣🗓️ WATCHLIST PRE-JOGO",
+        "A IA fez a primeira varredura por horario e shortlist promissora.",
+        f"Agenda usada: {scope}.",
+        "A coleta pesada continua desligada ate esses jogos realmente entrarem ao vivo.",
+        "",
+    ]
+    for idx, item in enumerate(items[:8], start=1):
+        lines.append(f"{idx}. {item.get('home')} x {item.get('away')}")
+        lines.append(
+            f"   ⏰ {item.get('kickoff_brt')} | {item.get('starts_in_label')} | score pre {item.get('promising_score')}/100"
+        )
+        lines.append(f"   📍 {item.get('league')}")
+        lines.append(f"   🎯 Foco: {item.get('focus')}")
+        if item.get("home_price") or item.get("draw_price") or item.get("away_price"):
+            lines.append(
+                "   💸 1X2: "
+                f"{item.get('home') or 'Casa'} {item.get('home_price') or '-'} | "
+                f"Empate {item.get('draw_price') or '-'} | "
+                f"{item.get('away') or 'Fora'} {item.get('away_price') or '-'}"
+            )
+        lines.append("")
+    lines.append("Quando um desses jogos iniciar, o scanner passa a priorizar a leitura ao vivo dele.")
+    return _shorten("\n".join(lines), TELEGRAM_TEXT_LIMIT)
 
 
 def prepare_signal(signal: dict, state, settings: Settings) -> dict:
@@ -1416,6 +1647,10 @@ def _scan_state_has_live_snapshot(state) -> bool:
     return any(isinstance(item, dict) for item in (state.last_games or []))
 
 
+def _scan_state_has_pregame_watchlist(state) -> bool:
+    return any(isinstance(item, dict) for item in (state.pregame_watchlist or []))
+
+
 def _scanner_cycle_seconds(
     state,
     settings: Settings,
@@ -1426,10 +1661,13 @@ def _scanner_cycle_seconds(
     idle_seconds = max(30, int(idle_interval or settings.idle_scan_interval_seconds or 1800))
     active_seconds = max(30, int(active_interval or settings.active_scan_interval_seconds or 120))
     live_board_seconds = max(30, int(settings.scan_interval_seconds or active_seconds))
+    pregame_seconds = max(60, int(settings.pregame_scan_interval_seconds or idle_seconds))
     if state.active_game_id and state.active_signal:
         return active_seconds
     if _scan_state_has_live_snapshot(state):
         return min(active_seconds, live_board_seconds)
+    if _scan_state_has_pregame_watchlist(state):
+        return min(idle_seconds, pregame_seconds)
     return idle_seconds
 
 
@@ -1498,6 +1736,7 @@ async def run_system_checkout(
     details.append(f"Chats Telegram: {len(state.chat_ids or [])}")
     details.append(f"Jogo ativo: {'sim' if state.active_signal else 'nao'}")
     details.append(f"Candidatos: {len(state.candidate_signals or [])}")
+    details.append(f"Watchlist pre-jogo: {len(state.pregame_watchlist or [])}")
     details.append(f"Historico: {len(state.history or [])}")
     sim_flag = "on" if settings.auto_simulation_enabled else "off"
     details.append(
@@ -1546,6 +1785,12 @@ async def run_system_checkout(
             try:
                 today_games = await asyncio.wait_for(get_today(), timeout=35)
                 details.append(f"Grade do dia: {len(today_games)} jogos")
+                pregame_watch = [
+                    _pregame_watch_entry(_to_dict(game), settings)
+                    for game in today_games
+                ]
+                pregame_watch = [item for item in pregame_watch if isinstance(item, dict)]
+                details.append(f"Promissores no pre-jogo: {len(pregame_watch)}")
                 if not today_games:
                     warnings.append("Fonte nao retornou jogos ao vivo nem grade do dia.")
             except Exception as exc:
