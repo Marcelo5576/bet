@@ -4587,6 +4587,10 @@ def _safe_dom_id(value: Any) -> str:
     return text[:60] or "match"
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _format_brl(value: Any) -> str:
     amount = _safe_float(value)
     signal = "-" if amount < 0 else ""
@@ -4833,7 +4837,7 @@ def _fresh_pregame_watchlist(state, settings) -> list[dict[str, Any]]:
 
 
 def _jogosdodia_market_tags(game: dict[str, Any]) -> list[str]:
-    markets = game.get("markets") or {}
+    markets = _as_dict(game.get("markets"))
     tags: list[str] = []
     if isinstance(markets.get("1x2"), dict):
         tags.append("1X2")
@@ -4938,12 +4942,12 @@ def _market_line_label(value: Any) -> str:
 
 
 def _market_snapshot(game: dict[str, Any], key: str) -> str:
-    markets = game.get("markets") or {}
-    market = markets.get(key) or {}
+    markets = _as_dict(game.get("markets"))
+    market = _as_dict(markets.get(key))
     if key == "1x2":
-        home = _safe_float((market or {}).get("home"), default=-1.0)
-        draw = _safe_float((market or {}).get("draw"), default=-1.0)
-        away = _safe_float((market or {}).get("away"), default=-1.0)
+        home = _safe_float(market.get("home"), default=-1.0)
+        draw = _safe_float(market.get("draw"), default=-1.0)
+        away = _safe_float(market.get("away"), default=-1.0)
         if home <= 0 and draw <= 0 and away <= 0:
             home = _safe_float(game.get("odds_home"), default=-1.0)
             draw = _safe_float(game.get("odds_draw"), default=-1.0)
@@ -4956,14 +4960,14 @@ def _market_snapshot(game: dict[str, Any], key: str) -> str:
             f"{game.get('away') or 'Fora'} {away:.2f}"
         )
     if key in {"goals", "corners", "cards"}:
-        over = _market_price_text((market or {}).get("over"))
-        under = _market_price_text((market or {}).get("under"))
+        over = _market_price_text(_as_dict(market.get("over")))
+        under = _market_price_text(_as_dict(market.get("under")))
         if over == "Sem linha ao vivo" and under == "Sem linha ao vivo":
             return "Sem linha ao vivo"
         return f"Over {over} | Under {under}"
     if key == "asian":
-        home = _market_price_text((market or {}).get("home"))
-        away = _market_price_text((market or {}).get("away"))
+        home = _market_price_text(_as_dict(market.get("home")))
+        away = _market_price_text(_as_dict(market.get("away")))
         if home == "Sem linha ao vivo" and away == "Sem linha ao vivo":
             return "Sem linha ao vivo"
         return (
@@ -4974,18 +4978,19 @@ def _market_snapshot(game: dict[str, Any], key: str) -> str:
 
 
 def _market_period_snapshot(game: dict[str, Any], key: str, period: str) -> str:
-    markets = game.get("markets") or {}
-    market = ((markets.get(key) or {}).get(period) or {})
-    over = _market_price_text((market or {}).get("over"))
-    under = _market_price_text((market or {}).get("under"))
+    markets = _as_dict(game.get("markets"))
+    family = _as_dict(markets.get(key))
+    market = _as_dict(family.get(period))
+    over = _market_price_text(_as_dict(market.get("over")))
+    under = _market_price_text(_as_dict(market.get("under")))
     if over == "Sem linha ao vivo" and under == "Sem linha ao vivo":
         return "Sem linha ao vivo"
     return f"Over {over} | Under {under}"
 
 
 def _jogosdodia_corners_collection(game: dict[str, Any]) -> dict[str, str]:
-    corners = ((game.get("markets") or {}).get("corners") or {})
-    live = corners.get("live") or {}
+    corners = _as_dict(_as_dict(game.get("markets")).get("corners"))
+    live = _as_dict(corners.get("live"))
     home_live = _safe_int(live.get("home"))
     away_live = _safe_int(live.get("away"))
     total_live = _safe_int(live.get("total"))
@@ -5190,72 +5195,77 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
     watch_count = 0
     highlights: list[str] = []
     for game in live_games:
-        game_id = str(game.get("game_id") or "").strip()
-        related = grouped.get(game_id, [])
-        best_signal_raw = related[0] if related else None
-        best_signal = _jogosdodia_best_signal(related)
-        recommendations = _jogosdodia_recommendations(best_signal_raw)
-        best_signal = _jogosdodia_focus_signal(best_signal, recommendations)
-        market_skills = _jogosdodia_market_skills(game, recommendations)
-        for rec in recommendations:
-            market_name = str(rec.get("market") or "").strip()
-            if market_name:
-                market_counter[market_name] += 1
-        corners_collection = _jogosdodia_corners_collection(game)
-        pressure_bar = _jogosdodia_pressure_bar(game)
-        race_to_goal = _jogosdodia_race_to_goal(game)
-        live_alert = _jogosdodia_live_alert(game, best_signal)
-        corner_prediction = _jogosdodia_corner_prediction(game, recommendations, corners_collection)
-        live_alert_feed.append(
-            {
-                "game_id": game_id,
-                "home": str(game.get("home") or "-"),
-                "away": str(game.get("away") or "-"),
-                "minute": _safe_int(game.get("minute")),
-                "score": f"{_safe_int(game.get('home_goals'))} x {_safe_int(game.get('away_goals'))}",
-                "market": str((best_signal or {}).get("market") or "mercado ao vivo"),
-                "title": str(live_alert.get("title") or "Sem alerta"),
-                "message": str(live_alert.get("message") or "Leitura em monitoramento."),
-                "level": str(live_alert.get("level") or "idle"),
-            }
-        )
-        if best_signal and best_signal.get("action") == "ENTRAR":
-            enter_count += 1
-        elif best_signal:
-            watch_count += 1
-        if best_signal:
-            highlights.append(
-                f"{game.get('home') or '-'} x {game.get('away') or '-'} · "
-                f"{best_signal.get('action')} · {best_signal.get('market') or '-'}"
+        if not isinstance(game, dict):
+            continue
+        try:
+            game_id = str(game.get("game_id") or "").strip()
+            related = grouped.get(game_id, [])
+            best_signal_raw = related[0] if related else None
+            best_signal = _jogosdodia_best_signal(related)
+            recommendations = _jogosdodia_recommendations(best_signal_raw)
+            best_signal = _jogosdodia_focus_signal(best_signal, recommendations)
+            market_skills = _jogosdodia_market_skills(game, recommendations)
+            for rec in recommendations:
+                market_name = str(rec.get("market") or "").strip()
+                if market_name:
+                    market_counter[market_name] += 1
+            corners_collection = _jogosdodia_corners_collection(game)
+            pressure_bar = _jogosdodia_pressure_bar(game)
+            race_to_goal = _jogosdodia_race_to_goal(game)
+            live_alert = _jogosdodia_live_alert(game, best_signal)
+            corner_prediction = _jogosdodia_corner_prediction(game, recommendations, corners_collection)
+            live_alert_feed.append(
+                {
+                    "game_id": game_id,
+                    "home": str(game.get("home") or "-"),
+                    "away": str(game.get("away") or "-"),
+                    "minute": _safe_int(game.get("minute")),
+                    "score": f"{_safe_int(game.get('home_goals'))} x {_safe_int(game.get('away_goals'))}",
+                    "market": str((best_signal or {}).get("market") or "mercado ao vivo"),
+                    "title": str(live_alert.get("title") or "Sem alerta"),
+                    "message": str(live_alert.get("message") or "Leitura em monitoramento."),
+                    "level": str(live_alert.get("level") or "idle"),
+                }
             )
-        games_payload.append(
-            {
-                "game_id": game_id,
-                "league": str(game.get("division") or game.get("league") or "-"),
-                "home": str(game.get("home") or "-"),
-                "away": str(game.get("away") or "-"),
-                "minute": _safe_int(game.get("minute")),
-                "home_goals": _safe_int(game.get("home_goals")),
-                "away_goals": _safe_int(game.get("away_goals")),
-                "home_pressure": _safe_int(game.get("home_pressure")),
-                "away_pressure": _safe_int(game.get("away_pressure")),
-                "home_shots_on": _safe_int(game.get("home_shots_on")),
-                "away_shots_on": _safe_int(game.get("away_shots_on")),
-                "odds_home": _safe_float(game.get("odds_home"), default=-1.0),
-                "odds_draw": _safe_float(game.get("odds_draw"), default=-1.0),
-                "odds_away": _safe_float(game.get("odds_away"), default=-1.0),
-                "market_tags": _jogosdodia_market_tags(game),
-                "signal_count": len(related),
-                "best_signal": best_signal,
-                "recommendations": recommendations,
-                "market_skills": market_skills,
-                "corners_collection": corners_collection,
-                "pressure_bar": pressure_bar,
-                "race_to_goal": race_to_goal,
-                "live_alert": live_alert,
-                "corner_prediction": corner_prediction,
-            }
-        )
+            if best_signal and best_signal.get("action") == "ENTRAR":
+                enter_count += 1
+            elif best_signal:
+                watch_count += 1
+            if best_signal:
+                highlights.append(
+                    f"{game.get('home') or '-'} x {game.get('away') or '-'} · "
+                    f"{best_signal.get('action')} · {best_signal.get('market') or '-'}"
+                )
+            games_payload.append(
+                {
+                    "game_id": game_id,
+                    "league": str(game.get("division") or game.get("league") or "-"),
+                    "home": str(game.get("home") or "-"),
+                    "away": str(game.get("away") or "-"),
+                    "minute": _safe_int(game.get("minute")),
+                    "home_goals": _safe_int(game.get("home_goals")),
+                    "away_goals": _safe_int(game.get("away_goals")),
+                    "home_pressure": _safe_int(game.get("home_pressure")),
+                    "away_pressure": _safe_int(game.get("away_pressure")),
+                    "home_shots_on": _safe_int(game.get("home_shots_on")),
+                    "away_shots_on": _safe_int(game.get("away_shots_on")),
+                    "odds_home": _safe_float(game.get("odds_home"), default=-1.0),
+                    "odds_draw": _safe_float(game.get("odds_draw"), default=-1.0),
+                    "odds_away": _safe_float(game.get("odds_away"), default=-1.0),
+                    "market_tags": _jogosdodia_market_tags(game),
+                    "signal_count": len(related),
+                    "best_signal": best_signal,
+                    "recommendations": recommendations,
+                    "market_skills": market_skills,
+                    "corners_collection": corners_collection,
+                    "pressure_bar": pressure_bar,
+                    "race_to_goal": race_to_goal,
+                    "live_alert": live_alert,
+                    "corner_prediction": corner_prediction,
+                }
+            )
+        except Exception:
+            continue
 
     games_payload.sort(
         key=lambda item: (
