@@ -2478,6 +2478,16 @@ def jogos_do_dia_page(request: Request) -> str:
       color:#d6e5f6; border-radius:999px; padding:8px 12px; font-size:12px; font-weight:800;
     }
     .market-quick .chip b { color:#f0c14b; font-size:13px; }
+    .alert-section { margin-bottom: 16px; }
+    .alert-strip { display:grid; gap:10px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .alert-card {
+      border:1px solid #26384c; background:#0d141c; border-radius:12px; padding:14px;
+      display:grid; gap:8px;
+    }
+    .alert-card strong { font-size:16px; line-height:1.2; }
+    .alert-card.good { border-color: rgba(14,203,129,.34); box-shadow: inset 0 0 0 1px rgba(14,203,129,.08); }
+    .alert-card.warn { border-color: rgba(240,193,75,.34); box-shadow: inset 0 0 0 1px rgba(240,193,75,.08); }
+    .alert-card.idle { border-color: rgba(114,168,255,.26); }
     .pregame-section { margin-bottom: 16px; }
     .pregame-strip {
       display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -2491,7 +2501,7 @@ def jogos_do_dia_page(request: Request) -> str:
     .pregame-time { color: #d8e6f8; font-size: 13px; font-weight: 800; }
     .pregame-focus { color: #c9d6e6; font-size: 13px; }
     .toolbar {
-      display: grid; gap: 10px; grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, .7fr)) auto;
+      display: grid; gap: 10px; grid-template-columns: minmax(220px, 1.2fr) repeat(5, minmax(140px, .62fr)) auto;
       align-items: end; margin-bottom: 16px;
     }
     .field { display: grid; gap: 6px; min-width: 0; }
@@ -2650,6 +2660,14 @@ def jogos_do_dia_page(request: Request) -> str:
       <div class="market-quick" id="marketQuick"><span class="chip">Carregando mercados...</span></div>
     </section>
 
+    <section class="card alert-section">
+      <div class="eyebrow">Live alerts</div>
+      <div class="subline" style="margin:6px 0 12px">Fila de alertas vivos para gol, pressão, escanteios e mercado principal, já priorizada pelo scanner.</div>
+      <div class="alert-strip" id="alertBoard">
+        <div class="empty">Carregando alertas ao vivo...</div>
+      </div>
+    </section>
+
     <section class="card pregame-section">
       <div class="eyebrow">Watchlist pre-jogo</div>
       <div class="subline" style="margin:6px 0 12px">A IA vasculha a grade, escolhe os jogos mais promissores e só dispara a coleta forte quando eles realmente entram ao vivo.</div>
@@ -2675,6 +2693,20 @@ def jogos_do_dia_page(request: Request) -> str:
           <option value="AGUARDAR">Aguardar</option>
           <option value="SEM DADOS">Sem dados</option>
         </select>
+      </label>
+      <label class="field">
+        <span>Cenario</span>
+        <select id="filterScenario">
+          <option value="all">Todos</option>
+          <option value="tied">Empate</option>
+          <option value="home_losing">Casa perdendo</option>
+          <option value="away_losing">Fora perdendo</option>
+          <option value="one_goal">Jogo aberto (1 gol)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Mercado</span>
+        <select id="filterMarket"><option value="all">Todos</option></select>
       </label>
       <label class="field">
         <span>Minuto minimo</span>
@@ -2752,13 +2784,27 @@ def jogos_do_dia_page(request: Request) -> str:
       const term = (document.getElementById('filterSearch')?.value || '').trim().toLowerCase();
       const league = document.getElementById('filterLeague')?.value || 'all';
       const action = document.getElementById('filterAction')?.value || 'all';
+      const scenario = document.getElementById('filterScenario')?.value || 'all';
+      const market = document.getElementById('filterMarket')?.value || 'all';
       const minMinute = Number(document.getElementById('filterMinute')?.value || '0');
       return games.filter(game => {
         const hay = `${game.home} ${game.away} ${game.league}`.toLowerCase();
         const actionValue = (game.best_signal && game.best_signal.action) || 'SEM DADOS';
+        const bestMarket = String((game.best_signal && game.best_signal.market) || '').trim();
+        const homeGoals = Number(game.home_goals || 0);
+        const awayGoals = Number(game.away_goals || 0);
+        const scenarioOk = (
+          scenario === 'all' ||
+          (scenario === 'tied' && homeGoals === awayGoals) ||
+          (scenario === 'home_losing' && homeGoals < awayGoals) ||
+          (scenario === 'away_losing' && awayGoals < homeGoals) ||
+          (scenario === 'one_goal' && Math.abs(homeGoals - awayGoals) <= 1)
+        );
         return (!term || hay.includes(term))
           && (league === 'all' || game.league === league)
           && (action === 'all' || actionValue === action)
+          && (market === 'all' || bestMarket === market || (game.market_tags || []).includes(market))
+          && scenarioOk
           && Number(game.minute || 0) >= minMinute;
       });
     }
@@ -2769,6 +2815,19 @@ def jogos_do_dia_page(request: Request) -> str:
       const leagues = ['all', ...new Set((games || []).map(game => game.league).filter(Boolean))];
       select.innerHTML = leagues.map(item => `<option value="${escapeHtml(item)}">${item === 'all' ? 'Todas' : escapeHtml(item)}</option>`).join('');
       if (leagues.includes(current)) select.value = current;
+    }
+    function renderMarketFilter(payload) {
+      const select = document.getElementById('filterMarket');
+      if (!select) return;
+      const current = select.value || 'all';
+      const options = ['all', ...new Set((payload.games || []).flatMap(game => {
+        const items = [];
+        if (game.best_signal && game.best_signal.market) items.push(String(game.best_signal.market));
+        for (const tag of (game.market_tags || [])) items.push(String(tag));
+        return items.filter(Boolean);
+      }))];
+      select.innerHTML = options.map(item => `<option value="${escapeHtml(item)}">${item === 'all' ? 'Todos' : escapeHtml(item)}</option>`).join('');
+      if (options.includes(current)) select.value = current;
     }
     function renderMetrics(payload) {
       const metrics = payload.metrics || {};
@@ -2800,6 +2859,29 @@ def jogos_do_dia_page(request: Request) -> str:
         return;
       }
       mount.innerHTML = items.map(item => `<span class="chip">${escapeHtml(item.market)} <b>${safeNum(item.games)}</b></span>`).join('');
+    }
+    function renderAlertBoard(payload) {
+      const mount = document.getElementById('alertBoard');
+      const items = payload.live_alerts || [];
+      if (!items.length) {
+        mount.innerHTML = '<div class="empty">Nenhum live alert forte agora. O scanner continua monitorando o proximo gatilho.</div>';
+        return;
+      }
+      mount.innerHTML = items.map(item => {
+        const cls = item.level === 'strong' ? 'good' : item.level === 'watch' ? 'warn' : 'idle';
+        return `<article class="alert-card ${cls}" data-alert-game-id="${escapeHtml(item.game_id)}">
+          <div class="eyebrow">${escapeHtml(item.market || 'mercado vivo')}</div>
+          <strong>${escapeHtml(item.home)} x ${escapeHtml(item.away)}</strong>
+          <div class="subline">${escapeHtml(item.title || 'Sem alerta')} · ${safeNum(item.minute)}' · ${escapeHtml(item.score || '-')}</div>
+          <div class="muted">${escapeHtml(item.message || 'Leitura em monitoramento.')}</div>
+        </article>`;
+      }).join('');
+      mount.querySelectorAll('[data-alert-game-id]').forEach(card => {
+        card.addEventListener('click', () => {
+          boardState.selectedGameId = card.getAttribute('data-alert-game-id');
+          renderGameList();
+        });
+      });
     }
     function shouldTriggerScanner(payload) {
       const scanner = (payload && payload.scanner) || {};
@@ -3043,8 +3125,10 @@ def jogos_do_dia_page(request: Request) -> str:
         if (!res.ok) throw new Error(data.detail || 'Falha ao carregar painel.');
         boardState.payload = data;
         renderLeagueFilter(data.games || []);
+        renderMarketFilter(data);
         renderMetrics(data);
         renderMarketQuick(data);
+        renderAlertBoard(data);
         renderPregameWatchlist(data);
         renderGameList();
         renderNextScanLabel();
@@ -3108,7 +3192,7 @@ def jogos_do_dia_page(request: Request) -> str:
         if (refresh) refresh.disabled = false;
       }
     }
-    ['filterSearch', 'filterLeague', 'filterAction', 'filterMinute'].forEach(id => {
+    ['filterSearch', 'filterLeague', 'filterAction', 'filterScenario', 'filterMarket', 'filterMinute'].forEach(id => {
       window.addEventListener('load', () => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('input', renderGameList);
@@ -5101,6 +5185,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
             grouped[game_id].append(signal)
 
     games_payload: list[dict[str, Any]] = []
+    live_alert_feed: list[dict[str, Any]] = []
     enter_count = 0
     watch_count = 0
     highlights: list[str] = []
@@ -5121,6 +5206,19 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         race_to_goal = _jogosdodia_race_to_goal(game)
         live_alert = _jogosdodia_live_alert(game, best_signal)
         corner_prediction = _jogosdodia_corner_prediction(game, recommendations, corners_collection)
+        live_alert_feed.append(
+            {
+                "game_id": game_id,
+                "home": str(game.get("home") or "-"),
+                "away": str(game.get("away") or "-"),
+                "minute": _safe_int(game.get("minute")),
+                "score": f"{_safe_int(game.get('home_goals'))} x {_safe_int(game.get('away_goals'))}",
+                "market": str((best_signal or {}).get("market") or "mercado ao vivo"),
+                "title": str(live_alert.get("title") or "Sem alerta"),
+                "message": str(live_alert.get("message") or "Leitura em monitoramento."),
+                "level": str(live_alert.get("level") or "idle"),
+            }
+        )
         if best_signal and best_signal.get("action") == "ENTRAR":
             enter_count += 1
         elif best_signal:
@@ -5191,6 +5289,14 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
     scanner = _scanner_status(state, settings)
     scanner["last_scan_brt"] = _brazil_datetime_label(scanner.get("last_scan_iso"), settings)
     scanner["pregame_last_scan_brt"] = _brazil_datetime_label(scanner.get("pregame_last_scan_iso"), settings)
+    level_weight = {"strong": 3, "watch": 2, "idle": 1}
+    live_alert_feed.sort(
+        key=lambda item: (
+            level_weight.get(str(item.get("level") or "idle"), 1),
+            _safe_int(item.get("minute")),
+        ),
+        reverse=True,
+    )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "generated_at_brt": _brazil_datetime_label(datetime.now(timezone.utc), settings),
@@ -5207,6 +5313,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
             {"market": market, "games": count}
             for market, count in market_counter.most_common(8)
         ],
+        "live_alerts": live_alert_feed[:6],
         "pregame_watchlist": pregame_payload,
         "games": games_payload,
         "selected_game_id": games_payload[0]["game_id"] if games_payload else None,
