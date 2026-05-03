@@ -2583,6 +2583,9 @@ def jogos_do_dia_page(request: Request) -> str:
           <span>Scanner real do backend</span>
           <span>Filtros por liga, acao e busca</span>
           <span>Painel lateral de leitura</span>
+          <span>Barra de pressao e corrida para o gol</span>
+          <span>Alertas IA por mercado</span>
+          <span>Leitura de escanteios FT, 1T e 2T</span>
           <span>Sem substituir o dashboard atual</span>
         </div>
         <div class="ticker" id="boardHighlights"><span>Carregando leitura ao vivo...</span></div>
@@ -2728,6 +2731,8 @@ def jogos_do_dia_page(request: Request) -> str:
         const active = game.game_id === boardState.selectedGameId ? ' active' : '';
         const best = game.best_signal;
         const bestOdds = best && Number.isFinite(Number(best.odds)) ? Number(best.odds).toFixed(2) : '-';
+        const race = game.race_to_goal || {};
+        const liveAlert = game.live_alert || {};
         return `<article class="game-card${active}" data-game-id="${escapeHtml(game.game_id)}">
           <div class="game-top">
             <span class="league">${escapeHtml(game.league || '-')}</span>
@@ -2741,6 +2746,8 @@ def jogos_do_dia_page(request: Request) -> str:
             <div class="scoreline"><span>${scoreText(game)}</span><span class="subline">${safeNum(game.minute)}'</span></div>
             <div class="subline">${escapeHtml(readingLabel(game))}</div>
           </div>
+          <div class="subline" style="margin-top:8px">${escapeHtml(race.summary || 'Corrida para o gol sem vantagem clara')}</div>
+          <div class="subline ${liveAlert.level === 'strong' ? 'status-good' : liveAlert.level === 'watch' ? 'status-warn' : ''}" style="margin-top:4px">${escapeHtml(liveAlert.title || 'Sem alerta')}</div>
           <div class="pressure-row" style="margin-top:10px">
             <div class="pressure-box"><div class="eyebrow">Pressao casa</div><strong>${safeNum(game.home_pressure)}</strong><div class="progress"><span style="width:${Math.min(100, Number(game.home_pressure || 0))}%"></span></div></div>
             <div class="pressure-box"><div class="eyebrow">Pressao fora</div><strong>${safeNum(game.away_pressure)}</strong><div class="progress"><span style="width:${Math.min(100, Number(game.away_pressure || 0))}%"></span></div></div>
@@ -2793,6 +2800,10 @@ def jogos_do_dia_page(request: Request) -> str:
           </article>`).join('')
         : '<div class="empty">Nenhuma skill de mercado disponivel para este jogo agora.</div>';
       const corners = game.corners_collection || {};
+      const pressureBar = game.pressure_bar || {};
+      const race = game.race_to_goal || {};
+      const liveAlert = game.live_alert || {};
+      const cornerPrediction = game.corner_prediction || {};
       const marketTags = (game.market_tags || []).length
         ? game.market_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
         : '<span>Sem mercados extras</span>';
@@ -2811,6 +2822,32 @@ def jogos_do_dia_page(request: Request) -> str:
           <div class="mini"><div class="eyebrow">Chutes no alvo</div><strong>${safeNum(game.home_shots_on)} / ${safeNum(game.away_shots_on)}</strong><div class="muted">casa / fora</div></div>
           <div class="mini"><div class="eyebrow">Leitura IA</div><strong>${escapeHtml(best ? best.action : 'SEM DADOS')}</strong><div class="muted">${escapeHtml(best ? (best.market || '-') : 'apenas monitorando')}</div></div>
         </div>
+        <section class="card">
+          <div class="eyebrow">Radar ao vivo</div>
+          <div class="detail-grid" style="margin-top:10px">
+            <div class="mini">
+              <div class="eyebrow">Barra de pressao</div>
+              <strong>${escapeHtml(pressureBar.summary || 'Sem leitura')}</strong>
+              <div class="progress"><span style="width:${safeNum(pressureBar.home_pct)}%"></span></div>
+              <div class="muted">${escapeHtml(game.home)} ${safeNum(pressureBar.home_pct)}% · ${escapeHtml(game.away)} ${safeNum(pressureBar.away_pct)}%</div>
+            </div>
+            <div class="mini">
+              <div class="eyebrow">Corrida para o gol</div>
+              <strong>${escapeHtml(race.leader || 'Equilibrado')}</strong>
+              <div class="muted">${escapeHtml(race.summary || 'Sem vantagem clara agora.')}</div>
+            </div>
+            <div class="mini">
+              <div class="eyebrow">Alerta IA</div>
+              <strong>${escapeHtml(liveAlert.title || 'Sem alerta')}</strong>
+              <div class="muted">${escapeHtml(liveAlert.message || 'Jogo apenas monitorado no momento.')}</div>
+            </div>
+            <div class="mini">
+              <div class="eyebrow">Predicao de escanteios</div>
+              <strong>${escapeHtml(cornerPrediction.title || 'Sem linha')}</strong>
+              <div class="muted">${escapeHtml(cornerPrediction.summary || 'Mercado de cantos sem leitura ativa agora.')}</div>
+            </div>
+          </div>
+        </section>
         <div class="comparison">
           <section class="card">
             <div class="eyebrow">Odds 1x2</div>
@@ -4610,6 +4647,107 @@ def _jogosdodia_corners_collection(game: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _jogosdodia_pressure_bar(game: dict[str, Any]) -> dict[str, Any]:
+    home_pressure = max(0, _safe_int(game.get("home_pressure")))
+    away_pressure = max(0, _safe_int(game.get("away_pressure")))
+    total = max(1, home_pressure + away_pressure)
+    home_pct = int(round((home_pressure / total) * 100))
+    away_pct = max(0, 100 - home_pct)
+    gap = abs(home_pct - away_pct)
+    if gap < 8:
+        summary = "Pressao equilibrada"
+    elif home_pct > away_pct:
+        summary = f"{game.get('home') or 'Casa'} com mais volume"
+    else:
+        summary = f"{game.get('away') or 'Fora'} com mais volume"
+    return {
+        "home_pct": home_pct,
+        "away_pct": away_pct,
+        "summary": summary,
+    }
+
+
+def _jogosdodia_race_to_goal(game: dict[str, Any]) -> dict[str, Any]:
+    home_drive = (_safe_int(game.get("home_pressure")) * 1.15) + (_safe_int(game.get("home_shots_on")) * 14)
+    away_drive = (_safe_int(game.get("away_pressure")) * 1.15) + (_safe_int(game.get("away_shots_on")) * 14)
+    gap = abs(home_drive - away_drive)
+    if gap < 10:
+        return {
+            "leader": "Equilibrado",
+            "summary": "Os dois lados ainda brigam pelo proximo ataque forte.",
+        }
+    if home_drive > away_drive:
+        return {
+            "leader": str(game.get("home") or "Casa"),
+            "summary": f"{game.get('home') or 'Casa'} esta mais perto do proximo gol pela combinacao de pressao e chutes no alvo.",
+        }
+    return {
+        "leader": str(game.get("away") or "Fora"),
+        "summary": f"{game.get('away') or 'Fora'} esta mais perto do proximo gol pela combinacao de pressao e chutes no alvo.",
+    }
+
+
+def _jogosdodia_live_alert(
+    game: dict[str, Any],
+    best_signal: dict[str, Any] | None,
+) -> dict[str, str]:
+    if not isinstance(best_signal, dict):
+        return {
+            "level": "idle",
+            "title": "Sem alerta forte",
+            "message": "O jogo segue na fila de monitoramento, sem gatilho operacional confirmado.",
+        }
+    action = str(best_signal.get("action") or "SEM DADOS")
+    confidence = _safe_int(best_signal.get("confidence"))
+    market = str(best_signal.get("market") or "mercado principal")
+    reason = str(best_signal.get("reason") or "")
+    if action == "ENTRAR":
+        title = "Alerta forte" if confidence >= 70 else "Alerta moderado"
+        return {
+            "level": "strong" if confidence >= 70 else "watch",
+            "title": title,
+            "message": reason or f"Leitura ativa em {market} para {game.get('home') or '-'} x {game.get('away') or '-'}.",
+        }
+    if action == "AGUARDAR":
+        return {
+            "level": "watch",
+            "title": "Monitorar agora",
+            "message": reason or f"{market} esta vivo, mas ainda pede confirmacao de ritmo.",
+        }
+    return {
+        "level": "idle",
+        "title": "Sem linha util",
+        "message": reason or "A fonte atual nao entregou linha suficiente para uma leitura limpa.",
+    }
+
+
+def _jogosdodia_corner_prediction(
+    game: dict[str, Any],
+    recommendations: list[dict[str, Any]],
+    corners_collection: dict[str, str],
+) -> dict[str, str]:
+    rec = _match_market_rec(recommendations, "escanteios")
+    if isinstance(rec, dict):
+        selection = str(rec.get("selection") or "-")
+        line = _market_line_label(rec.get("line"))
+        action = str(rec.get("action") or "MONITORAR")
+        title = "Sinal de cantos" if action == "ENTRAR" else "Radar de cantos"
+        return {
+            "title": title,
+            "summary": f"{selection} {line} escanteios · {rec.get('reason') or 'mercado ativo no feed ao vivo.'}",
+        }
+    live_text = str(corners_collection.get("live") or "")
+    if "Sem contagem factual" not in live_text:
+        return {
+            "title": "Mercado de cantos ativo",
+            "summary": f"Contagem factual disponivel: {live_text}. Use junto das linhas FT, 1T e 2T.",
+        }
+    return {
+        "title": "Sem leitura de cantos",
+        "summary": "A fonte real nao entregou linha ou contagem suficiente para escanteios agora.",
+    }
+
+
 def _jogosdodia_market_skills(
     game: dict[str, Any],
     recommendations: list[dict[str, Any]],
@@ -4701,6 +4839,10 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         recommendations = _jogosdodia_recommendations(best_signal_raw)
         market_skills = _jogosdodia_market_skills(game, recommendations)
         corners_collection = _jogosdodia_corners_collection(game)
+        pressure_bar = _jogosdodia_pressure_bar(game)
+        race_to_goal = _jogosdodia_race_to_goal(game)
+        live_alert = _jogosdodia_live_alert(game, best_signal)
+        corner_prediction = _jogosdodia_corner_prediction(game, recommendations, corners_collection)
         if best_signal and best_signal.get("action") == "ENTRAR":
             enter_count += 1
         elif best_signal:
@@ -4732,6 +4874,10 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
                 "recommendations": recommendations,
                 "market_skills": market_skills,
                 "corners_collection": corners_collection,
+                "pressure_bar": pressure_bar,
+                "race_to_goal": race_to_goal,
+                "live_alert": live_alert,
+                "corner_prediction": corner_prediction,
             }
         )
 
