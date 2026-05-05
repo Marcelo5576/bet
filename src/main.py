@@ -22,12 +22,16 @@ from telegram.ext import (
 )
 
 from src.config import Settings, load_settings
+from src.decision_log import DecisionLogStore
 from src.integrations.supabase import SupabaseSink
 from src.intelligence.gemini import answer_question, refine_signal
+from src.intelligence.football_brain import get_football_brain
 from src.intelligence.learning import summarize_history_with_simulation
 from src.intelligence.manual_import import parse_manual_bets
 from src.intelligence.markets import market_recommendations
 from src.intelligence.paper_trading import best_paper_entry, paper_opportunities
+from src.intelligence.recommendation_policy import apply_recommendation_policy
+from src.intelligence.scanner_presentation import build_scanner_decision
 from src.intelligence.risk import (
     apply_daily_red_stop,
     apply_risk_controls,
@@ -66,6 +70,10 @@ TELEGRAM_DICE = {
 }
 
 
+def _decision_log_store(settings: Settings) -> DecisionLogStore:
+    return DecisionLogStore(settings.decision_audit_db_file)
+
+
 def build_provider(settings: Settings) -> LiveProvider:
     if settings.test_mode:
         return MockProvider()
@@ -78,6 +86,8 @@ def build_provider(settings: Settings) -> LiveProvider:
                 settings.api_football_base_url,
                 usage_tracker=usage_tracker,
                 cost_per_request_brl=settings.api_football_cost_per_request_brl,
+                max_rpm=20,
+                cooldown_seconds=settings.provider_cooldown_429,
             )
         )
     providers.append(
@@ -94,7 +104,12 @@ def build_provider(settings: Settings) -> LiveProvider:
                 cost_per_request_brl=settings.football_data_org_cost_per_request_brl,
             )
         )
-    provider: LiveProvider = FallbackLiveProvider(*providers)
+    provider: LiveProvider = FallbackLiveProvider(
+        *providers,
+        live_ttl_seconds=settings.events_live_ttl,
+        today_ttl_seconds=settings.events_live_ttl,
+        stale_seconds=max(settings.provider_cooldown_429 * 2, settings.events_live_ttl * 4),
+    )
     if settings.odds_api_io_key:
         provider = OddsApiIoEnricher(
             provider,
@@ -103,6 +118,10 @@ def build_provider(settings: Settings) -> LiveProvider:
             bookmakers=settings.odds_api_io_bookmakers,
             usage_tracker=usage_tracker,
             cost_per_request_brl=settings.odds_api_io_cost_per_request_brl,
+            max_rpm=settings.odds_max_rpm,
+            events_live_ttl=settings.events_live_ttl,
+            odds_event_ttl=settings.odds_event_ttl,
+            provider_cooldown_seconds=settings.provider_cooldown_429,
         )
     return provider
 
@@ -112,38 +131,28 @@ def supabase_sink(context: ContextTypes.DEFAULT_TYPE) -> SupabaseSink:
 
 
 def signal_text(signal: dict) -> str:
+    signal = _telegram_focus_signal(signal)
     game = signal["game"]
-    markets = game.get("markets") or {}
     primary = _primary_recommendation(signal)
-    action = signal.get("action")
-    color = _signal_color(action)
+    decision = build_scanner_decision(signal)
+    brain_decision = str(signal.get("brain_decision") or "").strip().upper()
+    brain_market = str(signal.get("brain_market") or "").strip()
     lines = [
-        f"{color} {_decision_badge(signal)}",
-        f"Confianca {signal['confidence']}% | Score {signal.get('entry_score', '-')}/100 | Grau {signal.get('grade', '-')}",
-        "",
-        "📌 JOGO",
-        f"{game['home']} {game['home_goals']} x {game['away_goals']} {game['away']}",
-        f"Minuto {game['minute']}' | {game.get('division', game.get('league', '-'))}",
-        "",
-        "🎯 ENTRADA SUGERIDA",
-        f"Mercado: {primary.get('market', signal.get('market', '-'))}",
-        f"Entrar em: {primary.get('entry') or _primary_entry_text(signal)}",
-        f"Odd alvo: {primary.get('odds') or signal.get('target_odds') or '-'} | Odd justa: {signal.get('fair_odds') or '-'}",
-        f"Stake sugerida: {signal.get('stake_value', 0)} ({signal.get('stake_units', 0)}u)",
-        "",
-        "🧾 SUA ENTRADA",
+        decision["formatted_message"],
+        f"🏆 Liga: {game.get('division', game.get('league', '-'))}",
+        f"📍 Entrada sugerida: {primary.get('entry') or _primary_entry_text(signal)}",
+        f"💵 Odd justa: {signal.get('fair_odds') or '-'} | Stake sugerida: {signal.get('stake_value', 0)} ({signal.get('stake_units', 0)}u)",
+        (
+            f"🧠 Brain: {brain_decision} em {brain_market}"
+            if brain_decision or brain_market
+            else "🧠 Brain: aguardando mais amostra util do jogo."
+        ),
+        f"🛡️ Gestao de risco: {_compact_risk(signal)}",
+        "📊 Onde entrar:",
+        _format_entry_board(signal),
+        "🧾 Sua entrada:",
         _short_entry_status(signal),
         _entry_details_text(signal),
-        "",
-        "📊 ONDE ENTRAR",
-        _format_entry_board(signal),
-        "",
-        "🧠 LEITURA DA IA",
-        f"Risco: {signal.get('risk_score', '-')}/100 | {signal.get('score_note', '-')}",
-        f"Edge: {_pct(signal.get('value_edge'))} | Dados: {signal.get('data_quality', '-')}%",
-        _compact_reason(signal),
-        "",
-        f"🛡️ GESTAO DE RISCO: {_compact_risk(signal)}",
     ]
     if signal.get("gemini_note"):
         lines.append("")
@@ -153,9 +162,10 @@ def signal_text(signal: dict) -> str:
 
 
 def monitor_text(signal: dict) -> str:
+    focused = _telegram_focus_signal(signal)
     management = position_management(signal)
     return _shorten(
-        signal_text(signal)
+        signal_text(focused)
         + "\n\n🚦 MONITORAMENTO\n"
         + f"{_management_color(management['decision'])} {management['decision']}: {management['reason']}",
         TELEGRAM_TEXT_LIMIT,
@@ -230,6 +240,16 @@ def _action_icon(action: str | None) -> str:
         "SAIR": "🔴",
         "SEM DADOS": "⚪",
     }.get(str(action or "").upper(), "🔵")
+
+
+def _action_weight(action: str | None) -> int:
+    return {
+        "ENTRAR": 4,
+        "AGUARDAR": 3,
+        "SEGURAR": 2,
+        "SAIR": 1,
+        "SEM DADOS": 0,
+    }.get(str(action or "").upper(), 0)
 
 
 def _pct(value) -> str:
@@ -339,6 +359,39 @@ def _primary_recommendation(signal: dict) -> dict:
     if actionable:
         return actionable[0]
     return next((rec for rec in recs if rec["market"] == "1X2"), recs[0] if recs else {})
+
+
+def _telegram_focus_signal(signal: dict) -> dict:
+    recs = [
+        rec for rec in (signal.get("market_recommendations") or market_recommendations(signal))
+        if isinstance(rec, dict)
+    ]
+    if not recs:
+        signal["market_recommendations"] = []
+        return signal
+    ranked = sorted(
+        recs,
+        key=lambda rec: (
+            _action_weight(rec.get("action")),
+            _safe_float(rec.get("odds"), 0.0),
+            len(str(rec.get("reason") or "")),
+        ),
+        reverse=True,
+    )
+    top = ranked[0]
+    signal["market_recommendations"] = recs
+    if _action_weight(top.get("action")) < _action_weight(signal.get("action")):
+        return signal
+    return {
+        **signal,
+        "action": str(top.get("action") or signal.get("action") or "SEM DADOS"),
+        "market": str(top.get("market") or signal.get("market") or "-"),
+        "team": str(top.get("selection") or signal.get("team") or signal.get("selection") or "-"),
+        "selection": str(top.get("selection") or signal.get("selection") or signal.get("team") or "-"),
+        "target_odds": _safe_float(top.get("odds"), signal.get("target_odds") or 0.0),
+        "reason": str(top.get("reason") or signal.get("reason") or ""),
+        "market_recommendations": recs,
+    }
 
 
 def _compact_reason(signal: dict) -> str:
@@ -796,6 +849,8 @@ async def ia_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         UsageTracker(settings.usage_metrics_db_file),
         settings.gemini_input_cost_per_1m_brl,
         settings.gemini_output_cost_per_1m_brl,
+        max_rpm=settings.gemini_max_rpm,
+        cooldown_seconds=settings.provider_cooldown_429,
     )
     await update.effective_message.reply_text(answer, reply_markup=ia_menu())
 
@@ -1178,6 +1233,12 @@ async def run_scan(
     except Exception as exc:
         logger.info("Falha ao montar watchlist de pre-jogo: %s", exc)
     store.set_pregame_watchlist(pregame_watchlist)
+    brain = get_football_brain(settings)
+    if brain:
+        try:
+            brain.record_pregame_watchlist(pregame_watchlist)
+        except Exception as exc:
+            logger.info("Brain: falha ao salvar watchlist pre-jogo: %s", exc)
     preferred_game_ids = {
         str(item.get("game_id") or "").strip()
         for item in pregame_watchlist
@@ -1193,6 +1254,11 @@ async def run_scan(
     except Exception as exc:
         logger.warning("Falha ao buscar jogos ao vivo: %s", exc)
         return "Nao consegui buscar jogos ao vivo agora. Vou tentar no proximo scan."
+    if brain:
+        try:
+            brain.record_live_games(games, provider_label(provider))
+        except Exception as exc:
+            logger.info("Brain: falha ao salvar snapshots ao vivo: %s", exc)
     await update_last_games(context, games)
     await supabase_sink(context).sync_games(games)
 
@@ -1535,6 +1601,19 @@ def _pregame_watchlist_text(items: list[dict[str, Any]], scope: str) -> str:
 def prepare_signal(signal: dict, state, settings: Settings) -> dict:
     learning_context = _learning_context(state)
     signal["learning_context"] = learning_context
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    active_position = bool(
+        state.active_game_id
+        and state.active_signal
+        and str(state.active_game_id) == str(game.get("game_id") or "")
+        and bool((state.active_signal or {}).get("entered"))
+    )
+    brain = get_football_brain(settings)
+    if brain:
+        try:
+            signal = brain.enrich_signal(signal)
+        except Exception as exc:
+            logger.info("Brain: falha ao enriquecer sinal %s: %s", signal.get("signal_id"), exc)
     signal["market_recommendations"] = market_recommendations(signal)
     if settings.block_esports and is_forbidden_esports_game(signal.get("game", {})):
         signal["action"] = "AGUARDAR"
@@ -1552,10 +1631,20 @@ def prepare_signal(signal: dict, state, settings: Settings) -> dict:
         settings.kelly_fraction,
         settings.unit_percent,
         settings.max_stake_units,
+        active_position=active_position,
     )
     signal = apply_daily_red_stop(signal, state.history or [], settings.daily_red_limit)
     signal["market_recommendations"] = market_recommendations(signal)
     signal.update(entry_score(signal, learning_context))
+    signal = apply_recommendation_policy(
+        signal,
+        learning_context,
+        bankroll=settings.bankroll,
+        unit_percent=settings.unit_percent,
+        selected_profile=getattr(state, "risk_profile", "moderado"),
+    )
+    signal["market_recommendations"] = market_recommendations(signal)
+    _decision_log_store(settings).log_signal(signal)
     return signal
 
 
@@ -1569,6 +1658,12 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
     except Exception as exc:
         logger.warning("Falha ao atualizar jogo ativo: %s", exc)
         return "Jogo ativo mantido, mas nao consegui atualizar os dados agora.\n\n" + monitor_text(state.active_signal)
+    brain = get_football_brain(settings)
+    if brain:
+        try:
+            brain.record_live_games(games, provider_label(provider))
+        except Exception as exc:
+            logger.info("Brain: falha ao atualizar snapshots do jogo ativo: %s", exc)
     await update_last_games(context, games)
     await supabase_sink(context).sync_games(games)
 
@@ -1613,6 +1708,11 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
         UsageTracker(settings.usage_metrics_db_file),
         settings.gemini_input_cost_per_1m_brl,
         settings.gemini_output_cost_per_1m_brl,
+        max_rpm=settings.gemini_max_rpm,
+        ttl_seconds=settings.refine_signal_ttl,
+        cooldown_seconds=settings.provider_cooldown_429,
+        min_score=settings.min_score_to_refine,
+        min_confidence=settings.min_confidence_to_refine,
     )
     store.set_active(signal["game"]["game_id"], signal)
     await supabase_sink(context).sync_signal(signal)
@@ -1658,47 +1758,57 @@ def _scanner_cycle_seconds(
     idle_interval: int | None = None,
     active_interval: int | None = None,
 ) -> int:
-    idle_seconds = max(30, int(idle_interval or settings.idle_scan_interval_seconds or 1800))
-    active_seconds = max(30, int(active_interval or settings.active_scan_interval_seconds or 120))
-    live_board_seconds = max(30, int(settings.scan_interval_seconds or active_seconds))
-    pregame_seconds = max(60, int(settings.pregame_scan_interval_seconds or idle_seconds))
-    if state.active_game_id and state.active_signal:
-        return active_seconds
-    if _scan_state_has_live_snapshot(state):
-        return min(active_seconds, live_board_seconds)
-    if _scan_state_has_pregame_watchlist(state):
-        return min(idle_seconds, pregame_seconds)
-    return idle_seconds
+    del settings, idle_interval, active_interval
+    # O ciclo principal do scanner agora fica fixo em 20s para manter o radar vivo,
+    # enquanto cache/rate limiter seguram o custo das chamadas externas.
+    return 20
 
 
 def candidate_list_text(signals: list[dict]) -> str:
+    decisions = [build_scanner_decision(_telegram_focus_signal(signal)) for signal in signals]
+    enter_count = sum(1 for item in decisions if item["decision_status"] == "ENTER_NOW")
+    wait_count = sum(1 for item in decisions if item["decision_status"] == "WAIT_CONFIRMATION")
+    monitor_count = sum(1 for item in decisions if item["decision_status"] == "MONITOR_ONLY")
+    no_entry_count = sum(1 for item in decisions if item["decision_status"] == "DO_NOT_ENTER")
+    no_data_count = sum(1 for item in decisions if item["decision_status"] == "NO_DATA")
     lines = [
-        "🔵📡 SCANNER AO VIVO",
-        "Escolha um jogo para monitorar de 2 em 2 minutos.",
+        "📡 SCANNER AO VIVO",
+        "Atualiza a cada 20s",
+        "",
+        f"🟢 Entrar agora: {enter_count}",
+        f"🟡 Aguardar: {wait_count}",
+        f"🔵 Monitorar: {monitor_count}",
+        f"🔴 Não entrar: {no_entry_count}",
+        f"⚪ Sem dados: {no_data_count}",
+        "",
+        "Critério atual:",
+        "EV mínimo: 5%",
+        "Confiança mínima: 65%",
+        "Score mínimo: 65",
+        "Odds: 1.60 até 3.00",
     ]
     scope = signals[0].get("scan_scope") if signals else None
     if scope:
-        lines.append(f"Busca: {scope}.")
+        lines.extend(["", f"Busca: {scope}."])
     lines.append("")
     for idx, signal in enumerate(signals, start=1):
-        game = signal["game"]
-        recs = signal.get("market_recommendations") or market_recommendations(signal)
-        primary = _primary_recommendation({**signal, "market_recommendations": recs})
-        icon = _action_icon(signal.get("action"))
-        lines.append(f"{idx}. {icon} {game['home']} x {game['away']}")
-        lines.append(f"   ⏱️ {game['minute']}' | Placar {game.get('home_goals', 0)}x{game.get('away_goals', 0)}")
+        focused = _telegram_focus_signal(signal)
+        decision = build_scanner_decision(focused)
+        if decision["decision_status"] == "DO_NOT_ENTER":
+            continue
+        lines.append(f"{idx}. {decision['status_emoji']} {decision['match_label']}")
         lines.append(
-            f"   🎯 {signal['action']} | Conf. {signal['confidence']}% | "
-            f"Score {signal.get('entry_score', '-')}/100 {signal.get('grade', '-')}"
+            f"   {decision['status_label']} | {decision['action_label']} | "
+            f"{decision['market_label']} | odd {decision['odd_label']}"
         )
         lines.append(
-            f"   📊 {primary.get('market')} | odd "
-            f"{primary.get('odds') or signal.get('target_odds') or '-'}"
+            f"   Conf {decision['confidence_label']} | "
+            f"Score {decision['score_label']} | EV {decision['ev_label']}"
         )
-        lines.append(f"   ➜ {primary.get('entry')}")
+        lines.append(f"   Motivo: {decision['main_reason']}")
         lines.append("")
     lines.append("")
-    lines.append("Sem escolha: novo scan automatico em 1 min.")
+    lines.append("Sem escolha: novo scan automatico em ate 20 segundos.")
     return _shorten("\n".join(lines), TELEGRAM_TEXT_LIMIT)
 
 
@@ -2548,7 +2658,7 @@ def _games_text(state) -> str:
         [
             "Menu Jogos",
             "🔵 Nenhum jogo ativo.",
-            "Use Scan agora para listar partidas ao vivo. Sem jogo ativo o ciclo e de 1 em 1 min; com jogo escolhido vira 5 em 5 min.",
+            "Use Scan agora para listar partidas ao vivo. O radar principal trabalha de 20 em 20 segundos e acelera so os candidatos fortes.",
         ]
     )
 

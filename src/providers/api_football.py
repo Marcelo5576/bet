@@ -1,9 +1,27 @@
 from __future__ import annotations
 
-import httpx
+from services.footballQuantAiSkill.data_sources.api_football_provider import (
+    get_shared_api_football_provider,
+)
+from src.usage_metrics import UsageTracker
 
 from .base import LiveGame, LiveProvider
-from src.usage_metrics import UsageTracker
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _safe_float(value, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class ApiFootballProvider(LiveProvider):
@@ -15,222 +33,56 @@ class ApiFootballProvider(LiveProvider):
         base_url: str,
         usage_tracker: UsageTracker | None = None,
         cost_per_request_brl: float = 0.0,
-    ):
-        self.api_key = api_key
-        self.base_url = base_url
-        self.usage_tracker = usage_tracker
-        self.cost_per_request_brl = float(cost_per_request_brl or 0)
-
-    async def get_live_games(self) -> list[LiveGame]:
-        headers = {"x-apisports-key": self.api_key}
-        async with httpx.AsyncClient(timeout=20) as client:
-            try:
-                fixtures = await client.get(
-                    f"{self.base_url}/fixtures",
-                    params={"live": "all"},
-                    headers=headers,
-                )
-                fixtures.raise_for_status()
-            except Exception as exc:
-                self._track(False, operation="fixtures_live", error=exc)
-                raise
-            self._track(True, operation="fixtures_live", response_bytes=len(fixtures.content))
-            payload = fixtures.json().get("response", [])
-            odds_by_fixture = await self._get_live_odds(client, headers)
-
-        games: list[LiveGame] = []
-        for item in payload:
-            fixture = item.get("fixture", {})
-            status = fixture.get("status", {})
-            teams = item.get("teams", {})
-            goals = item.get("goals", {})
-            stats = _flatten_stats(item.get("statistics") or [])
-            fixture_id = str(fixture.get("id"))
-            odds = odds_by_fixture.get(fixture_id, {})
-            one_x_two = odds.get("1x2", odds)
-            games.append(
-                LiveGame(
-                    game_id=fixture_id,
-                    league=item.get("league", {}).get("name", "Unknown league"),
-                    home=teams.get("home", {}).get("name", "Home"),
-                    away=teams.get("away", {}).get("name", "Away"),
-                    minute=int(status.get("elapsed") or 0),
-                    home_goals=int(goals.get("home") or 0),
-                    away_goals=int(goals.get("away") or 0),
-                    home_pressure=_pressure(stats, "home"),
-                    away_pressure=_pressure(stats, "away"),
-                    home_shots_on=int(stats.get("home", {}).get("Shots on Goal") or 0),
-                    away_shots_on=int(stats.get("away", {}).get("Shots on Goal") or 0),
-                    kickoff_at=str(fixture.get("date") or "").strip() or None,
-                    status=str(status.get("long") or status.get("short") or "").strip() or None,
-                    state="in" if int(status.get("elapsed") or 0) > 0 else str(status.get("short") or "").strip().lower() or None,
-                    odds_home=one_x_two.get("home"),
-                    odds_draw=one_x_two.get("draw"),
-                    odds_away=one_x_two.get("away"),
-                    markets=odds,
-                )
-            )
-        return games
-
-    async def _get_live_odds(
-        self, client: httpx.AsyncClient, headers: dict[str, str]
-    ) -> dict[str, dict[str, float]]:
-        try:
-            response = await client.get(f"{self.base_url}/odds/live", headers=headers)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            self._track(False, operation="odds_live", error=exc)
-            return {}
-        self._track(True, operation="odds_live", response_bytes=len(response.content))
-        odds_by_fixture: dict[str, dict[str, float]] = {}
-        for item in response.json().get("response", []):
-            if item.get("blocked") or item.get("finished"):
-                continue
-            fixture_id = str(
-                item.get("fixture", {}).get("id")
-                or item.get("fixture")
-                or item.get("id", "")
-            )
-            if not fixture_id:
-                continue
-            parsed = _parse_markets(item)
-            if parsed:
-                odds_by_fixture[fixture_id] = parsed
-        return odds_by_fixture
-
-    def _track(
-        self,
-        success: bool,
         *,
-        operation: str,
-        response_bytes: int = 0,
-        error: Exception | None = None,
-    ) -> None:
-        if not self.usage_tracker:
-            return
-        self.usage_tracker.record(
-            "api_football",
-            category="api",
-            request_count=1,
-            success=success,
-            response_bytes=response_bytes,
-            estimated_cost_brl=self.cost_per_request_brl if success or error is not None else 0.0,
-            operation=operation,
-            error=str(error)[:240] if error else None,
+        max_rpm: int = 20,
+        cooldown_seconds: int = 60,
+    ):
+        self.backend = get_shared_api_football_provider(
+            api_key,
+            base_url,
+            max_rpm=max_rpm,
+            cooldown_seconds=cooldown_seconds,
+            usage_tracker=usage_tracker,
+            cost_per_request_brl=cost_per_request_brl,
         )
 
+    async def get_live_games(self) -> list[LiveGame]:
+        fixtures = await self.backend.get_live_fixtures()
+        return [self._to_live_game(item) for item in fixtures]
 
-def _parse_markets(item: dict) -> dict:
-    parsed: dict = {}
-    for bookmaker in item.get("bookmakers", []) or []:
-        for bet in bookmaker.get("bets", []) or []:
-            bet_name = str(bet.get("name") or bet.get("label") or "").lower()
-            values = bet.get("values", []) or []
-            if any(token in bet_name for token in ("match winner", "1x2", "winner")):
-                parsed["1x2"] = _parse_1x2_values(values)
-            elif any(token in bet_name for token in ("over/under", "goals", "total goals")):
-                target = parsed.setdefault("goals", {})
-                _merge_period_market(target, bet_name, _parse_total_values(values))
-            elif any(token in bet_name for token in ("asian handicap", "handicap", "spread")):
-                parsed.setdefault("asian", {}).update(_parse_handicap_values(values))
-            elif "corner" in bet_name:
-                target = parsed.setdefault("corners", {})
-                _merge_period_market(target, bet_name, _parse_total_values(values))
-            elif any(token in bet_name for token in ("card", "cart")):
-                target = parsed.setdefault("cards", {})
-                _merge_period_market(target, bet_name, _parse_total_values(values))
-    return {key: value for key, value in parsed.items() if value}
+    async def get_today_games(self) -> list[LiveGame]:
+        from datetime import datetime, timezone
 
+        fixtures = await self.backend.get_fixtures_by_date(datetime.now(timezone.utc).date())
+        return [self._to_live_game(item) for item in fixtures]
 
-def _parse_1x2_values(values: list[dict]) -> dict[str, float]:
-    parsed: dict[str, float] = {}
-    for value in values:
-        label = str(value.get("value") or value.get("label") or "").lower()
-        odd = _as_float(value.get("odd") or value.get("odds"))
-        if odd is None:
-            continue
-        if label in {"home", "1"}:
-            parsed["home"] = odd
-        elif label in {"draw", "x"}:
-            parsed["draw"] = odd
-        elif label in {"away", "2"}:
-            parsed["away"] = odd
-    return parsed
+    def status_snapshot(self) -> dict:
+        return self.backend.status_snapshot()
 
-
-def _parse_total_values(values: list[dict]) -> dict:
-    parsed: dict = {}
-    for value in values:
-        label = str(value.get("value") or value.get("label") or "").lower()
-        odd = _as_float(value.get("odd") or value.get("odds"))
-        if odd is None:
-            continue
-        side = "over" if "over" in label else "under" if "under" in label else None
-        if not side:
-            continue
-        parsed[side] = {"line": _extract_line(label), "odds": odd}
-    return parsed
-
-
-def _merge_period_market(target: dict, market_name: str, payload: dict) -> None:
-    if not payload:
-        return
-    lowered = str(market_name or "").lower()
-    if any(token in lowered for token in ("1st half", "first half", "1h", "1º tempo", "1 tempo")):
-        target.setdefault("first_half", {}).update(payload)
-        return
-    if any(token in lowered for token in ("2nd half", "second half", "2h", "2º tempo", "2 tempo")):
-        target.setdefault("second_half", {}).update(payload)
-        return
-    target.update(payload)
-
-
-def _parse_handicap_values(values: list[dict]) -> dict:
-    parsed: dict = {}
-    for value in values:
-        label = str(value.get("value") or value.get("label") or "").lower()
-        odd = _as_float(value.get("odd") or value.get("odds"))
-        if odd is None:
-            continue
-        side = "home" if any(token in label for token in ("home", "1")) else "away" if any(token in label for token in ("away", "2")) else None
-        if not side:
-            continue
-        parsed[side] = {"line": _extract_line(label), "odds": odd}
-    return parsed
-
-
-def _extract_line(label: str) -> str | None:
-    import re
-
-    match = re.search(r"[-+]?\d+(?:[.,]\d+)?", label)
-    return match.group(0).replace(",", ".") if match else None
-
-
-def _as_float(value) -> float | None:
-    try:
-        return float(str(value).replace(",", "."))
-    except (TypeError, ValueError):
-        return None
-
-
-def _flatten_stats(raw: list[dict]) -> dict[str, dict[str, int | str | None]]:
-    data = {"home": {}, "away": {}}
-    for idx, team_stats in enumerate(raw[:2]):
-        side = "home" if idx == 0 else "away"
-        for stat in team_stats.get("statistics", []):
-            data[side][stat.get("type", "")] = stat.get("value")
-    return data
-
-
-def _pressure(stats: dict[str, dict], side: str) -> int:
-    possession = stats.get(side, {}).get("Ball Possession") or "50%"
-    attacks = stats.get(side, {}).get("Dangerous Attacks") or 0
-    try:
-        possession_num = int(str(possession).replace("%", ""))
-    except ValueError:
-        possession_num = 50
-    try:
-        attacks_num = int(attacks)
-    except (TypeError, ValueError):
-        attacks_num = 0
-    return min(100, int((possession_num * 0.65) + min(attacks_num, 70) * 0.35))
+    def _to_live_game(self, payload: dict) -> LiveGame:
+        odds = payload.get("odds") or {}
+        summary = odds.get("summary") or {}
+        stats = payload.get("stats") or {}
+        home_stats = stats.get("home") or {}
+        away_stats = stats.get("away") or {}
+        return LiveGame(
+            game_id=str(payload.get("fixture_id") or payload.get("game_id") or ""),
+            league=str(payload.get("league") or "Unknown league"),
+            home=str(payload.get("home_team") or payload.get("home") or "Home"),
+            away=str(payload.get("away_team") or payload.get("away") or "Away"),
+            minute=_safe_int(payload.get("minute")),
+            home_goals=_safe_int(payload.get("score_home")),
+            away_goals=_safe_int(payload.get("score_away")),
+            home_pressure=_safe_int(home_stats.get("pressure_index") or payload.get("home_pressure")),
+            away_pressure=_safe_int(away_stats.get("pressure_index") or payload.get("away_pressure")),
+            home_shots_on=_safe_int(home_stats.get("shots_on") or payload.get("home_shots_on")),
+            away_shots_on=_safe_int(away_stats.get("shots_on") or payload.get("away_shots_on")),
+            kickoff_at=str(payload.get("kickoff_at") or "").strip() or None,
+            status=str(payload.get("status") or "").strip() or None,
+            state=str(payload.get("state") or "").strip() or None,
+            odds_home=_safe_float(payload.get("odds_home") or summary.get("home")),
+            odds_draw=_safe_float(payload.get("odds_draw") or summary.get("draw")),
+            odds_away=_safe_float(payload.get("odds_away") or summary.get("away")),
+            division=str(payload.get("division") or payload.get("league") or "Outras ligas"),
+            markets=odds,
+        )

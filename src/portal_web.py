@@ -831,6 +831,229 @@ def _page_shell(
     .card {{ border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:14px; }}
     .feature-card {{ min-height:190px; padding:20px; }}
     .feature-card h3 {{ font-size:26px; margin:14px 0 10px; }}
+    .hero-stack {{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:18px;
+    }}
+    .stack-pill {{
+      border:1px solid #28415b;
+      border-radius:999px;
+      background:rgba(9,15,22,.72);
+      color:#d3e6fb;
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.4px;
+      padding:8px 12px;
+    }}
+    .hud-actions {{ display:grid; gap:10px; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:14px; }}
+    .hud-actions .signal-mini strong {{ font-size:18px; }}
+    .story-grid {{ display:grid; gap:12px; grid-template-columns:repeat(3,minmax(0,1fr)); }}
+    .story-step {{
+      border:1px solid #26384d;
+      border-radius:8px;
+      background:linear-gradient(180deg, rgba(15,22,32,.96), rgba(8,12,18,.96));
+      min-height:220px;
+      padding:20px;
+      position:relative;
+      overflow:hidden;
+    }}
+    .story-step::after {{
+      content:"";
+      position:absolute;
+      inset:auto -30px -30px auto;
+      width:120px;
+      height:120px;
+      background:radial-gradient(circle, rgba(0,194,120,.14), transparent 70%);
+      pointer-events:none;
+    }}
+    .story-step h3 {{ font-size:28px; margin:12px 0 8px; text-wrap:balance; }}
+    .step-index {{
+      color:#7fb6ff;
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:1px;
+      text-transform:uppercase;
+    }}
+    .module-grid {{ display:grid; gap:12px; grid-template-columns:repeat(3,minmax(0,1fr)); }}
+    .module-card {{
+      border:1px solid #2a3441;
+      border-radius:8px;
+      background:linear-gradient(180deg, rgba(15,22,32,.98), rgba(8,12,18,.98));
+      display:grid;
+      gap:12px;
+      min-height:220px;
+      padding:18px;
+    }}
+    .module-head {{ align-items:flex-start; display:flex; justify-content:space-between; gap:12px; }}
+    .module-card h3 {{ font-size:24px; line-height:1.02; margin:0; text-wrap:balance; }}
+    .module-list {{ display:grid; gap:8px; margin:0; padding:0; list-style:none; }}
+    .module-list li {{
+      border:1px solid #26384d;
+      border-radius:8px;
+      background:#0b121a;
+      color:#d2deeb;
+      font-size:13px;
+      font-weight:700;
+      padding:10px 12px;
+    }}
+    .module-kpi-row {{ display:grid; gap:10px; grid-template-columns:repeat(3,minmax(0,1fr)); }}
+    .module-kpi {{
+      border:1px solid #26384d;
+      border-radius:8px;
+      background:#0b121a;
+      padding:12px;
+    }}
+    .module-kpi strong {{ display:block; font-size:24px; line-height:1; margin-top:6px; }}
+    .module-banner {{
+      border:1px solid #2a3441;
+      border-radius:8px;
+      background:
+        linear-gradient(120deg, rgba(0,194,120,.12), rgba(90,149,255,.08) 48%, rgba(245,200,66,.08)),
+        #0d1117;
+      display:grid;
+      gap:18px;
+      grid-template-columns:minmax(0,.95fr) minmax(320px,1fr);
+      padding:22px;
+    }}
+    .module-banner h3 {{ font-size:34px; line-height:1; margin:10px 0; text-wrap:balance; }}
+    .module-shell {{
+      border:1px solid #26384d;
+      border-radius:8px;
+      background:#0b121a;
+      overflow:hidden;
+    }}
+    .module-shell-top {{
+      align-items:center;
+      border-bottom:1px solid #1d2734;
+      display:flex;
+      gap:8px;
+      justify-content:space-between;
+      padding:12px 14px;
+    }}
+    .module-shell-grid {{
+      display:grid;
+      gap:10px;
+      grid-template-columns:1.1fr .9fr;
+      padding:14px;
+    }}
+    .proof-wall {{
+      display:grid;
+      gap:16px;
+      grid-template-columns:1.08fr .92fr;
+    }}
+    .preview-card {{
+      border:1px solid #2a3441;
+      border-radius:8px;
+      background:linear-gradient(180deg, rgba(15,22,32,.98), rgba(8,12,18,.98));
+      overflow:hidden;
+    }}
+    .preview-top {{
+      align-items:center;
+      border-bottom:1px solid #1d2734;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      padding:12px 14px;
+    }}
+    .window-dots {{ display:flex; gap:6px; }}
+    .window-dots span {{
+      width:9px;
+      height:9px;
+      border-radius:999px;
+      background:#334559;
+      display:block;
+    }}
+    .window-dots span:first-child {{ background:#ff6b6f; }}
+    .window-dots span:nth-child(2) {{ background:#f5c842; }}
+    .window-dots span:nth-child(3) {{ background:#00c278; }}
+    .preview-body {{ padding:14px; display:grid; gap:12px; }}
+    .preview-grid {{
+      display:grid;
+      gap:10px;
+      grid-template-columns:1.08fr .92fr;
+      align-items:start;
+    }}
+    .preview-panel {{
+      border:1px solid #243446;
+      border-radius:8px;
+      background:#0b121a;
+      padding:12px;
+    }}
+    .preview-list {{ display:grid; gap:8px; }}
+    .preview-item {{
+      border:1px solid #243446;
+      border-radius:8px;
+      background:#0f1823;
+      display:grid;
+      gap:8px;
+      grid-template-columns:minmax(0,1fr) auto;
+      padding:10px;
+    }}
+    .preview-item strong {{ font-size:16px; line-height:1.08; }}
+    .odd-row {{ display:grid; gap:8px; grid-template-columns:repeat(3,minmax(0,1fr)); margin-top:8px; }}
+    .odd-pill {{
+      border:1px solid #2b425d;
+      border-radius:8px;
+      background:#111a25;
+      color:#e8eef6;
+      font-size:13px;
+      font-weight:900;
+      padding:9px;
+      text-align:center;
+    }}
+    .signal-strip {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .signal-strip span {{
+      border:1px solid #2b425d;
+      border-radius:999px;
+      background:#0f1823;
+      color:#cfe1f4;
+      font-size:12px;
+      font-weight:800;
+      padding:7px 10px;
+    }}
+    .mini-proof-grid {{ display:grid; gap:10px; grid-template-columns:repeat(2,minmax(0,1fr)); }}
+    .mini-proof {{
+      border:1px solid #243446;
+      border-radius:8px;
+      background:#0b121a;
+      min-height:148px;
+      padding:12px;
+    }}
+    .mini-proof h4 {{ font-size:19px; margin:8px 0; }}
+    .bar-rail {{ background:#1c2733; border-radius:999px; height:8px; overflow:hidden; margin-top:8px; }}
+    .bar-rail span {{ display:block; height:100%; background:linear-gradient(90deg, var(--green), var(--gold)); }}
+    .shell-list {{ display:grid; gap:8px; }}
+    .shell-line {{
+      align-items:center;
+      border:1px solid #243446;
+      border-radius:8px;
+      display:grid;
+      gap:10px;
+      grid-template-columns:minmax(0,1fr) auto auto;
+      padding:10px;
+    }}
+    .shell-metrics {{ display:grid; gap:8px; }}
+    .shell-metric {{
+      border:1px solid #243446;
+      border-radius:8px;
+      background:#0f1823;
+      padding:12px;
+    }}
+    .shell-metric strong {{ display:block; font-size:28px; line-height:1; margin-top:8px; }}
+    .cta-panel {{
+      border:1px solid #2a3441;
+      border-radius:8px;
+      background:linear-gradient(180deg, rgba(16,25,36,.98), rgba(9,14,21,.98));
+      display:grid;
+      gap:18px;
+      grid-template-columns:minmax(0,.95fr) minmax(300px,.85fr);
+      padding:24px;
+    }}
+    .cta-panel h3 {{ font-size:36px; line-height:1; margin:8px 0; text-wrap:balance; }}
+    .cta-proof {{ display:grid; gap:10px; grid-template-columns:repeat(2,minmax(0,1fr)); }}
+    .cta-proof .mini strong {{ display:block; font-size:26px; margin-top:8px; }}
     .feature-tag {{ border:1px solid #2f445d; border-radius:999px; color:#a7d9ff; display:inline-flex; font-size:11px; font-weight:900; letter-spacing:1px; padding:5px 9px; text-transform:uppercase; }}
     .plan-intel {{
       border:1px solid #2a3441;
@@ -951,6 +1174,12 @@ def _page_shell(
       .opportunity {{ grid-template-columns:1fr; padding:18px; }}
       .plan-intel {{ grid-template-columns:1fr; padding:18px; }}
       .plan-scope-grid {{ grid-template-columns:1fr; }}
+      .story-grid, .module-grid, .module-kpi-row, .cta-proof, .mini-proof-grid {{ grid-template-columns:1fr; }}
+      .module-banner, .cta-panel {{ grid-template-columns:1fr; padding:18px; }}
+      .module-shell-grid, .preview-grid, .proof-wall {{ grid-template-columns:1fr; }}
+      .preview-item, .shell-line {{ grid-template-columns:1fr; }}
+      .module-head, .preview-top {{ align-items:flex-start; flex-direction:column; }}
+      .hud-actions {{ grid-template-columns:1fr; }}
       .topin {{ align-items:flex-start; flex-direction:column; }}
     }}
     @media (max-width:520px) {{
@@ -959,9 +1188,12 @@ def _page_shell(
       .nav .btn {{ padding:9px 12px; font-size:14px; }}
       .nav .desktop-only {{ display:none; }}
       .hero {{ min-height:76vh; padding-top:18vh; }}
-      .hero-actions {{ flex-wrap:nowrap; }}
-      .hero-actions .btn {{ flex:1; min-width:0; padding-inline:10px; white-space:normal; }}
+      .hero-actions {{ display:grid; grid-template-columns:1fr; }}
+      .hero-actions .btn {{ width:100%; min-width:0; padding-inline:10px; white-space:normal; }}
       .signal-grid {{ grid-template-columns:1fr; }}
+      .odd-row {{ grid-template-columns:1fr; }}
+      .op-row {{ align-items:flex-start; flex-direction:column; }}
+      .window-dots {{ align-self:flex-start; }}
       .price-row strong {{ font-size:31px; }}
       .ai-fab {{ right:14px; top:116px; bottom:auto; width:48px; height:48px; }}
       .ai-panel {{ right:13px; bottom:76px; max-height:70vh; overflow:auto; }}
@@ -1067,61 +1299,103 @@ def landing() -> str:
   <div class='topin'>
     <div class='brand'>{_esc(settings.product_name)}</div>
     <nav class='nav nav-scroll'>
-      <a class='btn desktop-only' href='#indicadores'>Indicadores</a>
-      <a class='btn desktop-only' href='#poderes'>Poderes</a>
+      <a class='btn desktop-only' href='#plataforma'>Plataforma</a>
+      <a class='btn desktop-only' href='#research'>Research Skill</a>
+      <a class='btn desktop-only' href='#planos'>Planos</a>
       <a class='btn' href='/login'>Login</a>
       <a class='btn primary' href='/signup'>Teste 7 dias</a>
-      <a class='btn desktop-only' href='/dashboard'>Dashboard Operacional</a>
+      <a class='btn desktop-only' href='/app/jogosdodia'>Live Center</a>
     </nav>
   </div>
 </header>
 <section class='hero'>
   <div class='wrap hero-grid'>
     <div class='hero-copy'>
-      <div class='status-pill'><span class='status-dot'></span>Sistema operacional de leitura ao vivo</div>
-      <h1>Não chute. <span class='hero-word'>Comande</span> sua leitura de jogo.</h1>
-      <p>Scanner, odds, pressão, risco e Fantasy Campeão em uma central para apoiar sua decisão antes, durante e depois da entrada.</p>
+      <div class='status-pill'><span class='status-dot'></span>Live center + research skill + aprendizado contínuo</div>
+      <h1>Operação ao vivo, <span class='hero-word'>pesquisa quantitativa</span> e memória IA na mesma mesa.</h1>
+      <p>O ApexGol agora junta scanner ao vivo, Football Research Skill, backtesting, Monte Carlo, agentes internos e governança em uma plataforma feita para apoiar decisão fria, repetível e rastreável.</p>
+      <div class='hero-stack'>
+        <span class='stack-pill'>Jogos do Dia</span>
+        <span class='stack-pill'>Football Analysis</span>
+        <span class='stack-pill'>Backtesting Lab</span>
+        <span class='stack-pill'>Monte Carlo</span>
+        <span class='stack-pill'>Agent Arena</span>
+        <span class='stack-pill'>RAG Memory</span>
+      </div>
       <div class='hero-actions'>
         <a class='btn primary' href='/signup'>Acessar sistema</a>
-        <a class='btn' href='/login'>Entrar no painel</a>
+        <a class='btn' href='/app/global-ai-control-center'>Ver control center</a>
       </div>
     </div>
     <aside class='hud' aria-label='Painel de indicadores ApexGol'>
       <div class='hud-head'>
         <div>
-          <div class='hud-label'>SYS.MONITOR</div>
-          <strong>Target acquired</strong>
+          <div class='hud-label'>GLOBAL AI CONTROL</div>
+          <strong>Operação viva + pesquisa auditável</strong>
         </div>
-        <div class='status-pill'><span class='status-dot'></span>Ao vivo</div>
+        <div class='status-pill'><span class='status-dot'></span>Research mode</div>
       </div>
       <div class='market-card'>
-        <div class='market-line'><span class='muted'>Pressão ofensiva</span><strong>87%</strong></div>
+        <div class='market-line'><span class='muted'>Live candidates</span><strong>08</strong></div>
         <div class='metric-bar'><span style='width:87%'></span></div>
       </div>
       <div class='market-card'>
-        <div class='market-line'><span class='muted'>Edge de mercado</span><strong class='good'>+18.4</strong></div>
+        <div class='market-line'><span class='muted'>Football Research Skill</span><strong class='good'>Ativo</strong></div>
         <div class='metric-bar'><span style='width:74%'></span></div>
       </div>
       <div class='market-card'>
-        <div class='market-line'><span class='muted'>Risco de red</span><strong class='warn'>32%</strong></div>
+        <div class='market-line'><span class='muted'>Governança</span><strong class='warn'>aprovação obrigatória</strong></div>
         <div class='metric-bar'><span style='width:32%'></span></div>
       </div>
       <div class='signal-grid'>
-        <div class='signal-mini'><span class='muted'>Odd alvo</span><strong>1.82</strong></div>
-        <div class='signal-mini'><span class='muted'>Saída IA</span><strong>73'</strong></div>
-        <div class='signal-mini'><span class='muted'>Confiança</span><strong>91%</strong></div>
+        <div class='signal-mini'><span class='muted'>Backtests</span><strong>∞</strong></div>
+        <div class='signal-mini'><span class='muted'>Agentes</span><strong>10</strong></div>
+        <div class='signal-mini'><span class='muted'>RAG</span><strong>Memória longa</strong></div>
       </div>
-      <div class='callout'>Entrada simulada: Over pressão ativa. Proteger banca se o ritmo cair por 6 minutos.</div>
+      <div class='hud-actions'>
+        <div class='signal-mini'><span class='muted'>Decision class</span><strong>ENTRA_FORTE</strong></div>
+        <div class='signal-mini'><span class='muted'>Risk engine</span><strong>Kelly fracionado</strong></div>
+      </div>
+      <div class='callout'>Toda hipótese passa por score estatístico, odd justa, EV, risco e revisão posterior. Nada de aposta real automatizada.</div>
     </aside>
   </div>
 </section>
 <section class='ticker' aria-label='Indicadores do sistema'>
   <div class='ticker-track'>
-    <span>Scanner ao vivo</span><span>Fantasy Campeão</span><span>Telegram ativo</span><span>Gestão de banca</span><span>Entrada e saída IA</span><span>Histórico Green/Red</span>
-    <span>Scanner ao vivo</span><span>Fantasy Campeão</span><span>Telegram ativo</span><span>Gestão de banca</span><span>Entrada e saída IA</span><span>Histórico Green/Red</span>
+    <span>Jogos do Dia</span><span>Football Research Skill</span><span>Backtesting Lab</span><span>Monte Carlo</span><span>Agent Arena</span><span>Governance Center</span><span>Fantasy IA</span><span>Telegram</span>
+    <span>Jogos do Dia</span><span>Football Research Skill</span><span>Backtesting Lab</span><span>Monte Carlo</span><span>Agent Arena</span><span>Governance Center</span><span>Fantasy IA</span><span>Telegram</span>
   </div>
 </section>
 <main class='wrap'>
+  <section id='plataforma' class='section big module-banner'>
+    <div>
+      <div class='feature-tag'>Nova camada de produto</div>
+      <h3>Da leitura ao vivo ao laboratório quantitativo, sem trocar de sistema.</h3>
+      <p class='muted'>Em vez de um painel isolado, o ApexGol agora reúne operação live, memória IA, análise histórica, simulação e aprovação humana em um fluxo só. O operador ganha clareza. O gestor ganha rastreabilidade. A IA ganha contexto real para evoluir.</p>
+      <div class='hero-actions'>
+        <a class='btn primary' href='/app/jogosdodia'>Abrir live center</a>
+        <a class='btn' href='/app/football-analysis'>Explorar analysis</a>
+      </div>
+    </div>
+    <div class='module-shell' aria-label='Preview do ecossistema ApexGol'>
+      <div class='module-shell-top'>
+        <strong>ApexGol live + quant workspace</strong>
+        <div class='status-pill'><span class='status-dot'></span>camadas integradas</div>
+      </div>
+      <div class='module-shell-grid'>
+        <div class='shell-list'>
+          <div class='shell-line'><strong>Jogos do Dia</strong><span class='feature-tag'>Ao vivo</span><span class='good'>Odds + leitura</span></div>
+          <div class='shell-line'><strong>Football Analysis</strong><span class='feature-tag'>Pré-jogo</span><span class='warn'>Poisson + EV</span></div>
+          <div class='shell-line'><strong>Backtesting Lab</strong><span class='feature-tag'>Histórico</span><span class='good'>ROI / drawdown</span></div>
+          <div class='shell-line'><strong>Agent Arena</strong><span class='feature-tag'>Consenso</span><span>trust score</span></div>
+        </div>
+        <div class='shell-metrics'>
+          <div class='shell-metric'><span class='muted'>Mercados vivos</span><strong>Gols · Escanteios · Handicap</strong></div>
+          <div class='shell-metric'><span class='muted'>Aprendizado</span><strong>revisão pós-jogo + memória longa</strong></div>
+        </div>
+      </div>
+    </div>
+  </section>
   <section id='indicadores' class='section big opportunity'>
     <div>
       <div class='feature-tag'>Simulador de oportunidade</div>
@@ -1138,6 +1412,25 @@ def landing() -> str:
   <section class='section big'>
     <h2 class='display-title'>Seu método não foi feito para depender de <span class='accent-red'>achismo</span>.</h2>
     <p class='muted' style='text-align:center;max-width:760px;margin:0 auto'>A IA organiza sinais, contexto, risco e saída. Você decide com mais clareza e registra tudo para a próxima leitura ficar melhor.</p>
+  </section>
+  <section class='section big'>
+    <div class='story-grid'>
+      <article class='story-step'>
+        <div class='step-index'>Etapa 01</div>
+        <h3>A IA filtra o ruído antes do jogo.</h3>
+        <p class='muted'>Watchlist pré-jogo, score mínimo, odd válida, dados de forma, Poisson, EV e risco. O sistema já elimina o que não merece atenção.</p>
+      </article>
+      <article class='story-step'>
+        <div class='step-index'>Etapa 02</div>
+        <h3>Quando entra ao vivo, a leitura fica operacional.</h3>
+        <p class='muted'>Pressão, escanteios, gols, cartões, momentum, odds e consenso de agentes aparecem em uma mesa pronta para decidir com calma.</p>
+      </article>
+      <article class='story-step'>
+        <div class='step-index'>Etapa 03</div>
+        <h3>Depois do jogo, a IA aprende com o que realmente aconteceu.</h3>
+        <p class='muted'>Backtesting, revisão pós-jogo, memória longa, drift, governança e estratégia em rascunho mantêm o sistema evoluindo sem improviso.</p>
+      </article>
+    </div>
   </section>
   <section id='poderes' class='section big grid g3'>
     <div class='card feature-card'>
@@ -1171,6 +1464,146 @@ def landing() -> str:
       <p class='muted'>Scanner, mercado, ao vivo, entradas, histórico, rankings e comercial no mesmo ambiente.</p>
     </div>
   </section>
+  <section id='research' class='section big'>
+    <h2 class='display-title'>Football Research Skill e plataforma global de inteligência.</h2>
+    <p class='muted' style='text-align:center;max-width:820px;margin:0 auto 18px'>A camada nova não substitui o que já funciona. Ela amplia: histórico, simulações, governança, agentes, RAG e explicabilidade ficam plugados sobre o ApexGol atual.</p>
+    <div class='module-grid'>
+      <article class='module-card'>
+        <div class='module-head'>
+          <div>
+            <div class='feature-tag'>Pesquisa</div>
+            <h3>Football Analysis</h3>
+          </div>
+          <span class='status-pill'><span class='status-dot'></span>pré-jogo</span>
+        </div>
+        <p class='muted'>Média de gols, força ofensiva, força defensiva, casa/fora, Poisson, odd justa, EV e stake sugerida em modo paper.</p>
+        <ul class='module-list'>
+          <li>Poisson 0x0 até 6x6</li>
+          <li>Probabilidade casa / empate / fora</li>
+          <li>Over/Under e BTTS</li>
+        </ul>
+      </article>
+      <article class='module-card'>
+        <div class='module-head'>
+          <div>
+            <div class='feature-tag'>Simulação</div>
+            <h3>Backtesting + Monte Carlo</h3>
+          </div>
+          <span class='status-pill'><span class='status-dot'></span>risk first</span>
+        </div>
+        <p class='muted'>Antes de confiar em uma regra, o sistema simula série histórica, curva de banca, drawdown e risco de ruína.</p>
+        <div class='module-kpi-row'>
+          <div class='module-kpi'><span class='muted'>ROI</span><strong>histórico</strong></div>
+          <div class='module-kpi'><span class='muted'>Drawdown</span><strong>máximo</strong></div>
+          <div class='module-kpi'><span class='muted'>Ruína</span><strong>simulada</strong></div>
+        </div>
+      </article>
+      <article class='module-card'>
+        <div class='module-head'>
+          <div>
+            <div class='feature-tag'>Orquestração</div>
+            <h3>Agent Arena + Governance</h3>
+          </div>
+          <span class='status-pill'><span class='status-dot'></span>supervisão humana</span>
+        </div>
+        <p class='muted'>Agentes especializados debatem contexto, risco, valor e qualidade de dados. Mudanças importantes ficam em rascunho até aprovação.</p>
+        <ul class='module-list'>
+          <li>Consensus engine com trust score</li>
+          <li>Detecção de drift e anomalia</li>
+          <li>Rollback e change history</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+  <section class='section big'>
+    <div class='proof-wall'>
+      <article class='preview-card'>
+        <div class='preview-top'>
+          <div style='display:flex;align-items:center;gap:10px'>
+            <div class='window-dots'><span></span><span></span><span></span></div>
+            <strong>Live Center · Jogos do Dia</strong>
+          </div>
+          <div class='status-pill'><span class='status-dot'></span>scanner vivo</div>
+        </div>
+        <div class='preview-body'>
+          <div class='signal-strip'>
+            <span>Ao vivo 03</span>
+            <span>Pré 12</span>
+            <span>Próxima leitura 20s</span>
+            <span>Somente ao vivo</span>
+          </div>
+          <div class='preview-grid'>
+            <div class='preview-panel'>
+              <div class='preview-list'>
+                <div class='preview-item'>
+                  <div>
+                    <strong>São Paulo x Bahia</strong>
+                    <div class='muted'>21' · 1 x 0 · confiança 76%</div>
+                    <div class='odd-row'>
+                      <div class='odd-pill'>Casa 1.35</div>
+                      <div class='odd-pill'>Empate 4.90</div>
+                      <div class='odd-pill'>Fora 8.00</div>
+                    </div>
+                  </div>
+                  <span class='feature-tag'>Gols</span>
+                </div>
+                <div class='preview-item'>
+                  <div>
+                    <strong>Flamengo x Vasco</strong>
+                    <div class='muted'>22' · monitorar agora · pressão 79 x 64</div>
+                    <div class='odd-row'>
+                      <div class='odd-pill'>Over 3.5</div>
+                      <div class='odd-pill'>Odd 2.26</div>
+                      <div class='odd-pill'>Handicap</div>
+                    </div>
+                  </div>
+                  <span class='feature-tag'>Live</span>
+                </div>
+              </div>
+            </div>
+            <div class='preview-panel'>
+              <div class='feature-tag'>Painel lateral</div>
+              <h3 style='font-size:28px;margin:12px 0 8px'>Leitura por mercado</h3>
+              <p class='muted'>Pressão, corrida para o gol, leitura IA, cantos, odds e consenso sem sair da mesa operacional.</p>
+              <div class='bar-rail'><span style='width:68%'></span></div>
+              <div class='signal-strip' style='margin-top:10px'>
+                <span>Gols</span>
+                <span>Escanteios</span>
+                <span>Handicap</span>
+                <span>Cartões</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+      <div class='mini-proof-grid'>
+        <article class='mini-proof'>
+          <div class='feature-tag'>Backtesting Lab</div>
+          <h4>ROI, drawdown e curva de banca</h4>
+          <p class='muted'>Antes de confiar numa regra, o sistema mede desempenho histórico, estabilidade e risco por mercado.</p>
+          <div class='bar-rail'><span style='width:74%'></span></div>
+        </article>
+        <article class='mini-proof'>
+          <div class='feature-tag'>Agent Arena</div>
+          <h4>Agentes com trust score</h4>
+          <p class='muted'>Stats, odds, risco, valor e explicabilidade debatem entre si antes de gerar uma decisão final.</p>
+          <div class='bar-rail'><span style='width:61%'></span></div>
+        </article>
+        <article class='mini-proof'>
+          <div class='feature-tag'>Monte Carlo</div>
+          <h4>Simulação de cenários extremos</h4>
+          <p class='muted'>A plataforma testa caminho de banca, risco de ruína e estabilidade antes de você confiar na série.</p>
+          <div class='bar-rail'><span style='width:53%'></span></div>
+        </article>
+        <article class='mini-proof'>
+          <div class='feature-tag'>Governança</div>
+          <h4>Mudanças com aprovação humana</h4>
+          <p class='muted'>Estratégias novas entram como rascunho, ficam logadas e só podem ser ativadas com aprovação.</p>
+          <div class='bar-rail'><span style='width:88%'></span></div>
+        </article>
+      </div>
+    </div>
+  </section>
   <section class='section big'>
     <h2 class='display-title'>Escolha seu plano de operação</h2>
     <p class='muted' style='text-align:center;margin:0 auto 18px;max-width:680px'>Comece testando. Evolua quando precisar de mais memória, prioridade e estrutura comercial.</p>
@@ -1200,6 +1633,23 @@ def landing() -> str:
       </div>
     </div>
     <div class='grid g3'>{''.join(plan_html)}</div>
+  </section>
+  <section id='planos' class='section big cta-panel'>
+    <div>
+      <div class='feature-tag'>Pronto para crescer</div>
+      <h3>Comece no live center e evolua até um laboratório próprio de decisão.</h3>
+      <p class='muted'>Você não precisa esperar a estrutura perfeita para começar. O ApexGol já nasce com scanner, memória, Telegram, Fantasy e painéis operacionais. Quando quiser subir o nível, a camada de research, backtesting, agentes e governança já está na mesma base.</p>
+      <div class='hero-actions'>
+        <a class='btn primary' href='/signup'>Criar conta</a>
+        <a class='btn' href='/login'>Entrar no sistema</a>
+      </div>
+    </div>
+    <div class='cta-proof'>
+      <div class='mini'><span class='muted'>Ao vivo</span><strong>Jogos do Dia</strong><div class='muted'>watchlist, odds, filtros e leitura por mercado</div></div>
+      <div class='mini'><span class='muted'>Pesquisa</span><strong>Football Research Skill</strong><div class='muted'>Poisson, EV, Kelly, histórico e revisão</div></div>
+      <div class='mini'><span class='muted'>Simulação</span><strong>Backtesting + Monte Carlo</strong><div class='muted'>curva de banca, drawdown e cenários</div></div>
+      <div class='mini'><span class='muted'>Controle</span><strong>Governança</strong><div class='muted'>aprovação humana, logs e rollback</div></div>
+    </div>
   </section>
   <section class='section big card'>
     <h3 class='title'>Aviso importante</h3>

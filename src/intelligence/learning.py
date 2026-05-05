@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -25,9 +26,16 @@ def summarize_history(history: list[dict[str, Any]]) -> dict[str, Any]:
         "by_league": _top_rates(settled, "league"),
         "by_team": _top_rates(settled, "team"),
         "by_market": _top_rates(settled, "market"),
+        "league_breakdown": _performance_breakdown(settled, "league"),
+        "market_breakdown": _performance_breakdown(settled, "market"),
         "by_action": _top_rates(settled, "action"),
+        "by_review_label": _top_rates(settled, "review_label"),
         "by_confidence_bucket": _confidence_buckets(settled),
         "backtest": _backtest(settled),
+        "best_market": _best_row(_performance_breakdown(settled, "market")),
+        "worst_market": _worst_row(_performance_breakdown(settled, "market")),
+        "best_league": _best_row(_performance_breakdown(settled, "league")),
+        "worst_league": _worst_row(_performance_breakdown(settled, "league")),
         "recent_form": [item.get("outcome") for item in settled[:10]],
         "fast_learning": _fast_learning(settled),
     }
@@ -178,6 +186,54 @@ def _top_rates(items: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     return ranked[:5]
 
 
+def _performance_breakdown(items: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        for key in _group_keys(item, field):
+            groups[key].append(item)
+
+    rows: list[dict[str, Any]] = []
+    for key, group in groups.items():
+        if len(group) < 1:
+            continue
+        rate = _rate(group)
+        profit = _profit_units(group)
+        roi = _roi_units(group)
+        drawdown = _drawdown_units(group)
+        entries = rate["total"]
+        observation = entries >= 5 and roi < 0
+        rows.append(
+            {
+                "name": key,
+                "category": _market_bucket_name(key) if field == "market" else key,
+                "entries": entries,
+                "greens": rate["wins"],
+                "reds": rate["losses"],
+                "hit_rate": rate["hit_rate"],
+                "profit_units": profit,
+                "roi_units": roi,
+                "drawdown_units": drawdown,
+                "status": "observacao" if observation else "ok",
+                "notes": (
+                    "Liga em observacao"
+                    if field == "league" and observation
+                    else "Mercado em observacao"
+                    if field == "market" and observation
+                    else "Historico controlado"
+                ),
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            item["status"] != "ok",
+            -float(item.get("profit_units") or 0),
+            -float(item.get("hit_rate") or 0),
+            -int(item.get("entries") or 0),
+        )
+    )
+    return rows
+
+
 def _fast_learning(items: list[dict[str, Any]]) -> dict[str, Any]:
     recent_5 = items[:5]
     recent_10 = items[:10]
@@ -271,7 +327,7 @@ def _group_keys(item: dict[str, Any], field: str) -> list[str]:
         return [str(team) for team in (game.get("home"), game.get("away")) if team]
     if field == "market":
         value = item.get("entry_market") or item.get("market")
-        return [str(value)] if value else []
+        return [_market_bucket_name(str(value))] if value else []
     value = item.get(field)
     return [str(value)] if value else []
 
@@ -343,6 +399,105 @@ def _backtest(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def filtered_backtest(
+    history: list[dict[str, Any]],
+    *,
+    league: str = "all",
+    market: str = "all",
+    min_ev: float = 0.05,
+    min_confidence_score: float = 0.65,
+    odd_min: float = 1.60,
+    odd_max: float = 3.00,
+    bankroll_start: float = 1000.0,
+    lookback_days: int = 365,
+) -> dict[str, Any]:
+    items = []
+    for item in history or []:
+        if item.get("outcome") not in {"win", "loss"}:
+            continue
+        if league != "all":
+            row_league = str((item.get("game") or {}).get("league") or (item.get("game") or {}).get("division") or "").strip().lower()
+            if row_league != str(league).strip().lower():
+                continue
+        if market != "all":
+            row_market = _market_bucket_name(str(item.get("entry_market") or item.get("market") or ""))
+            if row_market.lower() != str(market).strip().lower():
+                continue
+        if _safe_float(item.get("expected_value")) < float(min_ev):
+            continue
+        if _safe_float(item.get("confidence_score")) < float(min_confidence_score):
+            continue
+        odd = _safe_float(item.get("entry_odds") or item.get("target_odds"))
+        if odd <= 0 or odd < float(odd_min) or odd > float(odd_max):
+            continue
+        if lookback_days > 0:
+            created_at = str(item.get("created_at") or "")
+            if not _within_lookback(created_at, lookback_days):
+                continue
+        items.append(item)
+
+    bankroll = float(bankroll_start)
+    peak = bankroll
+    max_drawdown = 0.0
+    wins = 0
+    losses = 0
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        stake = max(0.0, _safe_float(item.get("stake_value")))
+        profit_value = item.get("profit_value")
+        if profit_value is None:
+            units = _safe_float(item.get("profit_units"))
+            unit_value = max(1.0, stake) if stake else max(1.0, bankroll_start * 0.01)
+            profit_value = units * unit_value
+        profit_value = _safe_float(profit_value)
+        bankroll += profit_value
+        peak = max(peak, bankroll)
+        max_drawdown = max(max_drawdown, peak - bankroll)
+        if item.get("outcome") == "win":
+            wins += 1
+        else:
+            losses += 1
+        rows.append(
+            {
+                "match": f"{((item.get('game') or {}).get('home') or '-')} x {((item.get('game') or {}).get('away') or '-')}",
+                "league": (item.get("game") or {}).get("league") or (item.get("game") or {}).get("division") or "-",
+                "market": _market_bucket_name(str(item.get("entry_market") or item.get("market") or "")),
+                "odd": _safe_float(item.get("entry_odds") or item.get("target_odds")),
+                "expected_value": _safe_float(item.get("expected_value")),
+                "confidence_score": _safe_float(item.get("confidence_score")),
+                "stake_value": stake,
+                "profit_value": round(profit_value, 2),
+                "outcome": item.get("outcome"),
+                "created_at": item.get("created_at"),
+            }
+        )
+    total_entries = wins + losses
+    total_stake = sum(_safe_float(item.get("stake_value")) for item in items)
+    profit_total = bankroll - bankroll_start
+    return {
+        "league": league,
+        "market": market,
+        "filters": {
+            "min_ev": min_ev,
+            "min_confidence_score": min_confidence_score,
+            "odd_min": odd_min,
+            "odd_max": odd_max,
+            "lookback_days": lookback_days,
+        },
+        "analyzed_games": len(history or []),
+        "entries": total_entries,
+        "greens": wins,
+        "reds": losses,
+        "hit_rate": round((wins / total_entries) * 100.0, 1) if total_entries else 0.0,
+        "roi_units": round((profit_total / total_stake) * 100.0, 1) if total_stake else 0.0,
+        "profit_units": round(profit_total, 2),
+        "start_bankroll": round(bankroll_start, 2),
+        "end_bankroll": round(bankroll, 2),
+        "max_drawdown_units": round(max_drawdown, 2),
+        "rows": rows[:120],
+    }
+
+
 def _sim_outcome(value: Any) -> str | None:
     label = str(value or "").strip().lower()
     if label == "green":
@@ -373,3 +528,65 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _drawdown_units(items: list[dict[str, Any]]) -> float:
+    if not items:
+        return 0.0
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for item in reversed(items):
+        equity += _profit_units([item])
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+    return round(abs(max_drawdown), 2)
+
+
+def _market_bucket_name(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if "1x2" in text or "resultado final" in text:
+        return "1X2"
+    if "over 2.5" in text or ("gols" in text and "over" in text and "2.5" in text):
+        return "Over 2.5"
+    if "under 2.5" in text or ("gols" in text and "under" in text and "2.5" in text):
+        return "Under 2.5"
+    if "btts" in text or "ambos marcam" in text:
+        return "BTTS"
+    return "Outros"
+
+
+def _best_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return max(
+        rows,
+        key=lambda row: (
+            _safe_float(row.get("profit_units")),
+            _safe_float(row.get("hit_rate")),
+            _safe_int(row.get("entries")),
+        ),
+    )
+
+
+def _worst_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return min(
+        rows,
+        key=lambda row: (
+            _safe_float(row.get("profit_units")),
+            _safe_float(row.get("hit_rate")),
+            -_safe_int(row.get("entries")),
+        ),
+    )
+
+
+def _within_lookback(value: str, lookback_days: int) -> bool:
+    if lookback_days <= 0:
+        return True
+    try:
+        created_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return (datetime.now(created_at.tzinfo) - created_at).days <= lookback_days

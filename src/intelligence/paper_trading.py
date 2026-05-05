@@ -31,7 +31,7 @@ def best_paper_entry(signals: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _row(signal: dict[str, Any], rec: dict[str, Any], game: dict[str, Any]) -> dict[str, Any]:
     action = rec.get("action") or signal.get("action") or "AGUARDAR"
     odds = rec.get("odds")
-    rank = _rank(action, odds)
+    rank = _rank(signal, action, odds)
     score = _paper_score(signal, rec)
     risk = _paper_risk(signal, score)
     return {
@@ -45,9 +45,17 @@ def _row(signal: dict[str, Any], rec: dict[str, Any], game: dict[str, Any]) -> d
         "line": rec.get("line") or "-",
         "odds": odds,
         "action": action,
+        "recommendation": signal.get("recommendation") or "Monitorar",
+        "entry_allowed": bool(signal.get("entry_allowed")),
         "entry": rec.get("entry") or "-",
         "reason": rec.get("reason") or signal.get("reason") or "-",
+        "ai_explanation": signal.get("ai_explanation") or rec.get("reason") or signal.get("reason") or "-",
         "confidence": int(signal.get("confidence") or 0),
+        "confidence_score": float(signal.get("confidence_score") or 0),
+        "expected_value": float(signal.get("expected_value") or 0),
+        "final_score": float(signal.get("final_score") or score),
+        "risk_level": signal.get("risk_level") or "-",
+        "market_category": signal.get("market_category") or signal.get("market") or "-",
         "score": score,
         "risk": risk,
         "rank": rank,
@@ -74,7 +82,7 @@ def _half_markets(signal: dict[str, Any], game: dict[str, Any]) -> list[dict[str
                 "action": action,
                 "entry": "Simular Over 0.5 gols no 1o tempo se a casa oferecer odd minima aceitavel",
                 "reason": "janela de primeiro tempo com pressao e placar ainda aberto.",
-                "rank": _rank(action, None) + 1,
+                "rank": _rank(signal, action, None) + 1,
             }
         )
     if 45 <= minute <= 78:
@@ -89,7 +97,7 @@ def _half_markets(signal: dict[str, Any], game: dict[str, Any]) -> list[dict[str
                 "action": action,
                 "entry": "Simular gol no 2o tempo; escolher linha conforme odd disponivel",
                 "reason": "segundo tempo com leitura de pressao sustentada.",
-                "rank": _rank(action, None) + 1,
+                "rank": _rank(signal, action, None) + 1,
             }
         )
     if 45 <= minute <= 78:
@@ -103,7 +111,7 @@ def _half_markets(signal: dict[str, Any], game: dict[str, Any]) -> list[dict[str
                 "action": "AGUARDAR",
                 "entry": f"Simular {target} para vencer o 2o tempo apenas se houver odd com valor",
                 "reason": "mercado dependente de odds especificas que a fonte atual pode nao entregar.",
-                "rank": _rank("AGUARDAR", None) + 2,
+                "rank": _rank(signal, "AGUARDAR", None) + 2,
             }
         )
     return rows
@@ -119,20 +127,36 @@ def _base_half(signal: dict[str, Any], game: dict[str, Any]) -> dict[str, Any]:
         "minute": game.get("minute", "-"),
         "league": game.get("division") or game.get("league") or "-",
         "confidence": int(signal.get("confidence") or 0),
+        "confidence_score": float(signal.get("confidence_score") or 0),
+        "expected_value": float(signal.get("expected_value") or 0),
+        "recommendation": signal.get("recommendation") or "Monitorar",
+        "entry_allowed": bool(signal.get("entry_allowed")),
+        "risk_level": signal.get("risk_level") or "-",
+        "final_score": float(signal.get("final_score") or score),
         "score": score,
         "risk": risk,
     }
 
 
-def _rank(action: str, odds: Any) -> int:
-    if action == "ENTRAR" and odds:
+def _rank(signal: dict[str, Any], action: str, odds: Any) -> int:
+    recommendation = str(signal.get("recommendation") or "").lower()
+    entry_allowed = bool(signal.get("entry_allowed"))
+    if "entrada forte" in recommendation and entry_allowed:
         return 0
-    if action == "ENTRAR":
+    if "entrada moderada" in recommendation and entry_allowed:
         return 1
-    if action == "AGUARDAR" and odds:
-        return 2
-    if action == "AGUARDAR":
+    if "monitor" in recommendation or "aguardar" in recommendation:
         return 3
+    if "ignorar" in recommendation or "valor baixo" in recommendation:
+        return 6
+    if action == "ENTRAR" and odds:
+        return 2
+    if action == "ENTRAR":
+        return 3
+    if action == "AGUARDAR" and odds:
+        return 4
+    if action == "AGUARDAR":
+        return 5
     return 9
 
 

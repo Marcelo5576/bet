@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
+from src.cache import CacheResult, get_runtime_cache
+from src.rate_limiter import get_provider_limiter, retry_after_seconds, sanitize_text
 from src.usage_metrics import UsageTracker, estimate_text_tokens
+
+_GEMINI_PROVIDER = "gemini"
+_GEMINI_BACKOFF_DELAYS = (2, 5, 10, 30)
 
 
 async def refine_signal(
@@ -14,8 +20,34 @@ async def refine_signal(
     usage_tracker: UsageTracker | None = None,
     input_cost_per_1m_brl: float = 0.0,
     output_cost_per_1m_brl: float = 0.0,
+    *,
+    max_rpm: int = 10,
+    ttl_seconds: int = 90,
+    cooldown_seconds: int = 60,
+    min_score: int = 60,
+    min_confidence: int = 55,
 ) -> dict:
     if not api_key:
+        return signal
+    cache = get_runtime_cache()
+    limiter = get_provider_limiter()
+    cache_key = _refine_cache_key(signal)
+    cached = cache.get(cache_key)
+    if cached:
+        return _apply_cached_refine(signal, cached)
+    if not _should_refine_signal(signal, min_score=min_score, min_confidence=min_confidence):
+        return signal
+
+    fallback_cached = cache.get(cache_key, allow_stale=True)
+    decision = limiter.acquire(_GEMINI_PROVIDER, max_rpm)
+    if not decision.allowed:
+        if fallback_cached:
+            return _apply_cached_refine(signal, fallback_cached)
+        signal["gemini_note"] = (
+            "Gemini em espera por limite local."
+            if not decision.cooling_down
+            else "Gemini em cooldown temporario."
+        )
         return signal
 
     model_name = model.removeprefix("models/")
@@ -34,16 +66,14 @@ async def refine_signal(
         f"{model_name}:generateContent"
     )
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                url,
-                params={"key": api_key},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            text = payload["candidates"][0]["content"]["parts"][0]["text"]
+        payload, text, response_bytes = await _call_gemini(
+            url=url,
+            api_key=api_key,
+            prompt=prompt,
+            cooldown_seconds=cooldown_seconds,
+        )
     except Exception as exc:
+        error_text = sanitize_text(str(exc), api_key)
         _track_gemini(
             usage_tracker,
             operation="refine_signal",
@@ -52,11 +82,13 @@ async def refine_signal(
             usage=None,
             response_bytes=0,
             success=False,
-            error=exc,
+            error=error_text,
             input_cost_per_1m_brl=input_cost_per_1m_brl,
             output_cost_per_1m_brl=output_cost_per_1m_brl,
         )
-        signal["gemini_note"] = f"Gemini indisponivel: {exc}"
+        if fallback_cached:
+            return _apply_cached_refine(signal, fallback_cached)
+        signal["gemini_note"] = f"Gemini indisponivel: {error_text}"
         return signal
 
     _track_gemini(
@@ -65,13 +97,15 @@ async def refine_signal(
         prompt=prompt,
         response_text=text,
         usage=payload.get("usageMetadata"),
-        response_bytes=len(response.content),
+        response_bytes=response_bytes,
         success=True,
         error=None,
         input_cost_per_1m_brl=input_cost_per_1m_brl,
         output_cost_per_1m_brl=output_cost_per_1m_brl,
     )
-    signal["gemini_note"] = text.strip()[:1200]
+    note = text.strip()[:1200]
+    cache.set(cache_key, {"note": note}, ttl_seconds, stale_seconds=max(ttl_seconds * 6, cooldown_seconds * 2))
+    signal["gemini_note"] = note
     return signal
 
 
@@ -83,9 +117,17 @@ async def answer_question(
     usage_tracker: UsageTracker | None = None,
     input_cost_per_1m_brl: float = 0.0,
     output_cost_per_1m_brl: float = 0.0,
+    *,
+    max_rpm: int = 10,
+    cooldown_seconds: int = 60,
 ) -> str:
     if not api_key:
         return "Gemini nao esta configurado no momento."
+    decision = get_provider_limiter().acquire(_GEMINI_PROVIDER, max_rpm)
+    if not decision.allowed:
+        if decision.cooling_down:
+            return "IA em cooldown rapido para respeitar o limite do provider. Tente de novo em instantes."
+        return "IA em espera por limite local de requisicoes. Vamos tentar de novo daqui a pouco."
 
     model_name = model.removeprefix("models/")
     prompt = (
@@ -107,29 +149,27 @@ async def answer_question(
         f"{model_name}:generateContent"
     )
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                url,
-                params={"key": api_key},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            text = payload["candidates"][0]["content"]["parts"][0]["text"]
-            _track_gemini(
-                usage_tracker,
-                operation="answer_question",
-                prompt=prompt,
-                response_text=text,
-                usage=payload.get("usageMetadata"),
-                response_bytes=len(response.content),
-                success=True,
-                error=None,
-                input_cost_per_1m_brl=input_cost_per_1m_brl,
-                output_cost_per_1m_brl=output_cost_per_1m_brl,
-            )
-            return text.strip()[:1400]
+        payload, text, response_bytes = await _call_gemini(
+            url=url,
+            api_key=api_key,
+            prompt=prompt,
+            cooldown_seconds=cooldown_seconds,
+        )
+        _track_gemini(
+            usage_tracker,
+            operation="answer_question",
+            prompt=prompt,
+            response_text=text,
+            usage=payload.get("usageMetadata"),
+            response_bytes=response_bytes,
+            success=True,
+            error=None,
+            input_cost_per_1m_brl=input_cost_per_1m_brl,
+            output_cost_per_1m_brl=output_cost_per_1m_brl,
+        )
+        return text.strip()[:1400]
     except Exception as exc:
+        error_text = sanitize_text(str(exc), api_key)
         _track_gemini(
             usage_tracker,
             operation="answer_question",
@@ -138,11 +178,11 @@ async def answer_question(
             usage=None,
             response_bytes=0,
             success=False,
-            error=exc,
+            error=error_text,
             input_cost_per_1m_brl=input_cost_per_1m_brl,
             output_cost_per_1m_brl=output_cost_per_1m_brl,
         )
-        return f"Gemini indisponivel agora: {exc}"
+        return f"Gemini indisponivel agora: {error_text}"
 
 
 def _track_gemini(
@@ -154,7 +194,7 @@ def _track_gemini(
     usage: dict[str, Any] | None,
     response_bytes: int,
     success: bool,
-    error: Exception | None,
+    error: Exception | str | None,
     input_cost_per_1m_brl: float,
     output_cost_per_1m_brl: float,
 ) -> None:
@@ -186,5 +226,125 @@ def _track_gemini(
         response_bytes=response_bytes,
         estimated_cost_brl=estimated_cost_brl,
         operation=operation,
-        error=str(error)[:240] if error else None,
+        error=sanitize_text(str(error), None)[:240] if error else None,
     )
+
+
+async def _call_gemini(
+    *,
+    url: str,
+    api_key: str,
+    prompt: str,
+    cooldown_seconds: int,
+) -> tuple[dict[str, Any], str, int]:
+    last_error: Exception | None = None
+    for attempt, fallback_delay in enumerate(_GEMINI_BACKOFF_DELAYS, start=1):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    url,
+                    params={"key": api_key},
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                )
+            if response.status_code == 429:
+                last_error = RuntimeError(_gemini_429_message(response))
+                delay = retry_after_seconds(response.headers.get("Retry-After")) or fallback_delay
+                if attempt >= len(_GEMINI_BACKOFF_DELAYS):
+                    break
+                await asyncio.sleep(delay)
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            text = payload["candidates"][0]["content"]["parts"][0]["text"]
+            return payload, text, len(response.content)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                last_error = RuntimeError(_gemini_429_message(exc.response))
+                delay = retry_after_seconds(exc.response.headers.get("Retry-After")) or fallback_delay
+                if attempt >= len(_GEMINI_BACKOFF_DELAYS):
+                    break
+                await asyncio.sleep(delay)
+                continue
+            raise RuntimeError(sanitize_text(str(exc), api_key)) from exc
+        except Exception as exc:
+            raise RuntimeError(sanitize_text(str(exc), api_key)) from exc
+    get_provider_limiter().cooldown(
+        _GEMINI_PROVIDER,
+        cooldown_seconds,
+        reason="429 do Gemini",
+    )
+    if last_error:
+        raise RuntimeError(sanitize_text(str(last_error), api_key))
+    raise RuntimeError("Gemini indisponivel.")
+
+
+def _apply_cached_refine(signal: dict[str, Any], cached: CacheResult) -> dict[str, Any]:
+    payload = cached.value if isinstance(cached.value, dict) else {"note": str(cached.value or "")}
+    note = str(payload.get("note") or "").strip()
+    if note:
+        signal["gemini_note"] = note[:1200]
+    signal["gemini_cached"] = True
+    signal["gemini_cache_age_seconds"] = cached.age_seconds
+    return signal
+
+
+def _refine_cache_key(signal: dict[str, Any]) -> str:
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    game_id = str(game.get("game_id") or signal.get("signal_id") or "unknown").strip().lower()
+    market = str(signal.get("market") or _best_market_from_signal(signal) or "default").strip().lower()
+    market = "".join(ch if ch.isalnum() else "_" for ch in market).strip("_") or "default"
+    return f"refine_signal:{game_id}:{market}"
+
+
+def _should_refine_signal(signal: dict[str, Any], *, min_score: int, min_confidence: int) -> bool:
+    score = _safe_int(signal.get("entry_score"))
+    confidence = _safe_int(signal.get("confidence"))
+    odd = _signal_target_odd(signal)
+    if odd is None or odd <= 1.0:
+        return False
+    return score >= int(min_score or 0) or confidence >= int(min_confidence or 0)
+
+
+def _signal_target_odd(signal: dict[str, Any]) -> float | None:
+    target = _safe_float(signal.get("target_odds"))
+    if target and target > 1.0:
+        return target
+    for rec in signal.get("market_recommendations") or []:
+        if not isinstance(rec, dict):
+            continue
+        odds = _safe_float(rec.get("odds"))
+        if odds and odds > 1.0:
+            return odds
+    return None
+
+
+def _best_market_from_signal(signal: dict[str, Any]) -> str:
+    for rec in signal.get("market_recommendations") or []:
+        if not isinstance(rec, dict):
+            continue
+        action = str(rec.get("action") or "").upper()
+        if action == "ENTRAR":
+            return str(rec.get("market") or "")
+    return str(signal.get("market") or "")
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        parsed = float(str(value).replace(",", "."))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return round(parsed, 3)
+
+
+def _gemini_429_message(response: httpx.Response) -> str:
+    retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+    if retry_after:
+        return f"Gemini em 429. Retry-After={retry_after}s."
+    return "Gemini em 429 por excesso de chamadas."

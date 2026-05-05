@@ -7,10 +7,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import paramiko
-
-
 ROOT = Path(__file__).resolve().parent
+
+for extra_dir in (".vendor", ".pylib", ".deps"):
+    candidate = ROOT / extra_dir
+    if candidate.exists():
+        sys.path.insert(0, str(candidate))
+
+import paramiko
 REMOTE_ROOT = "/opt/betsignal-cloud"
 DEFAULT_HOST = "2.24.217.214"
 DEFAULT_USER = "root"

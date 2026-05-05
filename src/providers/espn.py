@@ -228,6 +228,27 @@ def _attach_live_facts(markets: dict, home_stats: dict[str, str], away_stats: di
         "away": away_corners,
         "total": max(0, home_corners + away_corners),
     }
+    enriched["live_facts"] = {
+        "possession_home": _as_float(home_stats.get("possessionPct"), 50.0),
+        "possession_away": _as_float(away_stats.get("possessionPct"), 50.0),
+        "shots_home": _as_int(home_stats.get("totalShots")),
+        "shots_away": _as_int(away_stats.get("totalShots")),
+        "shots_on_home": _as_int(home_stats.get("shotsOnTarget")),
+        "shots_on_away": _as_int(away_stats.get("shotsOnTarget")),
+        "corners_home": home_corners,
+        "corners_away": away_corners,
+        "yellow_home": _as_int(home_stats.get("yellowCards")),
+        "yellow_away": _as_int(away_stats.get("yellowCards")),
+        "red_home": _as_int(home_stats.get("redCards")),
+        "red_away": _as_int(away_stats.get("redCards")),
+    }
+    enriched.setdefault("cards", {})
+    enriched["cards"]["live"] = {
+        "yellow_home": _as_int(home_stats.get("yellowCards")),
+        "yellow_away": _as_int(away_stats.get("yellowCards")),
+        "red_home": _as_int(home_stats.get("redCards")),
+        "red_away": _as_int(away_stats.get("redCards")),
+    }
     return enriched
 
 

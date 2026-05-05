@@ -1,7 +1,11 @@
 from dataclasses import dataclass
 import os
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - fallback para runtimes enxutos
+    def load_dotenv(*args, **kwargs):
+        return False
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -43,9 +47,20 @@ class Settings:
     odds_api_io_key: str | None
     odds_api_io_base_url: str
     odds_api_io_bookmakers: str
+    gemini_max_rpm: int
+    odds_max_rpm: int
+    events_live_ttl: int
+    odds_event_ttl: int
+    refine_signal_ttl: int
+    provider_cooldown_429: int
+    min_score_to_refine: int
+    min_confidence_to_refine: int
     gemini_api_key: str | None
     gemini_model: str
     state_file: str
+    brain_enabled: bool
+    brain_db_file: str
+    decision_audit_db_file: str
     min_confidence: int
     bankroll: float
     unit_percent: float
@@ -115,9 +130,9 @@ def load_settings() -> Settings:
         plan_pro_price_brl=float(os.getenv("PLAN_PRO_PRICE_BRL", "197")),
         plan_team_price_brl=float(os.getenv("PLAN_TEAM_PRICE_BRL", "497")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
-        scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "300")),
-        idle_scan_interval_seconds=int(os.getenv("IDLE_SCAN_INTERVAL_SECONDS", "60")),
-        active_scan_interval_seconds=int(os.getenv("ACTIVE_SCAN_INTERVAL_SECONDS", "120")),
+        scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "20")),
+        idle_scan_interval_seconds=int(os.getenv("IDLE_SCAN_INTERVAL_SECONDS", "20")),
+        active_scan_interval_seconds=int(os.getenv("ACTIVE_SCAN_INTERVAL_SECONDS", "20")),
         pregame_scan_interval_seconds=int(os.getenv("PREGAME_SCAN_INTERVAL_SECONDS", "300")),
         pregame_lead_minutes=max(15, min(360, int(os.getenv("PREGAME_LEAD_MINUTES", "150")))),
         pregame_shortlist_limit=max(4, min(24, int(os.getenv("PREGAME_SHORTLIST_LIMIT", "12")))),
@@ -127,16 +142,34 @@ def load_settings() -> Settings:
             "API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io"
         ).rstrip("/"),
         football_data_org_token=(os.getenv("FOOTBALL_DATA_ORG_TOKEN") or "").strip() or None,
-        odds_api_io_key=(os.getenv("ODDS_API_IO_KEY") or "").strip() or None,
+        odds_api_io_key=(
+            (os.getenv("ODDS_API_KEY") or "").strip()
+            or (os.getenv("ODDS_API_IO_KEY") or "").strip()
+            or None
+        ),
         odds_api_io_base_url=os.getenv(
             "ODDS_API_IO_BASE_URL", "https://api.odds-api.io/v3"
         ).rstrip("/"),
         odds_api_io_bookmakers=(
             os.getenv("ODDS_API_IO_BOOKMAKERS", "Bet365").strip() or "Bet365"
         ),
+        gemini_max_rpm=max(1, int(os.getenv("GEMINI_MAX_RPM", "10"))),
+        odds_max_rpm=max(1, int(os.getenv("ODDS_MAX_RPM", "20"))),
+        events_live_ttl=max(5, int(os.getenv("EVENTS_LIVE_TTL", "20"))),
+        odds_event_ttl=max(10, int(os.getenv("ODDS_EVENT_TTL", "30"))),
+        refine_signal_ttl=max(30, int(os.getenv("REFINE_SIGNAL_TTL", "90"))),
+        provider_cooldown_429=max(15, int(os.getenv("PROVIDER_COOLDOWN_429", "60"))),
+        min_score_to_refine=max(0, min(100, int(os.getenv("MIN_SCORE_TO_REFINE", "60")))),
+        min_confidence_to_refine=max(
+            0,
+            min(100, int(os.getenv("MIN_CONFIDENCE_TO_REFINE", "55"))),
+        ),
         gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         state_file=os.getenv("STATE_FILE", "data/state.json"),
+        brain_enabled=_as_bool(os.getenv("BRAIN_ENABLED"), True),
+        brain_db_file=os.getenv("BRAIN_DB_FILE", "data/football_brain.db"),
+        decision_audit_db_file=os.getenv("DECISION_AUDIT_DB_FILE", "data/decision_audit.db"),
         min_confidence=_as_confidence(os.getenv("MIN_CONFIDENCE"), 62),
         bankroll=float(os.getenv("BANKROLL", "1000")),
         unit_percent=float(os.getenv("UNIT_PERCENT", "1")),

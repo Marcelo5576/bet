@@ -15,22 +15,57 @@ def apply_risk_controls(
     kelly_fraction: float,
     unit_percent: float,
     max_stake_units: float,
+    *,
+    active_position: bool = False,
 ) -> dict:
     sample_size = int(learning_context.get("sample_size") or 0)
     edge = signal.get("value_edge")
     odds = signal.get("target_odds")
+    fair_odds = signal.get("fair_odds")
     probability = signal.get("estimated_probability")
     data_quality = int(signal.get("data_quality") or 0)
     fast_learning = learning_context.get("fast_learning") or {}
     original_units = float(signal.get("stake_units") or 0)
     original_value = float(signal.get("stake_value") or 0)
     base_unit_value = original_value / original_units if original_units > 0 else 0
+    minute = _safe_int((signal.get("game") or {}).get("minute"))
+    red_cards = _red_cards(signal)
     reasons = []
+    signal["entry_gate"] = "PASS"
+
+    if not active_position:
+        if minute < 15:
+            if signal.get("action") == "ENTRAR":
+                signal["action"] = "AGUARDAR"
+            signal["stake_units"] = 0
+            signal["entry_gate"] = "NO_BET"
+            reasons.append("janela 0-15: jogo ainda cru para entrada")
+        elif 35 <= minute <= 45:
+            if signal.get("action") == "ENTRAR":
+                signal["action"] = "AGUARDAR"
+            signal["stake_units"] = 0
+            signal["entry_gate"] = "NO_BET"
+            reasons.append("janela 35-45: risco de intervalo e ruido tatico")
+        elif minute >= 80:
+            if signal.get("action") == "ENTRAR":
+                signal["action"] = "AGUARDAR"
+            signal["stake_units"] = 0
+            signal["entry_gate"] = "NO_BET"
+            reasons.append("80+: somente gestao, sem nova entrada")
+        elif minute >= 75:
+            if signal.get("action") == "ENTRAR":
+                signal["action"] = "AGUARDAR"
+            signal["stake_units"] = 0
+            signal["entry_gate"] = "NO_BET"
+            reasons.append("75+: evitar entrada nova; manter apenas leitura de gestao")
+        elif 66 <= minute <= 75:
+            reasons.append("66-75: janela de gestao obrigatoria")
 
     if sample_size < min_history_for_enter:
         if signal.get("action") == "ENTRAR":
             signal["action"] = "AGUARDAR"
         signal["stake_units"] = 0
+        signal["entry_gate"] = "NO_BET"
         reasons.append(
             f"historico insuficiente ({sample_size}/{min_history_for_enter})"
         )
@@ -39,18 +74,30 @@ def apply_risk_controls(
         if signal.get("action") == "ENTRAR":
             signal["action"] = "AGUARDAR"
         signal["stake_units"] = 0
+        signal["entry_gate"] = "NO_BET"
         reasons.append(f"edge abaixo do minimo ({round(edge * 100, 1)}%)")
+
+    if odds and fair_odds and float(odds) <= float(fair_odds):
+        if signal.get("action") == "ENTRAR":
+            signal["action"] = "AGUARDAR"
+        signal["stake_units"] = 0
+        signal["entry_gate"] = "NO_BET"
+        reasons.append(
+            f"odd da casa sem valor frente a odd justa ({round(float(odds), 2)} <= {round(float(fair_odds), 2)})"
+        )
 
     if data_quality < 70:
         if signal.get("action") == "ENTRAR":
             signal["action"] = "AGUARDAR"
         signal["stake_units"] = 0
+        signal["entry_gate"] = "NO_BET"
         reasons.append(f"qualidade dos dados baixa ({data_quality}/100)")
 
     if _is_fast_defensive(fast_learning):
         if signal.get("action") == "ENTRAR":
             signal["action"] = "AGUARDAR"
         signal["stake_units"] = 0
+        signal["entry_gate"] = "NO_BET"
         reasons.append("aprendizado rapido em modo defensivo")
 
     cold_match = _matching_cold_pattern(signal, fast_learning)
@@ -58,7 +105,15 @@ def apply_risk_controls(
         if signal.get("action") == "ENTRAR":
             signal["action"] = "AGUARDAR"
         signal["stake_units"] = 0
+        signal["entry_gate"] = "NO_BET"
         reasons.append(f"padrao recente negativo: {cold_match}")
+
+    if red_cards > 0:
+        if signal.get("action") == "ENTRAR":
+            signal["action"] = "AGUARDAR"
+        signal["stake_units"] = 0
+        signal["entry_gate"] = "PAUSE"
+        reasons.append("cartao vermelho detectado: pausar 5 minutos e recalcular pressao")
 
     if signal.get("action") == "ENTRAR" and odds and probability:
         kelly_units = _fractional_kelly_units(
@@ -75,6 +130,8 @@ def apply_risk_controls(
         signal["stake_units"] = 0
 
     signal["stake_value"] = round(base_unit_value * float(signal.get("stake_units") or 0), 2)
+    signal["risk_pause_minutes"] = 5 if red_cards > 0 else 0
+    signal["minute_rule"] = _minute_rule_label(minute, active_position)
 
     note = "Entrada somente com confirmacao manual."
     if reasons:
@@ -208,6 +265,41 @@ def _matching_cold_pattern(signal: dict, fast_learning: dict) -> str | None:
             if name and name in terms:
                 return row.get("name")
     return None
+
+
+def _red_cards(signal: dict) -> int:
+    brain = signal.get("brain") if isinstance(signal.get("brain"), dict) else {}
+    facts = brain.get("facts") if isinstance(brain.get("facts"), dict) else {}
+    total = _safe_int(facts.get("red_home")) + _safe_int(facts.get("red_away"))
+    if total:
+        return total
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    markets = game.get("markets") if isinstance(game.get("markets"), dict) else {}
+    live_facts = markets.get("live_facts") if isinstance(markets.get("live_facts"), dict) else {}
+    return _safe_int(live_facts.get("red_home")) + _safe_int(live_facts.get("red_away"))
+
+
+def _minute_rule_label(minute: int, active_position: bool) -> str:
+    if minute < 15:
+        return "janela_crua"
+    if minute <= 35:
+        return "buscar_padrao"
+    if minute <= 45:
+        return "cuidado_intervalo"
+    if minute <= 65:
+        return "melhor_janela_live"
+    if minute <= 75:
+        return "gestao_obrigatoria"
+    if minute < 80:
+        return "evitar_nova_entrada" if not active_position else "gestao"
+    return "somente_gestao"
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _signal_terms(signal: dict) -> str:

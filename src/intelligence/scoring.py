@@ -7,6 +7,12 @@ def entry_score(signal: dict[str, Any], learning_context: dict[str, Any]) -> dic
     confidence = float(signal.get("confidence") or 0)
     data_quality = float(signal.get("data_quality") or 0)
     edge = signal.get("value_edge")
+    game = signal.get("game") or {}
+    minute = _safe_int(game.get("minute"))
+    home_pressure = _safe_int(game.get("home_pressure"))
+    away_pressure = _safe_int(game.get("away_pressure"))
+    home_shots_on = _safe_int(game.get("home_shots_on"))
+    away_shots_on = _safe_int(game.get("away_shots_on"))
     sample_size = int(learning_context.get("sample_size") or 0)
     brier = learning_context.get("brier_score")
     roi = float(learning_context.get("roi_units") or 0)
@@ -19,6 +25,10 @@ def entry_score(signal: dict[str, Any], learning_context: dict[str, Any]) -> dic
     score += _roi_points(roi)
     score += _brier_points(brier)
     score += _fast_learning_points(signal, learning_context.get("fast_learning") or {})
+    score += _live_pressure_points(home_pressure, away_pressure, home_shots_on, away_shots_on)
+    score += _minute_points(minute)
+    score += _price_points(signal)
+    score += _red_card_points(signal)
 
     if signal.get("risk_blocked"):
         score = 0
@@ -33,6 +43,7 @@ def entry_score(signal: dict[str, Any], learning_context: dict[str, Any]) -> dic
         "risk_score": 100 - score,
         "grade": _grade(score),
         "score_note": _note(score),
+        "decision_class": _decision_class(signal, score),
     }
 
 
@@ -170,3 +181,97 @@ def _note(score: int) -> str:
     if score >= 40:
         return "fraco; melhor acompanhar sem entrar."
     return "evitar entrada."
+
+
+def _minute_points(minute: int) -> float:
+    if minute <= 0:
+        return -8
+    if minute < 15:
+        return -8
+    if minute <= 35:
+        return 6
+    if minute <= 45:
+        return -3
+    if minute <= 65:
+        return 9
+    if minute <= 75:
+        return 2
+    if minute < 80:
+        return -6
+    return -12
+
+
+def _live_pressure_points(
+    home_pressure: int,
+    away_pressure: int,
+    home_shots_on: int,
+    away_shots_on: int,
+) -> float:
+    dominant_pressure = max(home_pressure, away_pressure)
+    pressure_gap = abs(home_pressure - away_pressure)
+    shots_total = home_shots_on + away_shots_on
+    shots_gap = abs(home_shots_on - away_shots_on)
+    points = 0.0
+    points += min(10, dominant_pressure * 0.08)
+    points += min(8, pressure_gap * 0.12)
+    points += min(10, shots_total * 1.5)
+    points += min(6, shots_gap * 1.25)
+    return points
+
+
+def _price_points(signal: dict[str, Any]) -> float:
+    target_odds = _safe_float(signal.get("target_odds"))
+    fair_odds = _safe_float(signal.get("fair_odds"))
+    edge = _safe_float(signal.get("value_edge"))
+    if target_odds is None or fair_odds is None:
+        return -2
+    if edge is not None and edge <= 0:
+        return -12
+    if target_odds <= fair_odds:
+        return -10
+    premium = (target_odds - fair_odds) / max(fair_odds, 1.0)
+    if premium >= 0.12:
+        return 8
+    if premium >= 0.05:
+        return 5
+    return 1
+
+
+def _red_card_points(signal: dict[str, Any]) -> float:
+    brain = signal.get("brain") if isinstance(signal.get("brain"), dict) else {}
+    facts = brain.get("facts") if isinstance(brain.get("facts"), dict) else {}
+    reds = _safe_int(facts.get("red_home")) + _safe_int(facts.get("red_away"))
+    if reds <= 0:
+        return 0
+    return -18
+
+
+def _decision_class(signal: dict[str, Any], score: int) -> str:
+    action = str(signal.get("action") or "").upper()
+    edge = _safe_float(signal.get("value_edge")) or 0.0
+    minute = _safe_int((signal.get("game") or {}).get("minute"))
+    if action == "SAIR":
+        return "SAI"
+    if action == "SEGURAR":
+        return "SEGURA"
+    if action == "ENTRAR" and score >= 82 and edge >= 0.05 and minute <= 75:
+        return "ENTRA_FORTE"
+    if action == "ENTRAR":
+        return "ENTRA_LEVE"
+    if action == "AGUARDAR" and score >= 55:
+        return "ESPERA"
+    return "NO_BET"
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

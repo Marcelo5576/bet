@@ -24,11 +24,19 @@ from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from services.footballQuantAiSkill.data_sources.api_football_provider import (
+    get_shared_api_football_provider,
+)
 from src.config import Settings, load_settings
+from src.decision_log import DecisionLogStore
+from src.football_quant_router import router as football_quant_router
+from src.global_ai_router import router as global_ai_router
 from src.integrations.supabase import SupabaseSink
-from src.intelligence.learning import summarize_history_with_simulation
+from src.intelligence.football_brain import get_football_brain
+from src.intelligence.learning import filtered_backtest, summarize_history_with_simulation
 from src.intelligence.manual_import import parse_manual_bets
 from src.intelligence.paper_trading import best_paper_entry, paper_opportunities
+from src.intelligence.scanner_presentation import build_scanner_decision
 from src.intelligence.rules import ranked_signals
 from src.intelligence.source_catalog import FOOTBALL_DATA_SOURCES
 from src.main import (
@@ -43,9 +51,12 @@ from src.portal import PortalStore, read_session_token
 from src.providers.base import provider_label
 from src.portal_web import router as portal_router
 from src.storage import StateStore
+from src.usage_metrics import UsageTracker
 
 app = FastAPI(title="BetSignal Cloud Dashboard")
 app.include_router(portal_router)
+app.include_router(football_quant_router)
+app.include_router(global_ai_router)
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -56,6 +67,25 @@ SESSION_COOKIE = "bs_session"
 def _build_stamp() -> str:
     stamp = datetime.fromtimestamp(Path(__file__).stat().st_mtime, timezone.utc)
     return stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _decision_log_store(settings: Settings) -> DecisionLogStore:
+    return DecisionLogStore(settings.decision_audit_db_file)
+
+
+def _usage_tracker(settings: Settings) -> UsageTracker:
+    return UsageTracker(settings.usage_metrics_db_file)
+
+
+def _football_api_provider(settings: Settings):
+    return get_shared_api_football_provider(
+        settings.api_football_key,
+        settings.api_football_base_url,
+        max_rpm=20,
+        cooldown_seconds=settings.provider_cooldown_429,
+        usage_tracker=_usage_tracker(settings),
+        cost_per_request_brl=settings.api_football_cost_per_request_brl,
+    )
 
 
 class ImportPayload(BaseModel):
@@ -102,10 +132,25 @@ class ScannerPreferencePayload(BaseModel):
     mode: str
 
 
+class RiskProfilePayload(BaseModel):
+    profile: str
+
+
 class SimulationRunPayload(BaseModel):
     games: int = 30
     bankroll: float = 100.0
     stake_percent: float = 10.0
+
+
+class QuickBacktestPayload(BaseModel):
+    league: str = "all"
+    market: str = "all"
+    min_ev: float = 0.05
+    min_confidence_score: float = 0.65
+    odd_min: float = 1.60
+    odd_max: float = 3.00
+    bankroll: float = 1000.0
+    lookback_days: int = 365
 
 
 class FantasyLineupPayload(BaseModel):
@@ -271,13 +316,16 @@ def dashboard(request: Request) -> str:
     active_entries = _active_entries(history, state.active_signal)
     active_entry_rows = "\n".join(_active_entry_row(item) for item in active_entries)
     simulation_signals = _simulation_signals(state, settings)
-    opportunities = paper_opportunities(simulation_signals)
+    opportunities = _sort_decision_items(paper_opportunities(simulation_signals))
+    decision_counts = _decision_status_counts(opportunities)
     live_lab_sessions = _visible_live_lab_sessions(state.simulation_sessions or [])
     simulation_history_panel = _simulation_history_panel(live_lab_sessions)
     simulation_rows = "\n".join(_simulation_row(item) for item in opportunities)
     thermometer_rows = _thermometer_rows(opportunities)
     default_signal = simulation_signals[0] if simulation_signals else None
+    default_game_id = (default_signal.get("game") or {}).get("game_id") if default_signal else None
     match_stats = _match_stats_panel(default_signal, visible_history)
+    dashboard_live_feed = _dashboard_live_feed(opportunities, default_game_id)
     best_simulation = _best_simulation(best_paper_entry(simulation_signals))
     latest_real_session = next(
         (
@@ -320,6 +368,27 @@ def dashboard(request: Request) -> str:
     product_name = _esc(settings.product_name)
     product_tagline = _esc(settings.product_tagline)
     build_stamp = _build_stamp()
+    brain = get_football_brain(settings)
+    brain_status = brain.status() if brain else {"enabled": False}
+    menu_panel = _dashboard_menu_panel(build_stamp, user, learning, brain_status)
+    decision_store = _decision_log_store(settings)
+    latest_backtests = decision_store.latest_backtests(limit=12)
+    backtest_focus = latest_backtests[0] if latest_backtests else None
+    quick_backtest_panel = _quick_backtest_panel(backtest_focus)
+    quick_backtest_history = _quick_backtest_history_panel(latest_backtests)
+    market_breakdown_panel = _performance_breakdown_panel(
+        "Mercados em performance",
+        learning.get("market_breakdown") or [],
+        empty_label="Sem mercados suficientes fechados ainda para comparar ROI.",
+    )
+    league_breakdown_panel = _performance_breakdown_panel(
+        "Ligas em performance",
+        learning.get("league_breakdown") or [],
+        empty_label="Sem ligas suficientes fechadas ainda para comparar ROI.",
+    )
+    blocked_count = decision_counts.get("DO_NOT_ENTER", 0) + decision_counts.get("NO_DATA", 0)
+    strong_count = decision_counts.get("ENTER_NOW", 0)
+    monitor_count = decision_counts.get("WAIT_CONFIRMATION", 0)
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -413,31 +482,98 @@ def dashboard(request: Request) -> str:
       align-items: center;
       display: flex;
       justify-content: space-between;
-      gap: 16px;
+      gap: 14px;
       margin: 0 auto;
-      min-height: 58px;
-      padding: 10px 18px;
+      min-height: 66px;
+      padding: 12px 16px;
+    }}
+    .topbar-left {{
+      align-items: center;
+      display: flex;
+      gap: 12px;
+      min-width: 0;
     }}
     .topbar-actions {{
       align-items: center;
       display: flex;
       gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }}
+    .topbar-quick {{
+      align-items: center;
+      display: inline-flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }}
+    .topbar-pill {{
+      align-items: center;
+      background: linear-gradient(180deg, #101922, #0c131b);
+      border: 1px solid #274253;
+      border-radius: 999px;
+      color: #dce9f6;
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 800;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 12px;
+      white-space: nowrap;
+    }}
+    .topbar-pill .dot {{
+      background: #18c774;
+      border-radius: 999px;
+      box-shadow: 0 0 0 4px rgba(24,199,116,.12);
+      height: 8px;
+      width: 8px;
+    }}
+    .menu-trigger {{
+      align-items: center;
+      background: linear-gradient(180deg, #0f1720, #091018);
+      border: 1px solid #254150;
+      border-radius: 12px;
+      color: #f2f7fb;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 900;
+      gap: 10px;
+      min-height: 42px;
+      padding: 0 14px;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }}
+    .menu-trigger:hover {{
+      transform: translateY(-1px);
+      border-color: #4fd6b1;
+    }}
+    .menu-trigger-bars {{
+      display: inline-grid;
+      gap: 3px;
+    }}
+    .menu-trigger-bars span {{
+      background: currentColor;
+      border-radius: 999px;
+      display: block;
+      height: 2px;
+      width: 16px;
     }}
     .theme-toggle {{
       align-items: center;
-      background: var(--panel-2);
-      border: 1px solid #39414d;
+      background: #131d28;
+      border: 1px solid #334b60;
       border-radius: 999px;
-      color: var(--text);
+      color: #eef5fb;
       cursor: pointer;
       display: inline-flex;
       font-size: 12px;
       font-weight: 800;
-      height: 32px;
+      height: 38px;
       justify-content: center;
       margin-top: 0;
-      min-width: 98px;
-      padding: 0 12px;
+      min-width: 108px;
+      padding: 0 14px;
       white-space: nowrap;
     }}
     .theme-toggle:hover {{
@@ -448,15 +584,16 @@ def dashboard(request: Request) -> str:
       align-items: center;
       display: flex;
       gap: 10px;
+      min-width: 0;
     }}
     .brand-logo {{
       border: 1px solid #2a3649;
       border-radius: 10px;
-      height: 36px;
-      width: 36px;
+      height: 40px;
+      width: 40px;
       object-fit: cover;
     }}
-    h1 {{ margin: 0; font-size: 22px; letter-spacing: 0; color: var(--amber); }}
+    h1 {{ margin: 0; font-size: 24px; letter-spacing: 0; color: var(--amber); }}
     h2 {{ font-size: 13px; margin: 0 0 10px; text-transform: none; color: var(--title-text); }}
     strong, td, th, .metric {{ overflow-wrap: anywhere; }}
     main {{ padding: 12px; max-width: none; margin: 0; }}
@@ -476,30 +613,14 @@ def dashboard(request: Request) -> str:
       align-items: start;
       display: grid;
       gap: 10px;
-      grid-template-columns: 214px minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr);
       min-height: calc(100vh - 90px);
     }}
     .sidebar {{
-      background: var(--sidebar-bg);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      margin: 12px 0 0 12px;
-      max-height: calc(100vh - 100px);
-      overflow: auto;
-      padding: 16px 12px;
-      position: sticky;
-      top: 84px;
+      display: none;
     }}
     .mobile-nav {{
       display: none;
-      gap: 8px;
-      overflow-x: auto;
-      padding: 10px 16px;
-      border-bottom: 1px solid var(--line);
-      background: var(--mobile-nav-bg);
-      position: sticky;
-      top: 78px;
-      z-index: 1;
     }}
     .nav-title {{ color: var(--muted); font-size: 11px; font-weight: 800; margin: 0 0 10px; text-transform: uppercase; }}
     .nav-link {{
@@ -543,7 +664,14 @@ def dashboard(request: Request) -> str:
     .history-table th:nth-child(2), .history-table td:nth-child(2) {{ min-width: 190px; }}
     .history-table th:nth-child(4), .history-table td:nth-child(4) {{ min-width: 230px; }}
     .history-table th:nth-child(10), .history-table td:nth-child(10) {{ width: 148px; min-width: 148px; }}
-    .grid {{ display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 1px; margin: 0 0 8px; background: var(--line); border: 1px solid var(--line); }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 0 0 12px;
+      background: transparent;
+      border: 0;
+    }}
     .card {{
       background: var(--panel);
       border: 1px solid var(--line);
@@ -551,7 +679,505 @@ def dashboard(request: Request) -> str:
       padding: 12px;
       box-shadow: none;
     }}
-    .grid .card {{ border: 0; border-radius: 0; min-height: 66px; }}
+    .grid .card {{
+      border: 1px solid #2a3949;
+      border-radius: 12px;
+      min-height: 88px;
+      padding: 14px;
+    }}
+    .dashboard-live-shell {{
+      display: grid;
+      gap: 12px;
+      margin: 0 0 12px;
+    }}
+    .dashboard-live-toolbar {{
+      align-items: center;
+      background: linear-gradient(180deg, rgba(8, 36, 45, .96), rgba(11, 22, 30, .98));
+      border: 1px solid #1e4b55;
+      border-radius: 14px;
+      display: grid;
+      gap: 14px;
+      grid-template-columns: auto minmax(280px, 1fr) auto;
+      padding: 14px 16px;
+    }}
+    .dashboard-tabset {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }}
+    .dashboard-view-btn {{
+      align-items: center;
+      background: rgba(255,255,255,.04);
+      border: 1px solid #31535d;
+      border-radius: 10px;
+      color: #d8ebef;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 14px;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }}
+    .dashboard-view-btn:hover {{
+      transform: translateY(-1px);
+      border-color: #4fd6b1;
+    }}
+    .dashboard-view-btn.active {{
+      background: rgba(14,203,129,.14);
+      border-color: rgba(14,203,129,.5);
+      color: #f0fbf6;
+      box-shadow: inset 0 0 0 1px rgba(14,203,129,.15);
+    }}
+    .dashboard-search {{
+      align-items: center;
+      background: rgba(255,255,255,.03);
+      border: 1px solid #36515d;
+      border-radius: 999px;
+      display: flex;
+      gap: 10px;
+      min-height: 44px;
+      padding: 0 14px;
+    }}
+    .dashboard-search svg {{
+      color: #8fb6bf;
+      flex: 0 0 auto;
+      height: 16px;
+      width: 16px;
+    }}
+    .dashboard-search input {{
+      background: transparent;
+      border: 0;
+      color: #eff8fb;
+      font-size: 14px;
+      padding: 0;
+    }}
+    .dashboard-search input:focus {{ outline: none; }}
+    .dashboard-toolbar-actions {{
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }}
+    .dashboard-action-btn {{
+      align-items: center;
+      background: rgba(255,255,255,.04);
+      border: 1px solid #31535d;
+      border-radius: 10px;
+      color: #e4f0f3;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 12px;
+      transition: transform .16s ease, border-color .16s ease;
+      white-space: nowrap;
+    }}
+    .dashboard-action-btn:hover {{
+      transform: translateY(-1px);
+      border-color: #4fd6b1;
+    }}
+    .dashboard-counter-strip {{
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }}
+    .dashboard-counter {{
+      background: linear-gradient(180deg, #16212b, #111820);
+      border: 1px solid #2d4154;
+      border-radius: 12px;
+      color: #d4e6f1;
+      cursor: pointer;
+      display: grid;
+      gap: 8px;
+      padding: 14px 16px;
+      text-align: left;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }}
+    .dashboard-counter:hover {{
+      transform: translateY(-1px);
+      border-color: #4fd6b1;
+      background: linear-gradient(180deg, #192633, #131b23);
+    }}
+    .dashboard-counter.active {{
+      border-color: #6d2ad6;
+      box-shadow: inset 0 0 0 1px rgba(157, 91, 255, .18);
+    }}
+    .dashboard-counter-value {{
+      font-size: 32px;
+      font-weight: 900;
+      line-height: 1;
+    }}
+    .dashboard-counter-label {{
+      color: #9fb6c8;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .9px;
+      text-transform: uppercase;
+    }}
+    .dashboard-live-stage {{
+      display: grid;
+      gap: 12px;
+      grid-template-columns: minmax(0, 1.16fr) minmax(380px, .84fr);
+      align-items: start;
+    }}
+    .dashboard-feed-panel,
+    .dashboard-feature-panel {{
+      background: linear-gradient(180deg, #10161f 0%, #0c1218 100%);
+      border: 1px solid #243646;
+      border-radius: 14px;
+      box-shadow: 0 22px 48px rgba(0, 0, 0, .28);
+      overflow: hidden;
+      padding: 14px;
+    }}
+    .dashboard-feed-head {{
+      align-items: center;
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }}
+    .dashboard-feed-head h2,
+    .dashboard-feature-panel h2 {{
+      color: #f3f8fb;
+      font-size: 15px;
+      letter-spacing: .2px;
+      margin: 0;
+    }}
+    .dashboard-market-tape {{
+      display: flex;
+      gap: 8px;
+      margin: 0 0 12px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-color: #4fd6b1 #0f151c;
+      scrollbar-width: thin;
+    }}
+    .dashboard-market-tape .tape-chip {{
+      border-radius: 999px;
+      font-size: 11px;
+      padding: 7px 10px;
+      white-space: nowrap;
+    }}
+    .dashboard-filter-bar {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }}
+    .dashboard-filter-chip {{
+      align-items: center;
+      background: #111924;
+      border: 1px solid #31465c;
+      border-radius: 999px;
+      color: #d9e8f2;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      min-height: 34px;
+      padding: 0 12px;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }}
+    .dashboard-filter-chip:hover {{
+      transform: translateY(-1px);
+      border-color: #4fd6b1;
+    }}
+    .dashboard-filter-chip.active {{
+      background: rgba(14,203,129,.14);
+      border-color: rgba(14,203,129,.52);
+      color: #f0fbf6;
+    }}
+    .dashboard-live-feed {{
+      display: grid;
+      gap: 10px;
+      max-height: calc(100vh - 260px);
+      overflow: auto;
+      padding-right: 2px;
+      scrollbar-color: #4fd6b1 #10161d;
+      scrollbar-width: thin;
+    }}
+    .dashboard-feed-empty {{
+      align-items: center;
+      border: 1px dashed #33485d;
+      border-radius: 12px;
+      color: #b7cadd;
+      display: grid;
+      gap: 8px;
+      justify-items: center;
+      min-height: 180px;
+      padding: 20px;
+      text-align: center;
+    }}
+    .dashboard-feed-group {{
+      display: grid;
+      gap: 10px;
+    }}
+    .dashboard-feed-group-head {{
+      align-items: center;
+      background: linear-gradient(90deg, #1d5a36, #24412d);
+      border-radius: 10px;
+      color: #f4fbf6;
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 900;
+    }}
+    .dashboard-feed-group-total {{
+      color: #d3ebda;
+      font-size: 11px;
+      text-transform: uppercase;
+    }}
+    .dashboard-feed-card {{
+      background: linear-gradient(180deg, #16202b, #10161d);
+      border: 1px solid #2c3f52;
+      border-radius: 14px;
+      cursor: pointer;
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+    }}
+    .dashboard-feed-card:hover {{
+      border-color: #4fd6b1;
+      box-shadow: 0 12px 24px rgba(0,0,0,.24);
+      transform: translateY(-1px);
+    }}
+    .dashboard-feed-card.active {{
+      border-color: #f0c14b;
+      box-shadow: inset 0 0 0 1px rgba(240,193,75,.2);
+    }}
+    .dashboard-feed-card-top {{
+      align-items: center;
+      color: #9ab4c6;
+      display: flex;
+      font-size: 11px;
+      font-weight: 800;
+      justify-content: space-between;
+      letter-spacing: .7px;
+      text-transform: uppercase;
+    }}
+    .dashboard-feed-title {{
+      display: grid;
+      gap: 4px;
+    }}
+    .dashboard-feed-title strong {{
+      color: #f3f8fb;
+      font-size: 20px;
+      line-height: 1.08;
+      overflow-wrap: anywhere;
+    }}
+    .dashboard-feed-title span {{
+      color: #9db2c5;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .dashboard-feed-market {{
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: space-between;
+    }}
+    .dashboard-feed-market strong {{
+      color: #f0f6fb;
+      font-size: 12px;
+      letter-spacing: .4px;
+      text-transform: uppercase;
+    }}
+    .dashboard-feed-market-tag {{
+      align-items: center;
+      background: rgba(255,255,255,.03);
+      border: 1px solid #32485e;
+      border-radius: 999px;
+      color: #a7bfd1;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 800;
+      min-height: 28px;
+      padding: 0 10px;
+      white-space: nowrap;
+    }}
+    .dashboard-feed-metrics {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .decision-metric-tile {{
+      background: rgba(255,255,255,.03);
+      border: 1px solid #30465c;
+      border-radius: 12px;
+      gap: 5px;
+      min-height: 68px;
+      padding: 10px;
+    }}
+    .decision-metric-tile strong {{
+      color: #f0f6fb;
+      font-size: 13px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }}
+    .decision-checklist {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .decision-checklist.compact {{
+      gap: 6px;
+    }}
+    .decision-check {{
+      align-items: center;
+      background: rgba(255,255,255,.03);
+      border: 1px solid #32485e;
+      border-radius: 999px;
+      color: #d7e6f2;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 700;
+      min-height: 28px;
+      padding: 0 10px;
+    }}
+    .decision-check.compact {{
+      font-size: 10px;
+      min-height: 24px;
+      padding: 0 8px;
+    }}
+    .decision-check.positive {{
+      border-color: rgba(14,203,129,.45);
+      color: #d8f8eb;
+    }}
+    .decision-check.negative {{
+      border-color: rgba(246,70,93,.42);
+      color: #ffd5dc;
+    }}
+    .decision-check.neutral {{
+      border-color: rgba(148,163,184,.42);
+      color: #d9e2ec;
+    }}
+    .decision-highlight {{
+      background: linear-gradient(180deg, rgba(17,23,31,.98), rgba(11,15,21,.98));
+      border: 1px solid #2d4154;
+      border-radius: 14px;
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+    }}
+    .decision-highlight-head {{
+      align-items: start;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: auto 1fr auto;
+    }}
+    .decision-highlight-meta {{
+      display: grid;
+      gap: 4px;
+    }}
+    .decision-highlight-meta strong {{
+      color: #f3f8fb;
+      font-size: 18px;
+    }}
+    .decision-highlight-meta span,
+    .decision-highlight-action {{
+      color: #a7bfd1;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }}
+    .decision-highlight-grid {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }}
+    .decision-highlight-reason {{
+      color: #d6e4ef;
+      font-size: 13px;
+      line-height: 1.45;
+      margin: 0;
+    }}
+    .dashboard-feed-odds-row {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .dashboard-feed-odd {{
+      align-items: flex-start;
+      background: #0e151d;
+      border: 1px solid #30465c;
+      border-radius: 12px;
+      color: #eff7fb;
+      cursor: pointer;
+      display: grid;
+      gap: 6px;
+      min-height: 86px;
+      padding: 10px;
+      text-align: left;
+      transition: border-color .16s ease, transform .16s ease;
+    }}
+    .dashboard-feed-odd:hover {{
+      border-color: #4fd6b1;
+      transform: translateY(-1px);
+    }}
+    .dashboard-feed-odd.empty {{
+      cursor: default;
+      opacity: .72;
+    }}
+    .dashboard-feed-odd span {{
+      color: #98afc0;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .7px;
+      text-transform: uppercase;
+    }}
+    .dashboard-feed-odd strong {{
+      color: #f4f8fb;
+      font-size: 15px;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }}
+    .dashboard-feed-odd b {{
+      color: #f0c14b;
+      font-size: 24px;
+      font-weight: 900;
+      line-height: 1;
+    }}
+    .dashboard-feed-reason {{
+      color: #c9d8e4;
+      font-size: 13px;
+      line-height: 1.45;
+    }}
+    .dashboard-feature-panel {{
+      display: grid;
+      gap: 14px;
+      max-height: calc(100vh - 190px);
+      overflow: auto;
+      position: sticky;
+      top: 78px;
+      scrollbar-color: #4fd6b1 #10161d;
+      scrollbar-width: thin;
+    }}
+    .dashboard-feature-head {{
+      align-items: center;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }}
+    .dashboard-feature-actions {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .dashboard-feature-actions .dashboard-filter-chip {{
+      min-height: 30px;
+      padding: 0 10px;
+    }}
     .metric {{ font-size: 22px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }}
     .metric.green, .win, .pos {{ color: var(--green); }}
     .metric.red, .loss, .neg {{ color: var(--red); }}
@@ -574,6 +1200,295 @@ def dashboard(request: Request) -> str:
       margin-top: 0;
       padding: 8px 12px;
       white-space: nowrap;
+    }}
+    .status-chip-plain {{
+      align-items: center;
+      background: #ffd44f;
+      border: 1px solid #e3b229;
+      border-radius: 10px;
+      color: #151515;
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 900;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 12px;
+      white-space: nowrap;
+    }}
+    .status-chip-plain .status-dot {{
+      margin-top: 0;
+    }}
+    .menu-panel {{
+      background: linear-gradient(180deg, #08171d, #091219);
+      border-right: 1px solid #183946;
+      box-shadow: 0 28px 48px rgba(0,0,0,.38);
+      height: 100vh;
+      left: 0;
+      max-width: min(380px, 92vw);
+      padding: 16px 10px 18px;
+      position: fixed;
+      top: 0;
+      transform: translateX(-102%);
+      transition: transform .2s ease;
+      width: 100%;
+      z-index: 45;
+    }}
+    .menu-panel.open {{
+      transform: translateX(0);
+    }}
+    .menu-panel-head {{
+      align-items: center;
+      border-bottom: 1px solid #16353f;
+      color: #f1f8fb;
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding: 0 4px 14px;
+    }}
+    .menu-panel-head strong {{
+      font-size: 16px;
+    }}
+    .menu-icon-btn {{
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: #bcd2da;
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 26px;
+      height: 34px;
+      justify-content: center;
+      margin: 0;
+      padding: 0;
+      width: 34px;
+    }}
+    .menu-card-list {{
+      display: grid;
+      gap: 10px;
+    }}
+    .menu-utility-row {{
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 12px;
+      padding: 4px 4px 2px;
+    }}
+    .menu-theme,
+    .menu-account,
+    .menu-status,
+    .menu-build {{
+      min-height: 40px;
+      width: 100%;
+      justify-content: center;
+    }}
+    .menu-build {{
+      align-items: center;
+      background: #131c27;
+      border: 1px solid #30465b;
+      border-radius: 999px;
+      color: #c8d7e6;
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 800;
+      padding: 0 12px;
+      white-space: nowrap;
+    }}
+    .menu-learning-panel {{
+      background: rgba(255,255,255,.03);
+      border: 1px solid #203a46;
+      border-radius: 16px;
+      display: grid;
+      gap: 12px;
+      margin: 4px 4px 12px;
+      padding: 14px;
+    }}
+    .menu-learning-head {{
+      align-items: center;
+      display: flex;
+      gap: 10px;
+      justify-content: space-between;
+    }}
+    .menu-learning-head strong {{
+      color: #f0f7fb;
+      font-size: 15px;
+    }}
+    .menu-learning-head span {{
+      align-items: center;
+      background: #10202a;
+      border: 1px solid #2c4956;
+      border-radius: 999px;
+      color: #9fdac5;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .6px;
+      min-height: 26px;
+      padding: 0 10px;
+      text-transform: uppercase;
+    }}
+    .menu-learning-grid {{
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }}
+    .menu-learning-panel .mini {{
+      background: #0e151d;
+      border: 1px solid #27404d;
+      border-radius: 12px;
+      padding: 12px;
+    }}
+    .menu-learning-panel .mini strong {{
+      display: block;
+      font-size: 22px;
+      margin-top: 4px;
+    }}
+    .menu-skill-list {{
+      display: grid;
+      gap: 10px;
+    }}
+    .menu-skill-card {{
+      background: #0d141c;
+      border: 1px solid #253947;
+      border-radius: 14px;
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+    }}
+    .menu-skill-top {{
+      align-items: center;
+      display: flex;
+      gap: 8px;
+      justify-content: space-between;
+    }}
+    .menu-skill-top strong {{
+      color: #f0f7fb;
+      font-size: 14px;
+    }}
+    .menu-skill-card small {{
+      color: #bdd0dc;
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+    .menu-skill-meta {{
+      color: #89a4b7;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+    }}
+    .menu-skill-status {{
+      align-items: center;
+      border-radius: 999px;
+      display: inline-flex;
+      font-size: 10px;
+      font-weight: 900;
+      justify-content: center;
+      min-height: 24px;
+      padding: 0 8px;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      white-space: nowrap;
+    }}
+    .menu-skill-status.sem-base {{
+      background: rgba(114,168,255,.12);
+      border: 1px solid rgba(114,168,255,.28);
+      color: #b9d3ff;
+    }}
+    .menu-skill-status.coleta,
+    .menu-skill-status.aprendendo {{
+      background: rgba(240,193,75,.12);
+      border: 1px solid rgba(240,193,75,.3);
+      color: #f2d98d;
+    }}
+    .menu-skill-status.quente {{
+      background: rgba(14,203,129,.12);
+      border: 1px solid rgba(14,203,129,.3);
+      color: #9ef0c8;
+    }}
+    .menu-skill-status.frio {{
+      background: rgba(246,70,93,.12);
+      border: 1px solid rgba(246,70,93,.28);
+      color: #ffb2be;
+    }}
+    .menu-card {{
+      align-items: center;
+      background: rgba(255,255,255,.03);
+      border: 1px solid #203a46;
+      border-radius: 14px;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 42px minmax(0, 1fr) auto;
+      min-height: 72px;
+      padding: 12px 14px;
+      text-decoration: none;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }}
+    .menu-card:hover {{
+      background: rgba(255,255,255,.05);
+      border-color: #4fd6b1;
+      transform: translateX(2px);
+    }}
+    .menu-card-icon {{
+      background: #152430;
+      border-radius: 12px;
+      display: block;
+      height: 42px;
+      position: relative;
+      width: 42px;
+    }}
+    .menu-card-icon::after {{
+      color: #ecf7fb;
+      font-size: 16px;
+      font-weight: 900;
+      inset: 0;
+      position: absolute;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .menu-card-icon.radar {{ background: rgba(157, 91, 255, .14); }}
+    .menu-card-icon.radar::after {{ content: "↘"; color: #d6bcff; }}
+    .menu-card-icon.live {{ background: rgba(14,203,129,.14); }}
+    .menu-card-icon.live::after {{ content: "•"; color: #82efbf; font-size: 28px; }}
+    .menu-card-icon.pulse {{ background: rgba(72, 167, 255, .14); }}
+    .menu-card-icon.pulse::after {{ content: "≋"; color: #9cd0ff; }}
+    .menu-card-icon.fantasy {{ background: rgba(255, 171, 45, .16); }}
+    .menu-card-icon.fantasy::after {{ content: "★"; color: #ffd46e; }}
+    .menu-card-icon.wallet {{ background: rgba(59, 130, 246, .14); }}
+    .menu-card-icon.wallet::after {{ content: "◉"; color: #94c4ff; }}
+    .menu-card-icon.history {{ background: rgba(239, 68, 68, .14); }}
+    .menu-card-icon.history::after {{ content: "↺"; color: #ffb0b0; }}
+    .menu-card-copy {{
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }}
+    .menu-card-copy strong {{
+      color: #f3f8fb;
+      font-size: 15px;
+      line-height: 1.15;
+    }}
+    .menu-card-copy small {{
+      color: #8ea6b3;
+      font-size: 12px;
+      line-height: 1.35;
+    }}
+    .menu-card-arrow {{
+      color: #8fa9b6;
+      font-size: 22px;
+      line-height: 1;
+    }}
+    .menu-overlay {{
+      background: rgba(4, 10, 14, .54);
+      backdrop-filter: blur(2px);
+      display: none;
+      inset: 0;
+      position: fixed;
+      z-index: 40;
+    }}
+    .menu-overlay.open {{
+      display: block;
     }}
     .account-toggle::before {{
       background: #07130e;
@@ -725,8 +1640,59 @@ def dashboard(request: Request) -> str:
     }}
     .action-pill.enter {{ border-color: rgba(14, 203, 129, .48); color: var(--green); background: rgba(14, 203, 129, .14); }}
     .action-pill.wait {{ border-color: rgba(252, 213, 53, .45); color: var(--amber); background: rgba(252, 213, 53, .12); }}
+    .action-pill.monitor {{ border-color: rgba(91, 140, 255, .45); color: var(--blue); background: rgba(91, 140, 255, .12); }}
     .action-pill.hold {{ border-color: rgba(91, 140, 255, .45); color: var(--blue); background: rgba(91, 140, 255, .12); }}
     .action-pill.exit {{ border-color: rgba(246, 70, 93, .45); color: var(--red); background: rgba(246, 70, 93, .12); }}
+    .scanner-summary-grid {{
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      margin-top: 14px;
+    }}
+    .decision-count-card {{
+      background: linear-gradient(180deg, rgba(17,23,31,.98), rgba(12,17,23,.98));
+      border: 1px solid #2f4255;
+      border-radius: 12px;
+      display: grid;
+      gap: 6px;
+      min-height: 88px;
+      padding: 12px;
+    }}
+    .decision-count-card span {{
+      color: #9eb3c4;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .decision-count-card strong {{
+      color: #f4f8fb;
+      font-size: 28px;
+      line-height: 1;
+    }}
+    .decision-count-card.enter {{ border-color: rgba(14,203,129,.38); }}
+    .decision-count-card.wait {{ border-color: rgba(252,213,53,.38); }}
+    .decision-count-card.monitor {{ border-color: rgba(91,140,255,.38); }}
+    .decision-count-card.exit {{ border-color: rgba(246,70,93,.38); }}
+    .decision-count-card.hold {{ border-color: rgba(148,163,184,.34); }}
+    .criteria-bar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }}
+    .criteria-chip {{
+      align-items: center;
+      background: rgba(255,255,255,.03);
+      border: 1px solid #32485e;
+      border-radius: 999px;
+      color: #d9e5ef;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 800;
+      min-height: 30px;
+      padding: 0 12px;
+      white-space: nowrap;
+    }}
     .scan-toolbar {{
       align-items: center;
       border-top: 1px solid var(--scan-toolbar-border);
@@ -764,6 +1730,89 @@ def dashboard(request: Request) -> str:
       background: rgba(252, 213, 53, .18);
       border-color: rgba(252, 213, 53, .52);
       color: var(--amber);
+    }}
+    .scanner-row-lead {{
+      display: grid;
+      gap: 6px;
+    }}
+    .scanner-row-lead strong {{
+      color: #f4f8fb;
+      font-size: 15px;
+      line-height: 1.2;
+    }}
+    .scanner-row-reading {{
+      display: grid;
+      gap: 8px;
+    }}
+    .decision-detail-hero {{
+      border: 1px solid #30465c;
+      border-radius: 14px;
+      display: grid;
+      gap: 10px;
+      margin: 12px 0;
+      padding: 14px;
+    }}
+    .decision-detail-hero.enter {{ background: rgba(14,203,129,.08); border-color: rgba(14,203,129,.28); }}
+    .decision-detail-hero.wait {{ background: rgba(252,213,53,.08); border-color: rgba(252,213,53,.28); }}
+    .decision-detail-hero.monitor {{ background: rgba(91,140,255,.08); border-color: rgba(91,140,255,.28); }}
+    .decision-detail-hero.exit {{ background: rgba(246,70,93,.08); border-color: rgba(246,70,93,.28); }}
+    .decision-detail-hero.hold {{ background: rgba(148,163,184,.08); border-color: rgba(148,163,184,.28); }}
+    .decision-detail-hero p {{
+      color: #d7e4ee;
+      margin: 0;
+    }}
+    .decision-detail-status {{
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: space-between;
+    }}
+    .decision-detail-status strong {{
+      color: #f5fbff;
+      font-size: 13px;
+      letter-spacing: .4px;
+      text-transform: uppercase;
+    }}
+    .decision-detail-grid {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-bottom: 14px;
+    }}
+    .decision-detail-columns {{
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 14px;
+    }}
+    .decision-explain-card {{
+      background: rgba(255,255,255,.03);
+      border: 1px solid #30465c;
+      border-radius: 14px;
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+    }}
+    .decision-explain-card h3 {{
+      color: #f3f8fb;
+      font-size: 13px;
+      margin: 0;
+    }}
+    .decision-reason-group {{
+      display: grid;
+      gap: 7px;
+    }}
+    .decision-reason-group strong {{
+      color: #f0f6fb;
+      font-size: 11px;
+      letter-spacing: .6px;
+      text-transform: uppercase;
+    }}
+    .decision-reason-group span {{
+      color: #d6e3ed;
+      font-size: 12px;
+      line-height: 1.4;
     }}
     .market-tape {{
       align-items: center;
@@ -1355,17 +2404,46 @@ def dashboard(request: Request) -> str:
     body[data-theme='light'] .stats-tab {{ color: var(--stats-tab-text); }}
     body[data-theme='light'] .stats-tab.active {{ color: var(--stats-tab-active-text); }}
     @media (max-width: 1240px) {{
+      .dashboard-live-stage {{ grid-template-columns: 1fr; }}
+      .dashboard-feature-panel {{ max-height: none; position: static; }}
       .scanner-grid {{ grid-template-columns: 1fr; }}
       .scanner-grid > .table-wrap {{ max-height: none; overflow: auto; }}
       .stats-panel {{ max-height: none; min-height: 360px; position: static; }}
+      .scanner-summary-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+      .decision-highlight-grid,
+      .decision-detail-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .decision-detail-columns {{ grid-template-columns: 1fr; }}
     }}
     @media (max-width: 980px) {{
       .app-shell {{ grid-template-columns: 1fr; }}
       .sidebar {{ display: none; }}
       .mobile-nav {{ display: flex; }}
+      .topbar-actions,
+      .topbar-quick {{
+        justify-content: flex-start;
+        width: 100%;
+      }}
       .layout {{ grid-template-columns: 1fr; }}
       .layout-side > .card {{
         flex-basis: min(360px, 90vw);
+      }}
+      .dashboard-live-toolbar {{
+        grid-template-columns: 1fr;
+      }}
+      .dashboard-counter-strip {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
+      .dashboard-feed-odds-row {{
+        grid-template-columns: 1fr;
+      }}
+      .dashboard-feed-metrics,
+      .decision-highlight-grid,
+      .decision-detail-grid,
+      .scanner-summary-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .dashboard-live-feed {{
+        max-height: none;
       }}
       .scanner-grid {{ grid-template-columns: 1fr; }}
       .market-board-grid {{ grid-template-columns: 1fr; }}
@@ -1374,6 +2452,9 @@ def dashboard(request: Request) -> str:
         max-height: 72vh;
         min-height: 260px;
         position: static;
+      }}
+      .decision-highlight-head {{
+        grid-template-columns: 1fr;
       }}
       .wide-section {{ grid-column: auto; }}
       .history-table th, .history-table td {{ width: auto; min-width: 0; }}
@@ -1424,6 +2505,10 @@ def dashboard(request: Request) -> str:
         font-size: 11px;
         padding: 7px 9px;
       }}
+      .menu-utility-row,
+      .menu-learning-grid {{
+        grid-template-columns: 1fr;
+      }}
     }}
     @media (max-width: 520px) {{
       .grid {{
@@ -1437,6 +2522,21 @@ def dashboard(request: Request) -> str:
       }}
       .ticker {{ padding: 8px 12px; }}
       .topbar {{ align-items: flex-start; flex-direction: column; gap: 10px; }}
+      .dashboard-counter-strip {{ grid-template-columns: 1fr; }}
+      .dashboard-feed-scoreboard {{ grid-template-columns: 1fr; }}
+      .dashboard-feed-team.away,
+      .dashboard-feed-team {{ justify-items: start; text-align: left; }}
+      .dashboard-feed-center {{ width: 100%; }}
+      .dashboard-toolbar-actions,
+      .dashboard-tabset,
+      .dashboard-filter-bar {{
+        width: 100%;
+      }}
+      .dashboard-action-btn,
+      .dashboard-view-btn,
+      .dashboard-filter-chip {{
+        flex: 1 1 0;
+      }}
       .account-panel {{ left: 12px; right: 12px; top: 126px; width: auto; }}
       .bankroll-grid, .bankroll-form {{ grid-template-columns: 1fr; }}
       .bankroll-form .wide {{ grid-column: auto; }}
@@ -1453,18 +2553,25 @@ def dashboard(request: Request) -> str:
 <body data-theme="dark">
   <header id="top">
     <div class="topbar">
-      <div class="brand-line">
-        <img class="brand-logo" src="/assets/logo-apexgol-mark.svg" alt="ApexGol AI" />
-        <div>
-          <h1>{product_name}</h1>
-          <div class="muted">{product_tagline}</div>
+      <div class="topbar-left">
+        <button class="menu-trigger" id="menu-trigger" type="button" onclick="toggleDashboardMenu()" aria-expanded="false" aria-controls="menu-panel">
+          <span class="menu-trigger-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>Menu</span>
+        </button>
+        <div class="brand-line">
+          <img class="brand-logo" src="/assets/logo-apexgol-mark.svg" alt="ApexGol AI" />
+          <div>
+            <h1>{product_name}</h1>
+            <div class="muted">Dashboard trade ao vivo</div>
+          </div>
         </div>
       </div>
       <div class="topbar-actions">
-        <div class="chip build-chip">Build {build_stamp}</div>
-        <button class="theme-toggle" id="theme-toggle" type="button" onclick="toggleTheme()" aria-pressed="false">Tema claro</button>
-        <button class="account-toggle" id="account-toggle" type="button" onclick="toggleAccountPanel()" aria-expanded="false">{_esc((user or {}).get("name") or "Conta")}</button>
-        <div class="chip"><span class="status-dot"></span> Sistema online</div>
+        <div class="topbar-quick">
+          <button class="btn ghost" type="button" onclick="jumpDashboardTo('live-center')">Live center</button>
+          <button class="btn ghost" type="button" onclick="jumpDashboardTo('scanner')">Scanner</button>
+          <button class="btn primary" type="button" onclick="requestScanNow()">Atualizar agora</button>
+        </div>
       </div>
     </div>
     <div class="ticker">
@@ -1476,64 +2583,98 @@ def dashboard(request: Request) -> str:
       <div>IA <span>{stats["readiness"]}</span></div>
     </div>
   </header>
+  {(
+      f"<section class='notice {'warn' if (stats.get('roi_alert') or {}).get('level') == 'medium' else 'danger'}' "
+      "id='roi-alert-banner'>"
+      f"<strong>ROI em alerta.</strong> {_esc((stats.get('roi_alert') or {}).get('message', ''))}"
+      "</section>"
+  ) if stats.get("roi_alert") else ""}
+  <div class="menu-overlay" id="menu-overlay" onclick="toggleDashboardMenu(false)"></div>
+  {menu_panel}
   {account_panel}
-  <nav class="mobile-nav">
-    <a class="nav-link" href="#scanner">Scanner</a>
-    <a class="nav-link" href="/app/jogosdodia">Jogos do Dia</a>
-    <a class="nav-link" href="#mercado">Mercado</a>
-    <a class="nav-link" href="#simulador">Ao vivo</a>
-    <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
-    <a class="nav-link" href="#entradas">Entradas</a>
-    <a class="nav-link" href="#conta-banca">Banca</a>
-    <a class="nav-link" href="#importar">Resultados</a>
-    <a class="nav-link" href="#historico">Historico</a>
-    <a class="nav-link" href="#comercial">Comercial</a>
-    <a class="nav-link" href="#supabase">Supabase</a>
-  </nav>
   <div class="app-shell">
-  <aside class="sidebar">
-    <p class="nav-title">Operacao</p>
-    <a class="nav-link" href="#scanner">Scanner</a>
-    <a class="nav-link" href="/app/jogosdodia">Jogos do Dia</a>
-    <a class="nav-link" href="#mercado">Mercado</a>
-    <a class="nav-link" href="#simulador">Ao vivo</a>
-    <a class="nav-link" href="/fantasy-ia">Fantasy IA</a>
-    <a class="nav-link" href="#ativo">Jogo ativo</a>
-    <a class="nav-link" href="#entradas">Entradas</a>
-    <a class="nav-link" href="#conta-banca">Banca do cliente</a>
-    <a class="nav-link" href="#importar">Importar resultados</a>
-    <a class="nav-link" href="#historico">Historico</a>
-    <a class="nav-link" href="#comercial">Comercial</a>
-    <a class="nav-link" href="#ia">Rankings IA</a>
-    <a class="nav-link" href="/api/state">API JSON</a>
-  </aside>
   <main>
-    <section class="grid">
-      <div class="card"><div class="metric">{stats["total"]}</div><div class="muted">Sinais registrados</div></div>
-      <div class="card"><div class="metric green">{stats["wins"]}</div><div class="muted">Greens</div></div>
-      <div class="card"><div class="metric red">{stats["losses"]}</div><div class="muted">Reds</div></div>
-      <div class="card"><div class="metric">{stats["hit_rate"]}%</div><div class="muted">Taxa de acerto</div></div>
-      <div class="card"><div class="metric {_value_class(manual_stats["profit_currency"])}">{_format_brl(manual_stats["profit_currency"])}</div><div class="muted">Resultado manual</div></div>
-      <div class="card"><div class="metric">{manual_stats["total"]}</div><div class="muted">Apostas importadas</div></div>
-      <div class="card"><div class="metric {_value_class(stats["profit_units"])}">{_format_brl(stats["profit_units"])}</div><div class="muted">Lucro acumulado</div></div>
-      <div class="card"><div class="metric {_value_class(stats["roi_units"])}">{stats["roi_units"]}%</div><div class="muted">ROI acumulado</div></div>
-      <div class="card"><div class="metric amber">{stats["brier_score"]}</div><div class="muted">Brier score</div></div>
-      <div class="card"><div class="metric">{stats["readiness"]}</div><div class="muted">Maturidade IA</div></div>
-      <div class="card"><div class="metric">{_esc(fast_learning.get("mode", "neutro"))}</div><div class="muted">Modo rapido</div></div>
-      <div class="card"><div class="metric">{_esc(fast_learning.get("momentum_score", 50))}/100</div><div class="muted">Momentum IA</div></div>
-      <div class="card"><div class="metric {_value_class(backtest.get("profit_units"))}">{_format_brl(backtest.get("profit_units", 0))}</div><div class="muted">Backtest lucro</div></div>
-      <div class="card"><div class="metric red">{_format_brl(backtest.get("max_drawdown_units", 0))}</div><div class="muted">Drawdown max</div></div>
-      <div class="card"><div class="metric">{_best_name(learning.get("by_market"))}</div><div class="muted">Melhor mercado</div></div>
-      <div class="card"><div class="metric">{_best_name(learning.get("by_team"))}</div><div class="muted">Melhor time</div></div>
+    <section class="dashboard-live-shell" id="live-center">
+      <div class="dashboard-live-toolbar">
+        <div class="dashboard-tabset">
+          <button class="dashboard-view-btn active" type="button" onclick="setDashboardModeFilter('focus')">Radar principal</button>
+          <button class="dashboard-view-btn" type="button" onclick="setDashboardModeFilter('enter')">Entrar agora</button>
+          <button class="dashboard-view-btn" type="button" onclick="jumpDashboardTo('scanner')">Scanner</button>
+        </div>
+        <label class="dashboard-search">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <input id="dashboard-live-search" type="text" placeholder="Pesquisar jogo, liga ou mercado..." oninput="applyDashboardFeedFilters()" />
+        </label>
+        <div class="dashboard-toolbar-actions">
+          <button class="dashboard-action-btn" type="button" onclick="requestScanNow()">Atualizar agora</button>
+          <button class="dashboard-action-btn" type="button" onclick="jumpDashboardTo('scanner')">Critérios do scanner</button>
+        </div>
+      </div>
+      <div class="dashboard-counter-strip">
+        <button class="dashboard-counter active" type="button" data-center-mode="focus" onclick="setDashboardModeFilter('focus')">
+          <span class="dashboard-counter-value">{stats["total"]}</span>
+          <span class="dashboard-counter-label">Radar principal</span>
+        </button>
+        <button class="dashboard-counter" type="button" data-center-mode="live" onclick="setDashboardModeFilter('live')">
+          <span class="dashboard-counter-value">{len(live_games)}</span>
+          <span class="dashboard-counter-label">Ao vivo</span>
+        </button>
+        <button class="dashboard-counter" type="button" data-center-mode="enter" onclick="setDashboardModeFilter('enter')">
+          <span class="dashboard-counter-value">{strong_count}</span>
+          <span class="dashboard-counter-label">Entrar agora</span>
+        </button>
+        <button class="dashboard-counter" type="button" data-center-mode="wait" onclick="setDashboardModeFilter('wait')">
+          <span class="dashboard-counter-value">{monitor_count}</span>
+          <span class="dashboard-counter-label">Aguardar</span>
+        </button>
+      </div>
+      <div class="dashboard-live-stage">
+        <section class="dashboard-feed-panel">
+          <div class="dashboard-feed-head">
+            <div>
+              <div class="muted">Mesa de decisão ao vivo</div>
+              <h2>Veja rápido se é entrada, espera, monitoramento ou descarte</h2>
+            </div>
+            <span class="muted">Atualizado: {simulator_updated_at}</span>
+          </div>
+          <div class="dashboard-filter-bar">
+            <button class="dashboard-filter-chip active" type="button" data-center-mode="focus" onclick="setDashboardModeFilter('focus')">Liberadas + aguardar</button>
+            <button class="dashboard-filter-chip" type="button" data-center-mode="enter" onclick="setDashboardModeFilter('enter')">Entrar agora</button>
+            <button class="dashboard-filter-chip" type="button" data-center-mode="wait" onclick="setDashboardModeFilter('wait')">Aguardar</button>
+            <button class="dashboard-filter-chip" type="button" data-center-mode="monitor" onclick="setDashboardModeFilter('monitor')">Monitorar</button>
+            <button class="dashboard-filter-chip" type="button" data-center-mode="all" onclick="setDashboardModeFilter('all')">Mostrar tudo</button>
+          </div>
+          <div class="dashboard-market-tape" id="dashboard-market-tape">{market_tape}</div>
+          <div class="dashboard-live-feed" id="dashboard-live-feed">{dashboard_live_feed}</div>
+        </section>
+        <aside class="dashboard-feature-panel">
+          <div class="dashboard-feature-head">
+            <div>
+              <div class="muted">Jogo em foco</div>
+              <h2>Detalhe da decisão, checklist e contexto do confronto</h2>
+            </div>
+            <div class="dashboard-feature-actions">
+              <button class="dashboard-filter-chip" type="button" onclick="jumpDashboardTo('scanner')">Checklist</button>
+              <button class="dashboard-filter-chip" type="button" onclick="jumpDashboardTo('scanner-quality')">Critérios</button>
+              <button class="dashboard-filter-chip" type="button" onclick="jumpDashboardTo('historico')">Histórico</button>
+            </div>
+          </div>
+          <div id="match-stats">{match_stats}</div>
+        </aside>
+      </div>
     </section>
     <section class="card section" id="scanner">
-      <h2>Scanner Mundial</h2>
+      <div class="section-head">
+        <h2>Scanner Ao Vivo</h2>
+        <span class="muted">Central para decidir em segundos se vale entrar, esperar, monitorar ou ignorar.</span>
+      </div>
       <div class="active-line">
         <div class="mini"><div class="muted">Modo</div><strong id="scan-mode-current">{scanner["mode"]}</strong></div>
         <div class="mini"><div class="muted">Perfil scan</div><strong id="scan-profile-current">{scanner["scan_profile"]}</strong></div>
         <div class="mini"><div class="muted">Ultimo ciclo</div><strong id="scan-last-current">{scanner["last_scan"]}</strong></div>
         <div class="mini"><div class="muted">Candidatos</div><strong id="scan-candidates-current">{scanner["candidates"]}</strong></div>
         <div class="mini"><div class="muted">Jogos ao vivo</div><strong id="scan-today-current">{scanner["today_games"]}</strong></div>
+        <div class="mini"><div class="muted">Perfil risco</div><strong id="risk-profile-current">{scanner["risk_profile_label"]}</strong></div>
         <div class="mini"><div class="muted">Cobertura</div><strong>Brasil primeiro + ligas globais ESPN</strong></div>
         <div class="mini"><div class="muted">Seguranca</div><strong>HTTPS, Basic Auth, headers anti-frame</strong></div>
         <div class="mini"><div class="muted">Status</div><strong id="scan-status-current">{scanner["status"]}</strong></div>
@@ -1546,6 +2687,70 @@ def dashboard(request: Request) -> str:
         </div>
         <button class="ghost" type="button" onclick="requestScanNow()">Scan agora</button>
         <span class="muted" id="scan-control-note">Modo atual: {scanner["scan_profile"]}</span>
+      </div>
+      <div class="scan-toolbar">
+        <div class="scan-mode" id="risk-profile-mode">
+          <button class="scan-mode-btn" data-risk-profile="conservador" type="button" onclick="setRiskProfile('conservador')">Conservador</button>
+          <button class="scan-mode-btn" data-risk-profile="moderado" type="button" onclick="setRiskProfile('moderado')">Moderado</button>
+          <button class="scan-mode-btn" data-risk-profile="agressivo" type="button" onclick="setRiskProfile('agressivo')">Agressivo</button>
+        </div>
+        <button class="ghost" type="button" onclick="setRiskProfile('conservador')">Modo conservador</button>
+        <span class="muted" id="risk-profile-note">Perfil atual: {scanner["risk_profile_label"]}</span>
+      </div>
+      <div class="scanner-summary-grid" id="scanner-decision-summary">
+        <div class="decision-count-card enter"><span>🟢 Entrar agora</span><strong id="scanner-count-enter">{decision_counts.get("ENTER_NOW", 0)}</strong></div>
+        <div class="decision-count-card wait"><span>🟡 Aguardar</span><strong id="scanner-count-wait">{decision_counts.get("WAIT_CONFIRMATION", 0)}</strong></div>
+        <div class="decision-count-card monitor"><span>🔵 Monitorar</span><strong id="scanner-count-monitor">{decision_counts.get("MONITOR_ONLY", 0)}</strong></div>
+        <div class="decision-count-card exit"><span>🔴 Não entrar</span><strong id="scanner-count-exit">{decision_counts.get("DO_NOT_ENTER", 0)}</strong></div>
+        <div class="decision-count-card hold"><span>⚪ Sem dados</span><strong id="scanner-count-hold">{decision_counts.get("NO_DATA", 0)}</strong></div>
+      </div>
+      <div class="criteria-bar" id="scanner-criteria-bar">
+        <span class="criteria-chip" id="criteria-ev">EV minimo: 5%</span>
+        <span class="criteria-chip" id="criteria-confidence">Confianca minima: 65%</span>
+        <span class="criteria-chip" id="criteria-score">Score minimo: 65</span>
+        <span class="criteria-chip" id="criteria-odds">Odds: 1.60 ate 3.00</span>
+        <span class="criteria-chip" id="criteria-profile">Perfil: Moderado</span>
+      </div>
+      <p class="muted" id="scanner-criteria-note">Padrao visual: mostrar liberadas, aguardar confirmacao e monitorar. “Nao entrar” fica oculto por padrao para reduzir ruido.</p>
+      <div class="active-line" id="football-provider-strip">
+        <div class="mini"><div class="muted">Fonte ao vivo</div><strong id="football-provider-active">carregando...</strong></div>
+        <div class="mini"><div class="muted">Ultima atualizacao</div><strong id="football-provider-updated">-</strong></div>
+        <div class="mini"><div class="muted">Requests hoje</div><strong id="football-provider-requests">-</strong></div>
+        <div class="mini"><div class="muted">Fallback</div><strong id="football-provider-fallback">-</strong></div>
+        <div class="mini"><div class="muted">Erro recente</div><strong id="football-provider-error">sem erro</strong></div>
+      </div>
+      <p class="muted" id="football-provider-note">API-Football no backend com fallback local/mock se a fonte falhar.</p>
+    </section>
+    <section class="grid primary-metrics-grid" id="decision-kpis">
+      <div class="card"><div class="metric">{len(opportunities)}</div><div class="muted">Jogos analisados agora</div></div>
+      <div class="card"><div class="metric green">{strong_count}</div><div class="muted">Entradas liberadas</div></div>
+      <div class="card"><div class="metric amber">{monitor_count}</div><div class="muted">Aguardando / monitorando</div></div>
+      <div class="card"><div class="metric red">{blocked_count}</div><div class="muted">Bloqueadas / sem dados</div></div>
+      <div class="card"><div class="metric">{stats["hit_rate"]}%</div><div class="muted">Hit rate</div></div>
+      <div class="card"><div class="metric {_value_class(stats["roi_units"])}">{stats["roi_units"]}%</div><div class="muted">ROI geral</div></div>
+      <div class="card"><div class="metric {_value_class(stats["profit_units"])}">{_format_brl(stats["profit_units"])}</div><div class="muted">Lucro / prejuízo</div></div>
+      <div class="card"><div class="metric">{_esc((stats.get("best_market") or {}).get("name") or "-")}</div><div class="muted">Melhor mercado</div></div>
+    </section>
+    <section class="card section" id="performance-overview">
+      <div class="section-head">
+        <h2>Performance E Aprendizado</h2>
+        <span class="muted">Métricas secundárias para revisar a saúde do modelo sem poluir a mesa principal.</span>
+      </div>
+      <div class="grid secondary-metrics-grid">
+        <div class="card"><div class="metric">{stats["total"]}</div><div class="muted">Sinais registrados</div></div>
+        <div class="card"><div class="metric green">{stats["wins"]}</div><div class="muted">Greens</div></div>
+        <div class="card"><div class="metric red">{stats["losses"]}</div><div class="muted">Reds</div></div>
+        <div class="card"><div class="metric {_value_class(manual_stats["profit_currency"])}">{_format_brl(manual_stats["profit_currency"])}</div><div class="muted">Resultado manual</div></div>
+        <div class="card"><div class="metric">{manual_stats["total"]}</div><div class="muted">Apostas importadas</div></div>
+        <div class="card"><div class="metric amber">{stats["brier_score"]}</div><div class="muted">Brier score</div></div>
+        <div class="card"><div class="metric">{stats["readiness"]}</div><div class="muted">Maturidade IA</div></div>
+        <div class="card"><div class="metric">{_esc(fast_learning.get("mode", "neutro"))}</div><div class="muted">Modo rapido</div></div>
+        <div class="card"><div class="metric">{_esc(fast_learning.get("momentum_score", 50))}/100</div><div class="muted">Momentum IA</div></div>
+        <div class="card"><div class="metric {_value_class(backtest.get("profit_units"))}">{_format_brl(backtest.get("profit_units", 0))}</div><div class="muted">Backtest lucro</div></div>
+        <div class="card"><div class="metric red">{_format_brl(backtest.get("max_drawdown_units", 0))}</div><div class="muted">Drawdown max</div></div>
+        <div class="card"><div class="metric">{_esc((stats.get("worst_market") or {}).get("name") or "-")}</div><div class="muted">Pior mercado</div></div>
+        <div class="card"><div class="metric">{_esc((stats.get("best_league") or {}).get("name") or "-")}</div><div class="muted">Melhor liga</div></div>
+        <div class="card"><div class="metric">{_esc((stats.get("worst_league") or {}).get("name") or "-")}</div><div class="muted">Pior liga</div></div>
       </div>
     </section>
     <section class="card section" id="mercado">
@@ -1604,12 +2809,117 @@ def dashboard(request: Request) -> str:
         </div>
         <div id="thermometer-rows" class="market-pulse">{thermometer_rows}</div>
       </section>
+      <section class="card section" id="scanner-quality">
+        <div class="section-head">
+          <h2>Filtros De Decisao</h2>
+          <span class="muted">Use estes filtros para reduzir ruido e deixar a mesa focada nas entradas mais limpas.</span>
+        </div>
+        <div class="scan-toolbar">
+          <label class="field">
+            <span>Mostrar</span>
+            <select id="scanner-filter-mode" onchange="applyScannerTableFilters()">
+              <option value="focus" selected>Liberadas + aguardar + monitorar</option>
+              <option value="enter">So entrar agora</option>
+              <option value="enter_wait">Entrar + aguardar</option>
+              <option value="monitor">So monitorar</option>
+              <option value="all">Mostrar tudo</option>
+              <option value="hide_no_entry">Ocultar nao entrar</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>EV minimo</span>
+            <input id="scanner-filter-ev" type="number" min="0" max="1" step="0.01" value="0.05" oninput="applyScannerTableFilters()" />
+          </label>
+          <label class="field">
+            <span>Confianca minima</span>
+            <input id="scanner-filter-confidence" type="number" min="0" max="100" step="1" value="65" oninput="applyScannerTableFilters()" />
+          </label>
+          <label class="field">
+            <span>Score minimo</span>
+            <input id="scanner-filter-score" type="number" min="0" max="100" step="1" value="65" oninput="applyScannerTableFilters()" />
+          </label>
+          <label class="field">
+            <span>Mercado</span>
+            <select id="scanner-filter-market" onchange="applyScannerTableFilters()">
+              <option value="all">Todos</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Liga</span>
+            <select id="scanner-filter-league" onchange="applyScannerTableFilters()">
+              <option value="all">Todas</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Odd minima</span>
+            <input id="scanner-filter-odd-min" type="number" min="1" max="10" step="0.01" value="1.60" oninput="applyScannerTableFilters()" />
+          </label>
+          <label class="field">
+            <span>Odd maxima</span>
+            <input id="scanner-filter-odd-max" type="number" min="1" max="10" step="0.01" value="3.00" oninput="applyScannerTableFilters()" />
+          </label>
+        </div>
+      </section>
       <div class="scanner-grid">
         <div class="table-wrap"><table class="responsive">
-          <thead><tr><th>Jogo</th><th>Mercado</th><th>Selecao</th><th>Linha</th><th>Odd</th><th>Acao</th><th>Score</th><th>Leitura</th></tr></thead>
-          <tbody id="simulator-rows">{simulation_rows or '<tr><td colspan="8">Aguardando sinais do scanner.</td></tr>'}</tbody>
+          <thead><tr><th>Jogo</th><th>Mercado</th><th>Selecao</th><th>Linha</th><th>Odd</th><th>EV</th><th>Confianca</th><th>Recomendacao</th><th>Risco</th><th>Score</th><th>Leitura</th></tr></thead>
+          <tbody id="simulator-rows">{simulation_rows or '<tr><td colspan="11">Aguardando sinais do scanner.</td></tr>'}</tbody>
         </table></div>
-        <aside class="stats-panel" id="match-stats">{match_stats}</aside>
+        <aside class="stats-panel" id="match-stats-secondary">{match_stats}</aside>
+      </div>
+      <section class="card section" id="backtest-quick">
+        <div class="section-head">
+          <h2>Backtest rapido</h2>
+          <span class="muted">simulacao fria com os filtros operacionais atuais</span>
+        </div>
+        <div class="scan-toolbar">
+          <label class="field">
+            <span>Liga</span>
+            <select id="backtest-league">
+              <option value="all">Todas</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Mercado</span>
+            <select id="backtest-market">
+              <option value="all">Todos</option>
+              <option value="1X2">1X2</option>
+              <option value="Over 2.5">Over 2.5</option>
+              <option value="Under 2.5">Under 2.5</option>
+              <option value="BTTS">BTTS</option>
+              <option value="Outros">Outros</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>EV minimo</span>
+            <input id="backtest-min-ev" type="number" min="0" max="1" step="0.01" value="0.05" />
+          </label>
+          <label class="field">
+            <span>Confianca minima</span>
+            <input id="backtest-min-confidence" type="number" min="0" max="1" step="0.01" value="0.65" />
+          </label>
+          <label class="field">
+            <span>Odd min/max</span>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input id="backtest-odd-min" type="number" min="1" step="0.01" value="1.60" />
+              <input id="backtest-odd-max" type="number" min="1" step="0.01" value="3.00" />
+            </div>
+          </label>
+          <label class="field">
+            <span>Banca / dias</span>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input id="backtest-bankroll" type="number" min="100" step="50" value="1000" />
+              <input id="backtest-days" type="number" min="7" step="7" value="365" />
+            </div>
+          </label>
+          <button class="ghost" type="button" onclick="runQuickBacktest()">Rodar backtest</button>
+        </div>
+        <div id="quick-backtest-panel">{quick_backtest_panel}</div>
+        <div id="quick-backtest-history">{quick_backtest_history}</div>
+      </section>
+      <div class="scanner-grid">
+        <section class="card section">{market_breakdown_panel}</section>
+        <section class="card section">{league_breakdown_panel}</section>
       </div>
     </section>
     <div class="layout">
@@ -1735,12 +3045,13 @@ def dashboard(request: Request) -> str:
   function applyTheme(theme) {{
     const nextTheme = theme === 'light' ? 'light' : 'dark';
     document.body.setAttribute('data-theme', nextTheme);
-    const button = document.getElementById('theme-toggle');
-    if (button) {{
-      const isLight = nextTheme === 'light';
+    const isLight = nextTheme === 'light';
+    ['theme-toggle', 'menu-theme-toggle'].forEach((id) => {{
+      const button = document.getElementById(id);
+      if (!button) return;
       button.textContent = isLight ? 'Tema escuro' : 'Tema claro';
       button.setAttribute('aria-pressed', isLight ? 'true' : 'false');
-    }}
+    }});
     try {{
       localStorage.setItem('apexgol-theme', nextTheme);
     }} catch (error) {{
@@ -1759,6 +3070,17 @@ def dashboard(request: Request) -> str:
     if (!panel) return;
     const shouldOpen = typeof force === 'boolean' ? force : !panel.classList.contains('open');
     panel.classList.toggle('open', shouldOpen);
+    if (button) button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+  }}
+
+  function toggleDashboardMenu(force) {{
+    const panel = document.getElementById('menu-panel');
+    const overlay = document.getElementById('menu-overlay');
+    const button = document.getElementById('menu-trigger');
+    if (!panel) return;
+    const shouldOpen = typeof force === 'boolean' ? force : !panel.classList.contains('open');
+    panel.classList.toggle('open', shouldOpen);
+    if (overlay) overlay.classList.toggle('open', shouldOpen);
     if (button) button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
   }}
 
@@ -1943,6 +3265,14 @@ def dashboard(request: Request) -> str:
     toggleAccountPanel(false);
   }});
 
+  document.addEventListener('click', (event) => {{
+    const panel = document.getElementById('menu-panel');
+    const button = document.getElementById('menu-trigger');
+    if (!panel || !panel.classList.contains('open')) return;
+    if (panel.contains(event.target) || button?.contains(event.target)) return;
+    toggleDashboardMenu(false);
+  }});
+
   document.addEventListener('keydown', (event) => {{
     if (event.key !== 'Escape') return;
     const shell = document.getElementById('fab-menu');
@@ -1952,9 +3282,21 @@ def dashboard(request: Request) -> str:
     if (button) button.setAttribute('aria-expanded', 'false');
   }});
 
+  document.addEventListener('keydown', (event) => {{
+    if (event.key !== 'Escape') return;
+    toggleDashboardMenu(false);
+  }});
+
   function setScanModeButtons(mode) {{
     document.querySelectorAll('.scan-mode-btn').forEach((button) => {{
       const isActive = button.dataset.mode === mode;
+      button.classList.toggle('active', isActive);
+    }});
+  }}
+
+  function setRiskProfileButtons(profile) {{
+    document.querySelectorAll('[data-risk-profile]').forEach((button) => {{
+      const isActive = button.dataset.riskProfile === profile;
       button.classList.toggle('active', isActive);
     }});
   }}
@@ -1967,6 +3309,22 @@ def dashboard(request: Request) -> str:
       if (!response.ok) throw new Error(data.detail || 'Falha ao carregar scanner');
       setScanModeButtons(data.mode);
       if (note) note.textContent = `Modo atual: ${{data.mode_label}}`;
+    }} catch (error) {{
+      if (note) note.textContent = error.message;
+    }}
+  }}
+
+  async function loadRiskProfileConfig() {{
+    const note = document.getElementById('risk-profile-note');
+    try {{
+      const response = await fetch('/api/risk-profile', {{cache: 'no-store'}});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao carregar perfil de risco');
+      setRiskProfileButtons(data.profile);
+      const current = document.getElementById('risk-profile-current');
+      if (current) current.textContent = data.profileLabel || data.profile_label || data.profile;
+      if (note) note.textContent = `Perfil atual: ${{data.profile_label || data.profile}}`;
+      updateDecisionCriteria({{effective_risk_profile: data.profile, risk_profile_label: data.profile_label || data.profile}});
     }} catch (error) {{
       if (note) note.textContent = error.message;
     }}
@@ -1991,6 +3349,69 @@ def dashboard(request: Request) -> str:
     }}
   }}
 
+  async function setRiskProfile(profile) {{
+    const note = document.getElementById('risk-profile-note');
+    if (note) note.textContent = 'Salvando perfil de risco...';
+    try {{
+      const response = await fetch('/api/risk-profile', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
+        body: JSON.stringify({{profile}})
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao salvar perfil');
+      setRiskProfileButtons(data.profile);
+      const current = document.getElementById('risk-profile-current');
+      if (current) current.textContent = data.profile_label || data.profile;
+      if (note) note.textContent = data.message || `Perfil atual: ${{data.profile_label || data.profile}}`;
+      updateDecisionCriteria({{effective_risk_profile: data.profile, risk_profile_label: data.profile_label || data.profile}});
+      window.setTimeout(() => requestScanNow(), 120);
+    }} catch (error) {{
+      if (note) note.textContent = error.message;
+    }}
+  }}
+
+  function profileRules(profileName) {{
+    const key = String(profileName || 'moderado').toLowerCase();
+    const rules = {{
+      conservador: {{minEv: 0.08, minConfidence: 75, minScore: 70, oddMin: 1.60, oddMax: 2.50, note: 'Modo conservador ativo: somente sinais fortes serao exibidos.'}},
+      agressivo: {{minEv: 0.03, minConfidence: 60, minScore: 60, oddMin: 1.60, oddMax: 3.50, note: 'Modo agressivo: a tela abre mais sinais, inclusive os mais sensiveis.'}},
+      moderado: {{minEv: 0.05, minConfidence: 65, minScore: 65, oddMin: 1.60, oddMax: 3.00, note: 'Padrao visual: mostrar liberadas, aguardar confirmacao e monitorar. “Nao entrar” fica oculto por padrao para reduzir ruido.'}},
+    }};
+    return rules[key] || rules.moderado;
+  }}
+
+  function updateDecisionCriteria(scanner = {{}}) {{
+    const profileName = String(scanner.effective_risk_profile || scanner.risk_profile || scanner.profile || '').toLowerCase()
+      || (String(scanner.risk_profile_label || '').toLowerCase().includes('conserv') ? 'conservador'
+        : String(scanner.risk_profile_label || '').toLowerCase().includes('agress') ? 'agressivo'
+        : 'moderado');
+    const rules = profileRules(profileName);
+    const mappings = [
+      ['criteria-ev', `EV minimo: ${{Math.round(rules.minEv * 100)}}%`],
+      ['criteria-confidence', `Confianca minima: ${{rules.minConfidence}}%`],
+      ['criteria-score', `Score minimo: ${{rules.minScore}}`],
+      ['criteria-odds', `Odds: ${{rules.oddMin.toFixed(2)}} ate ${{rules.oddMax.toFixed(2)}}`],
+      ['criteria-profile', `Perfil: ${{scanner.risk_profile_label || profileName}}`],
+    ];
+    mappings.forEach(([id, value]) => {{
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }});
+    const note = document.getElementById('scanner-criteria-note');
+    if (note) note.textContent = rules.note;
+    const ev = document.getElementById('scanner-filter-ev');
+    const confidence = document.getElementById('scanner-filter-confidence');
+    const score = document.getElementById('scanner-filter-score');
+    const oddMin = document.getElementById('scanner-filter-odd-min');
+    const oddMax = document.getElementById('scanner-filter-odd-max');
+    if (ev && !ev.dataset.userTouched) ev.value = String(rules.minEv.toFixed(2));
+    if (confidence && !confidence.dataset.userTouched) confidence.value = String(rules.minConfidence);
+    if (score && !score.dataset.userTouched) score.value = String(rules.minScore);
+    if (oddMin && !oddMin.dataset.userTouched) oddMin.value = String(rules.oddMin.toFixed(2));
+    if (oddMax && !oddMax.dataset.userTouched) oddMax.value = String(rules.oddMax.toFixed(2));
+  }}
+
   function applyScannerSnapshot(data) {{
     const scanner = (data && data.scanner) || {{}};
     const mappings = [
@@ -2000,11 +3421,41 @@ def dashboard(request: Request) -> str:
       ['scan-candidates-current', scanner.candidates],
       ['scan-today-current', scanner.today_games],
       ['scan-status-current', scanner.status],
+      ['risk-profile-current', scanner.risk_profile_label],
     ];
     mappings.forEach(([id, value]) => {{
       const el = document.getElementById(id);
       if (el && value !== undefined && value !== null) el.textContent = String(value);
     }});
+    updateDecisionCriteria(scanner);
+  }}
+
+  async function loadFootballProviderStatus() {{
+    const note = document.getElementById('football-provider-note');
+    try {{
+      const response = await fetch('/api/football/provider/status', {{cache: 'no-store'}});
+      const data = await response.json();
+      const status = data.status || {{}};
+      const mappings = [
+        ['football-provider-active', data.ok ? 'API-Football ativa' : 'API-Football inativa'],
+        ['football-provider-updated', data.last_update_at || status.last_success_at || '-'],
+        ['football-provider-requests', status.requests_used_today ?? status.requests_total ?? '-'],
+        ['football-provider-fallback', status.fallback_active ? 'ativo' : 'inativo'],
+        ['football-provider-error', status.last_error || 'sem erro'],
+      ];
+      mappings.forEach(([id, value]) => {{
+        const el = document.getElementById(id);
+        if (el) el.textContent = String(value ?? '-');
+      }});
+      if (note) {{
+        note.textContent = data.message
+          || (status.fallback_active
+            ? 'Fonte API indisponível, usando fallback.'
+            : 'API-Football ativa no backend, sem chave no frontend.');
+      }}
+    }} catch (error) {{
+      if (note) note.textContent = error.message || 'Falha ao carregar status da API-Football.';
+    }}
   }}
 
   async function refreshRuntimeState() {{
@@ -2012,7 +3463,111 @@ def dashboard(request: Request) -> str:
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Falha ao atualizar estado');
     applyScannerSnapshot(data);
+    await loadFootballProviderStatus();
+    const banner = document.getElementById('roi-alert-banner');
+    const alert = (data.stats || {{}}).roi_alert;
+    if (banner) {{
+      if (alert && alert.message) {{
+        banner.style.display = '';
+        banner.className = `notice ${{
+          alert.level === 'high' ? 'danger' : 'warn'
+        }}`;
+        banner.innerHTML = `<strong>ROI em alerta.</strong> ${{alert.message}}`;
+      }} else {{
+        banner.style.display = 'none';
+      }}
+    }}
     return data;
+  }}
+
+  function populateScannerFilterOptions() {{
+    const leagueSelect = document.getElementById('scanner-filter-league');
+    const marketSelect = document.getElementById('scanner-filter-market');
+    const backtestLeague = document.getElementById('backtest-league');
+    if (!leagueSelect || !marketSelect) return;
+    const leagues = new Set();
+    const markets = new Set();
+    document.querySelectorAll('#simulator-rows tr[data-league]').forEach((row) => {{
+      const league = (row.getAttribute('data-league') || '').trim();
+      const market = (row.getAttribute('data-market') || '').trim();
+      if (league) leagues.add(league);
+      if (market) markets.add(market);
+    }});
+    const currentLeague = leagueSelect.value || 'all';
+    const currentMarket = marketSelect.value || 'all';
+    leagueSelect.innerHTML = `<option value="all">Todas</option>${{Array.from(leagues).sort().map(item => `<option value="${{item}}">${{item}}</option>`).join('')}}`;
+    marketSelect.innerHTML = `<option value="all">Todos</option>${{Array.from(markets).sort().map(item => `<option value="${{item}}">${{item}}</option>`).join('')}}`;
+    leagueSelect.value = Array.from(leagues).includes(currentLeague) ? currentLeague : 'all';
+    marketSelect.value = Array.from(markets).includes(currentMarket) ? currentMarket : 'all';
+    if (backtestLeague) {{
+      const backtestCurrent = backtestLeague.value || 'all';
+      backtestLeague.innerHTML = `<option value="all">Todas</option>${{Array.from(leagues).sort().map(item => `<option value="${{item}}">${{item}}</option>`).join('')}}`;
+      backtestLeague.value = Array.from(leagues).includes(backtestCurrent) ? backtestCurrent : 'all';
+    }}
+  }}
+
+  function applyScannerTableFilters() {{
+    const rows = document.querySelectorAll('#simulator-rows tr[data-league]');
+    if (!rows.length) return;
+    const minEv = Number(document.getElementById('scanner-filter-ev')?.value || '0');
+    const minConfidence = Number(document.getElementById('scanner-filter-confidence')?.value || '0');
+    const minScore = Number(document.getElementById('scanner-filter-score')?.value || '0');
+    const market = document.getElementById('scanner-filter-market')?.value || 'all';
+    const league = document.getElementById('scanner-filter-league')?.value || 'all';
+    const mode = document.getElementById('scanner-filter-mode')?.value || 'focus';
+    const oddMin = Number(document.getElementById('scanner-filter-odd-min')?.value || '0');
+    const oddMax = Number(document.getElementById('scanner-filter-odd-max')?.value || '99');
+    rows.forEach((row) => {{
+      const ev = Number(row.getAttribute('data-ev') || '0');
+      const confidence = Number(row.getAttribute('data-confidence') || '0') * 100;
+      const score = Number(row.getAttribute('data-score') || '0');
+      const odd = Number(row.getAttribute('data-odd') || '0');
+      const rowMarket = row.getAttribute('data-market') || '';
+      const rowLeague = row.getAttribute('data-league') || '';
+      const status = row.getAttribute('data-status') || 'monitor_only';
+      const allowed = row.getAttribute('data-entry-allowed') === 'true';
+      const matchesEv = !Number.isFinite(minEv) || ev >= minEv;
+      const matchesConfidence = !Number.isFinite(minConfidence) || confidence >= minConfidence || status === 'no_data';
+      const matchesScore = !Number.isFinite(minScore) || score >= minScore || status === 'no_data';
+      const matchesMarket = market === 'all' || rowMarket === market;
+      const matchesLeague = league === 'all' || rowLeague === league;
+      const matchesOdds = !Number.isFinite(oddMin) || !Number.isFinite(oddMax) || odd === 0 || (odd >= oddMin && odd <= oddMax);
+      const matchesMode = mode === 'all'
+        || (mode === 'focus' && ['enter_now', 'wait_confirmation', 'monitor_only'].includes(status))
+        || (mode === 'enter' && status === 'enter_now')
+        || (mode === 'enter_wait' && ['enter_now', 'wait_confirmation'].includes(status))
+        || (mode === 'monitor' && status === 'monitor_only')
+        || (mode === 'hide_no_entry' && status !== 'do_not_enter');
+      row.style.display = matchesEv && matchesConfidence && matchesScore && matchesMarket && matchesLeague && matchesOdds && matchesMode ? '' : 'none';
+    }});
+    refreshScannerDecisionSummary();
+  }}
+
+  function refreshScannerDecisionSummary() {{
+    const rows = document.querySelectorAll('#simulator-rows tr[data-decision]');
+    const counts = {{
+      enter_now: 0,
+      wait_confirmation: 0,
+      monitor_only: 0,
+      do_not_enter: 0,
+      no_data: 0,
+    }};
+    rows.forEach((row) => {{
+      if (row.style.display === 'none') return;
+      const status = String(row.getAttribute('data-status') || 'monitor_only').toLowerCase();
+      if (counts[status] !== undefined) counts[status] += 1;
+    }});
+    const mappings = [
+      ['scanner-count-enter', counts.enter_now],
+      ['scanner-count-wait', counts.wait_confirmation],
+      ['scanner-count-monitor', counts.monitor_only],
+      ['scanner-count-exit', counts.do_not_enter],
+      ['scanner-count-hold', counts.no_data],
+    ];
+    mappings.forEach(([id, value]) => {{
+      const el = document.getElementById(id);
+      if (el) el.textContent = String(value);
+    }});
   }}
 
   async function requestScanNow(options = {{}}) {{
@@ -2027,6 +3582,7 @@ def dashboard(request: Request) -> str:
       if (!response.ok) throw new Error(data.detail || 'Falha ao solicitar scan');
       if (note) note.textContent = `${{data.message}} (${{data.candidates}} candidatos)`;
       await loadScanConfig();
+      await loadFootballProviderStatus();
       await refreshRuntimeState();
       window.setTimeout(refreshSimulator, 800);
     }} catch (error) {{
@@ -2287,18 +3843,93 @@ def dashboard(request: Request) -> str:
     }}
   }}
 
+  window.dashboardModeFilter = 'focus';
+
+  function jumpDashboardTo(id) {{
+    const target = document.getElementById(id);
+    if (!target) return;
+    target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+  }}
+
+  function setDashboardModeFilter(mode) {{
+    window.dashboardModeFilter = mode || 'focus';
+    document.querySelectorAll('[data-center-mode]').forEach((button) => {{
+      const active = button.getAttribute('data-center-mode') === window.dashboardModeFilter;
+      button.classList.toggle('active', active);
+    }});
+    document.querySelectorAll('.dashboard-view-btn').forEach((button) => {{
+      const text = (button.textContent || '').trim().toLowerCase();
+      const active = (window.dashboardModeFilter === 'all' && text === 'dashboard')
+        || (window.dashboardModeFilter === 'live' && text === 'ao vivo');
+      if (text === 'radar ia') return;
+      button.classList.toggle('active', active);
+    }});
+    applyDashboardFeedFilters();
+  }}
+
+  function applyDashboardFeedFilters() {{
+    const term = (document.getElementById('dashboard-live-search')?.value || '').trim().toLowerCase();
+    const mode = window.dashboardModeFilter || 'focus';
+    let hasActive = false;
+    document.querySelectorAll('.dashboard-feed-group').forEach((group) => {{
+      let visibleInGroup = 0;
+      group.querySelectorAll('.dashboard-feed-card').forEach((card) => {{
+        const search = (card.getAttribute('data-search') || '').toLowerCase();
+        const status = String(card.getAttribute('data-action') || '').toLowerCase();
+        const matchesTerm = !term || search.includes(term);
+        const matchesMode = mode === 'all'
+          || mode === 'live'
+          || (mode === 'focus' && ['enter_now', 'wait_confirmation', 'monitor_only'].includes(status))
+          || (mode === 'enter' && status === 'enter_now')
+          || (mode === 'wait' && status === 'wait_confirmation')
+          || (mode === 'monitor' && status === 'monitor_only');
+        const show = matchesTerm && matchesMode;
+        card.style.display = show ? '' : 'none';
+        if (show) {{
+          visibleInGroup += 1;
+          hasActive = true;
+        }}
+      }});
+      group.style.display = visibleInGroup > 0 ? '' : 'none';
+    }});
+    const empty = document.querySelector('.dashboard-feed-empty.dynamic');
+    if (empty) empty.remove();
+    const feed = document.getElementById('dashboard-live-feed');
+    if (feed && !hasActive) {{
+      const blank = document.createElement('div');
+      blank.className = 'dashboard-feed-empty dynamic';
+      blank.innerHTML = '<strong>Nenhum jogo bateu com esse filtro</strong><span>Troque o termo ou volte para Todos para abrir mais opcoes do radar ao vivo.</span>';
+      feed.appendChild(blank);
+    }}
+  }}
+
+  function highlightDashboardFeed(gameId) {{
+    document.querySelectorAll('.dashboard-feed-card').forEach((card) => {{
+      card.classList.toggle('active', card.getAttribute('data-game-id') === String(gameId || ''));
+    }});
+  }}
+
+  function setMatchStatsHtml(html) {{
+    const primary = document.getElementById('match-stats');
+    if (primary) primary.innerHTML = html;
+    const secondary = document.getElementById('match-stats-secondary');
+    if (secondary) secondary.innerHTML = html;
+  }}
+
   async function refreshSimulator() {{
     const status = document.getElementById('simulator-status');
     const best = document.getElementById('simulator-best');
-    const rows = document.getElementById('simulator-rows');
-    if (!status || !best || !rows) return;
+      const rows = document.getElementById('simulator-rows');
+      if (!status || !best || !rows) return;
     try {{
       status.textContent = 'Atualizando mercados ao vivo...';
       const response = await fetch('/api/simulator', {{cache: 'no-store'}});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Falha ao atualizar simulador');
       best.innerHTML = data.best_html;
-      rows.innerHTML = data.rows_html || '<tr><td colspan="8">Aguardando sinais do scanner.</td></tr>';
+      rows.innerHTML = data.rows_html || '<tr><td colspan="11">Aguardando sinais do scanner.</td></tr>';
+      populateScannerFilterOptions();
+      applyScannerTableFilters();
       const thermometer = document.getElementById('thermometer-rows');
       if (thermometer) thermometer.innerHTML = data.thermometer_html;
       const champRows = document.getElementById('champ-board-rows');
@@ -2307,14 +3938,23 @@ def dashboard(request: Request) -> str:
       if (leaderRows) leaderRows.innerHTML = data.leadership_rows_html || '<tr><td colspan="5">Sem liderancas ao vivo.</td></tr>';
       const tape = document.getElementById('league-tape');
       if (tape) tape.innerHTML = data.market_tape_html || '<span class="tape-chip mid">Aguardando feed ao vivo</span>';
+      const dashboardTape = document.getElementById('dashboard-market-tape');
+      if (dashboardTape) dashboardTape.innerHTML = data.market_tape_html || '<span class="tape-chip mid">Aguardando feed ao vivo</span>';
+      const feed = document.getElementById('dashboard-live-feed');
+      if (feed && data.dashboard_feed_html) {{
+        feed.innerHTML = data.dashboard_feed_html;
+        applyDashboardFeedFilters();
+        highlightDashboardFeed(window.selectedGameId || data.default_game_id || '');
+      }}
       const marketStatus = document.getElementById('market-board-status');
       if (marketStatus) marketStatus.textContent = `Atualizado: ${{data.updated_at}}`;
       const stats = document.getElementById('match-stats');
       if (stats && window.selectedGameId) {{
         await updateSelectedMatchStats(window.selectedGameId, false);
       }} else if (stats && data.match_stats_html) {{
-        stats.innerHTML = data.match_stats_html;
+        setMatchStatsHtml(data.match_stats_html);
         window.selectedGameId = data.default_game_id || null;
+        highlightDashboardFeed(window.selectedGameId);
       }}
       status.textContent = `Atualizado: ${{data.updated_at}} | feed ao vivo real`;
     }} catch (error) {{
@@ -2322,8 +3962,8 @@ def dashboard(request: Request) -> str:
     }}
   }}
 
-  window.setInterval(refreshSimulator, 60 * 1000);
-  window.setInterval(autoScanTick, 60 * 1000);
+  window.setInterval(refreshSimulator, 20 * 1000);
+  window.setInterval(autoScanTick, 20 * 1000);
   window.setInterval(() => {{
     const active = document.activeElement;
     const typing = active && ['TEXTAREA', 'INPUT'].includes(active.tagName);
@@ -2333,6 +3973,7 @@ def dashboard(request: Request) -> str:
 
   async function selectScannedGame(gameId) {{
     window.selectedGameId = gameId;
+    highlightDashboardFeed(gameId);
     await updateSelectedMatchStats(gameId, true);
   }}
 
@@ -2341,17 +3982,17 @@ def dashboard(request: Request) -> str:
     if (!panel) return;
     if (showLoading) {{
       panel.scrollTo({{top: 0, behavior: 'smooth'}});
-      panel.innerHTML = '<p class="muted">Carregando estatisticas do jogo...</p>';
+      setMatchStatsHtml('<p class="muted">Carregando estatisticas do jogo...</p>');
     }}
     try {{
       const response = await fetch(`/api/match-stats?game_id=${{encodeURIComponent(gameId)}}`, {{cache: 'no-store'}});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Falha ao carregar jogo');
-      panel.innerHTML = data.html;
+      setMatchStatsHtml(data.html);
       if (data.signal) fillBankrollFromSignal(data.signal);
       if (showLoading) panel.scrollTo({{top: 0, behavior: 'smooth'}});
     }} catch (error) {{
-      panel.innerHTML = `<p class="muted">${{error.message}}</p>`;
+      setMatchStatsHtml(`<p class="muted">${{error.message}}</p>`);
       if (showLoading) panel.scrollTo({{top: 0, behavior: 'smooth'}});
     }}
   }}
@@ -2359,8 +4000,17 @@ def dashboard(request: Request) -> str:
   window.__scanInFlight = false;
   initTheme();
   loadScanConfig();
+  loadRiskProfileConfig();
+  document.querySelectorAll('#scanner-filter-ev, #scanner-filter-confidence, #scanner-filter-score, #scanner-filter-odd-min, #scanner-filter-odd-max').forEach((input) => {{
+    input.addEventListener('input', () => {{
+      input.dataset.userTouched = 'true';
+    }});
+  }});
+  setDashboardModeFilter('focus');
   refreshRuntimeState().catch(() => null);
   autoScanTick().catch(() => null);
+  populateScannerFilterOptions();
+  applyScannerTableFilters();
 
   function switchStatsTab(button, paneId) {{
     const panel = button.closest('.stats-panel');
@@ -2370,6 +4020,35 @@ def dashboard(request: Request) -> str:
     button.classList.add('active');
     const pane = panel.querySelector(`#${{paneId}}`);
     if (pane) pane.classList.add('active');
+  }}
+
+  async function runQuickBacktest() {{
+    const panel = document.getElementById('quick-backtest-panel');
+    const history = document.getElementById('quick-backtest-history');
+    if (panel) panel.innerHTML = '<p class="muted">Rodando backtest rápido...</p>';
+    try {{
+      const payload = {{
+        league: document.getElementById('backtest-league')?.value || 'all',
+        market: document.getElementById('backtest-market')?.value || 'all',
+        min_ev: Number(document.getElementById('backtest-min-ev')?.value || '0.05'),
+        min_confidence_score: Number(document.getElementById('backtest-min-confidence')?.value || '0.65'),
+        odd_min: Number(document.getElementById('backtest-odd-min')?.value || '1.60'),
+        odd_max: Number(document.getElementById('backtest-odd-max')?.value || '3.00'),
+        bankroll: Number(document.getElementById('backtest-bankroll')?.value || '1000'),
+        lookback_days: Number(document.getElementById('backtest-days')?.value || '365'),
+      }};
+      const response = await fetch('/api/backtest-quick', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
+        body: JSON.stringify(payload)
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Falha ao rodar backtest rápido');
+      if (panel) panel.innerHTML = data.panel_html || '<p class="muted">Sem resultado.</p>';
+      if (history) history.innerHTML = data.history_html || '';
+    }} catch (error) {{
+      if (panel) panel.innerHTML = `<p class="muted">${{error.message}}</p>`;
+    }}
   }}
 </script>
 </html>"""
@@ -2430,7 +4109,9 @@ def jogos_do_dia_page(request: Request) -> str:
       min-height:32px; padding:0 10px; border-radius:999px;
       border:1px solid #293a4d; background:#0f151d; color:#d9e8f8;
       font-size:11px; font-weight:900; letter-spacing:.7px; text-transform:uppercase;
+      cursor:pointer; transition: transform .16s ease, border-color .16s ease, background .16s ease;
     }
+    .status-chip:hover { transform: translateY(-1px); border-color:#4f6b89; }
     .status-chip.live { background: rgba(14,203,129,.12); border-color: rgba(14,203,129,.32); color: #8df1c4; }
     .status-chip.watch { background: rgba(240,193,75,.12); border-color: rgba(240,193,75,.34); color: #f3d887; }
     .status-chip.idle { background: rgba(114,168,255,.12); border-color: rgba(114,168,255,.34); color: #b9d3ff; }
@@ -2445,6 +4126,26 @@ def jogos_do_dia_page(request: Request) -> str:
     .btn:hover { transform: translateY(-1px); border-color: #4f6b89; }
     .btn.primary { background: linear-gradient(180deg, #f5d14f, #d7aa27); border-color: #c7951f; color: #111; }
     .btn.ghost { background: #0f151d; }
+    .sports-strip {
+      border-bottom: 1px solid #314055;
+      background: #11161d;
+    }
+    .sports-strip-inner {
+      max-width: 1440px; margin: 0 auto; padding: 10px 18px;
+      display:flex; gap:10px; flex-wrap:nowrap; overflow:auto;
+    }
+    .sport-chip {
+      display:inline-flex; align-items:center; gap:8px; white-space:nowrap;
+      border-bottom: 3px solid transparent; padding: 8px 4px 10px;
+      color: #c7d8ea; font-size: 13px; font-weight: 800; cursor:pointer;
+      background: transparent; border-left: 0; border-right: 0; border-top: 0;
+      font: inherit;
+    }
+    .sport-chip.active { color:#fff; border-color:#18c774; }
+    .sport-chip .dot {
+      width: 8px; height: 8px; border-radius: 999px; background: #18c774;
+      box-shadow: 0 0 0 4px rgba(24,199,116,.12);
+    }
     .wrap { max-width: 1440px; margin: 0 auto; padding: 18px; }
     .hero {
       display: grid; gap: 16px; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
@@ -2477,13 +4178,18 @@ def jogos_do_dia_page(request: Request) -> str:
       display:inline-flex; align-items:center; gap:8px; border:1px solid #26384c; background:#0d141c;
       color:#d6e5f6; border-radius:999px; padding:8px 12px; font-size:12px; font-weight:800;
     }
+    .market-quick button.chip {
+      cursor:pointer; font: inherit; transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+    .market-quick button.chip:hover { transform: translateY(-1px); border-color:#4f6b89; background:#132030; }
     .market-quick .chip b { color:#f0c14b; font-size:13px; }
     .alert-section { margin-bottom: 16px; }
     .alert-strip { display:grid; gap:10px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
     .alert-card {
       border:1px solid #26384c; background:#0d141c; border-radius:12px; padding:14px;
-      display:grid; gap:8px;
+      display:grid; gap:8px; cursor:pointer; transition: transform .16s ease, border-color .16s ease, background .16s ease;
     }
+    .alert-card:hover { transform: translateY(-1px); background:#111923; border-color:#4f6b89; }
     .alert-card strong { font-size:16px; line-height:1.2; }
     .alert-card.good { border-color: rgba(14,203,129,.34); box-shadow: inset 0 0 0 1px rgba(14,203,129,.08); }
     .alert-card.warn { border-color: rgba(240,193,75,.34); box-shadow: inset 0 0 0 1px rgba(240,193,75,.08); }
@@ -2494,12 +4200,22 @@ def jogos_do_dia_page(request: Request) -> str:
     }
     .pregame-card {
       border: 1px solid #2b3950; border-radius: 12px; background: #0f151d; padding: 14px;
-      display: grid; gap: 8px;
+      display: grid; gap: 8px; cursor:pointer; transition: transform .16s ease, border-color .16s ease, background .16s ease;
     }
+    .pregame-card:hover { transform: translateY(-1px); background:#111923; border-color:#4f6b89; }
     .pregame-top { display:flex; justify-content:space-between; gap:10px; align-items:start; }
     .pregame-card strong { font-size: 16px; line-height: 1.18; }
     .pregame-time { color: #d8e6f8; font-size: 13px; font-weight: 800; }
     .pregame-focus { color: #c9d6e6; font-size: 13px; }
+    .preset-bar {
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px;
+    }
+    .preset-btn {
+      border:1px solid #2b3a4d; background:#0f151d; color:#d6e5f6;
+      border-radius:999px; min-height:34px; padding:0 12px; font:inherit; font-size:12px; font-weight:800;
+      cursor:pointer;
+    }
+    .preset-btn.active { background:#183524; border-color:#18c774; color:#effaf3; }
     .toolbar {
       display: grid; gap: 10px; grid-template-columns: minmax(220px, 1.2fr) repeat(5, minmax(140px, .62fr)) auto;
       align-items: end; margin-bottom: 16px;
@@ -2512,21 +4228,53 @@ def jogos_do_dia_page(request: Request) -> str:
       padding: 12px 12px; font: inherit;
     }
     .board {
-      display: grid; gap: 16px; grid-template-columns: minmax(360px, .92fr) minmax(0, 1.08fr);
+      display: grid; gap: 16px; grid-template-columns: minmax(420px, 1.08fr) minmax(360px, .92fr);
       align-items: start;
     }
-    .game-list { display: grid; gap: 10px; max-height: calc(100vh - 290px); overflow: auto; padding-right: 4px; }
-    .game-card {
-      border: 1px solid #263445; border-radius: 12px; background: #0f151d;
-      padding: 14px; cursor: pointer; transition: border-color .16s ease, transform .16s ease, background .16s ease;
+    .game-list { display: grid; gap: 12px; max-height: calc(100vh - 240px); overflow: auto; padding-right: 4px; }
+    .league-block { display:grid; gap:8px; }
+    .league-head {
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      background:#204c2f; color:#edf8ef; border-radius:8px; padding:10px 12px;
+      font-size:13px; font-weight:900;
     }
-    .game-card:hover { border-color: #3c546f; transform: translateY(-1px); }
-    .game-card.active { border-color: #f0c14b; background: #121a24; }
-    .game-top, .game-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .league-count { color:#d1ebd9; font-size:11px; }
+    .match-row {
+      border: 1px solid #263445; border-radius: 10px; background: #181d22;
+      padding: 12px; cursor:pointer;
+      display:grid; gap:12px; grid-template-columns: 1fr;
+      transition: border-color .16s ease, transform .16s ease, background .16s ease;
+    }
+    .match-row:hover { border-color: #3c546f; transform: translateY(-1px); }
+    .match-row.active { border-color: #f0c14b; background: #1b222a; }
     .league { color: var(--muted); font-size: 12px; }
-    .scoreline { display: flex; gap: 8px; align-items: center; font-weight: 900; }
-    .teams { display: grid; gap: 6px; margin: 10px 0 12px; }
-    .teams strong { font-size: 17px; line-height: 1.15; }
+    .match-main { display:grid; gap:10px; }
+    .scoreboard {
+      display:grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      gap:12px; align-items:center;
+    }
+    .team-side {
+      display:grid; gap:4px; min-width:0;
+    }
+    .team-side.away { text-align:right; }
+    .team-side strong {
+      font-size: 18px; line-height: 1.1; word-break: keep-all; overflow-wrap: anywhere;
+    }
+    .team-side .meta { color:#b9cadc; font-size:12px; }
+    .score-center {
+      min-width:84px; display:grid; gap:4px; justify-items:center;
+      border:1px solid #2f445d; border-radius:12px; background:#10161e; padding:8px 10px;
+    }
+    .score-center strong { font-size: 28px; line-height: 1; letter-spacing: .6px; }
+    .score-center span { color:#b9cadc; font-size:12px; font-weight:800; }
+    .match-summary {
+      display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+    }
+    .reading-chip {
+      display:inline-flex; align-items:center; min-height:28px; padding:0 10px;
+      border-radius:999px; border:1px solid #2f445d; background:#10161e; color:#d6e6f8;
+      font-size:12px; font-weight:800;
+    }
     .subline { color: #c1cede; font-size: 13px; }
     .pill {
       display: inline-flex; align-items: center; justify-content: center;
@@ -2542,16 +4290,83 @@ def jogos_do_dia_page(request: Request) -> str:
       border: 1px solid #263445; border-radius: 10px; background: #0c1219; padding: 10px;
     }
     .odd-box strong, .pressure-box strong { display: block; font-size: 17px; }
+    .row-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .fav-btn {
+      width:30px; height:30px; border-radius:999px; border:1px solid #36465c; background:#121922; color:#9cb0c8;
+      display:inline-flex; align-items:center; justify-content:center; font-size:14px; cursor:pointer;
+    }
+    .fav-btn.active { color:#ffd84a; border-color:#c8a234; background:#1a1d15; }
+    .intensity-badge {
+      display:inline-flex; align-items:center; justify-content:center; min-height:24px; padding:0 8px;
+      border-radius:999px; background:#15202d; border:1px solid #33465f; color:#d7e5f6; font-size:11px; font-weight:800;
+    }
+    .match-market-grid { display:grid; gap:8px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+    .match-market {
+      border: 1px solid #2a323f; border-radius: 8px; background: #11161d; padding: 8px;
+      display:grid; gap:6px;
+    }
+    .match-market .label { color:#b6c8da; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.6px; }
+    .match-market .cells { display:grid; gap:6px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .match-market.two .cells { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .odds-cell {
+      border:1px solid #313949; border-radius:8px; background:#1b2129; min-height:60px; padding:8px;
+      display:grid; align-content:space-between; cursor:pointer;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+      text-align:left; font: inherit; color: inherit;
+    }
+    .odds-cell:hover { transform: translateY(-1px); border-color:#f0c14b; background:#222b35; box-shadow: inset 0 0 0 1px rgba(240,193,75,.12); }
+    .odds-cell.active { border-color:#18c774; background:#13241d; box-shadow: inset 0 0 0 1px rgba(24,199,116,.14); }
+    .odds-cell .small { color:#d4e2f1; font-size:11px; line-height:1.15; }
+    .odds-cell .line { color:#b9cadc; font-size:11px; line-height:1.15; }
+    .odds-cell strong { color:#ffd84a; font-size:16px; line-height:1; }
     .progress {
       margin-top: 8px; background: #19212b; border-radius: 999px; overflow: hidden; height: 8px;
     }
     .progress span { display: block; height: 100%; background: linear-gradient(90deg, var(--green), var(--amber)); }
-    .detail { display: grid; gap: 12px; }
+    .detail { display: grid; gap: 12px; position: sticky; top: 84px; align-self: start; }
+    .detail-board { display:grid; gap:12px; }
     .detail-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: start; }
     .detail-head h2 { margin: 0; font-size: clamp(22px, 2.6vw, 32px); line-height: 1.05; }
+    .detail-meta { display:grid; gap:6px; }
+    .detail-tabs {
+      display:flex; gap:10px; overflow:auto; flex-wrap:nowrap; padding-bottom:4px;
+      border-bottom: 1px solid #2a313d;
+    }
+    .detail-tab {
+      white-space:nowrap; border:none; background:transparent; color:#dce9f7;
+      padding: 0 0 10px; font:inherit; font-size:13px; font-weight:800; cursor:pointer;
+      border-bottom: 3px solid transparent;
+    }
+    .detail-tab.active { color:#fff; border-color:#18c774; }
+    .market-sections { display:grid; gap:10px; }
+    .market-section {
+      border:1px solid #263445; background:#131920; border-radius:10px; overflow:hidden;
+    }
+    .market-section-head {
+      display:flex; justify-content:space-between; gap:10px; align-items:center;
+      padding:12px 14px; border-bottom:1px solid #263445; background:#161d25;
+    }
+    .market-section-head strong { font-size:16px; }
+    .market-cells {
+      display:grid; gap:10px; grid-template-columns: repeat(3, minmax(0, 1fr)); padding:12px;
+    }
+    .market-cells.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .detail-grid { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .detail-grid .mini { background: #10161e; border: 1px solid #273345; border-radius: 10px; padding: 12px; }
     .detail-grid .mini strong { display: block; font-size: 22px; }
+    .summary-strip, .floating-strip {
+      display:grid; gap:10px; grid-auto-flow:column; overflow:auto; padding-bottom:4px;
+      scroll-snap-type:x proximity;
+    }
+    .summary-strip { grid-auto-columns:minmax(160px, 1fr); }
+    .floating-strip { grid-auto-columns:minmax(210px, 1fr); }
+    .summary-card, .floating-card {
+      background: #10161e; border: 1px solid #273345; border-radius: 12px; padding: 14px;
+      display:grid; gap:8px; min-height: 100%; scroll-snap-align:start;
+      box-shadow: 0 10px 24px rgba(0,0,0,.16);
+    }
+    .summary-card strong { display:block; font-size:22px; }
+    .floating-card strong { display:block; font-size:20px; line-height:1.1; }
     .comparison {
       display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -2572,9 +4387,13 @@ def jogos_do_dia_page(request: Request) -> str:
     }
     .market-line strong { display: block; }
     .market-tags, .ticker { display: flex; gap: 8px; flex-wrap: wrap; }
-    .market-tags span, .ticker span {
+    .market-tags span, .ticker span, .market-tags button {
       border: 1px solid #243547; border-radius: 999px; padding: 6px 10px; font-size: 11px; color: #bbd1e8; background: #0e151d;
     }
+    .market-tags button {
+      cursor:pointer; font: inherit; transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+    .market-tags button:hover { transform: translateY(-1px); border-color:#4f6b89; background:#132030; }
     .empty {
       border: 1px dashed #314055; border-radius: 12px; padding: 24px; text-align: center; color: var(--muted);
       background: rgba(12,18,25,.5);
@@ -2589,7 +4408,7 @@ def jogos_do_dia_page(request: Request) -> str:
       .toolbar { grid-template-columns: 1fr 1fr; }
       .game-list { max-height: none; }
       .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .comparison, .market-line, .skills-grid { grid-template-columns: 1fr; }
+      .comparison, .market-line, .skills-grid, .market-cells, .match-market-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 640px) {
       .topin { align-items: start; flex-direction: column; }
@@ -2608,9 +4427,9 @@ def jogos_do_dia_page(request: Request) -> str:
       </div>
       <div class="top-actions">
         <div class="status-strip">
-          <span class="status-chip live" id="topLiveBadge">Ao vivo 0</span>
-          <span class="status-chip watch" id="topPregameBadge">Pre 0</span>
-          <span class="status-chip idle" id="topAutoScan">proxima leitura --</span>
+          <button class="status-chip live" type="button" id="topLiveBadge">Ao vivo 0</button>
+          <button class="status-chip watch" type="button" id="topPregameBadge">Pre 0</button>
+          <button class="status-chip idle" type="button" id="topAutoScan">proxima leitura --</button>
         </div>
         <nav class="nav">
           <a class="btn ghost" href="/app">Area do Cliente</a>
@@ -2621,18 +4440,31 @@ def jogos_do_dia_page(request: Request) -> str:
       </div>
     </div>
   </header>
+  <div class="sports-strip">
+    <div class="sports-strip-inner">
+      <button class="sport-chip" type="button" data-sport-filter="favorites"><span class="dot" style="background:#f0c14b"></span>Favoritos</button>
+      <button class="sport-chip" type="button" data-sport-filter="pressure"><span class="dot" style="background:#ff6a00"></span>Popular</button>
+      <button class="sport-chip active" type="button" data-sport-filter="all"><span class="dot"></span>Futebol</button>
+      <button class="sport-chip" type="button" data-sport-filter="corners"><span class="dot" style="background:#6ea8ff"></span>Escanteios</button>
+      <button class="sport-chip" type="button" data-sport-filter="goals"><span class="dot" style="background:#a987ff"></span>Gols</button>
+      <button class="sport-chip" type="button" data-sport-filter="asian"><span class="dot" style="background:#ff5b7f"></span>Handicap</button>
+      <button class="sport-chip" type="button" data-sport-filter="cards"><span class="dot" style="background:#ffe082"></span>Cartoes</button>
+      <button class="sport-chip" type="button" data-jump-target="liveBoardSection"><span class="dot" style="background:#a5d6a7"></span>Ao Vivo</button>
+      <button class="sport-chip" type="button" data-jump-target="pregameSection"><span class="dot" style="background:#90caf9"></span>Pre-Jogo</button>
+    </div>
+  </div>
   <main class="wrap">
     <section class="hero">
       <article class="card headline">
-        <div class="eyebrow">radar pre-jogo -> coleta ao vivo -> leitura por mercado</div>
-        <h1>Central operacional para jogos promissores e leitura ao vivo real</h1>
-        <p>O ApexGol varre a agenda, monta uma watchlist por horario e so liga a coleta forte quando os jogos escolhidos realmente entram ao vivo. A leitura prioriza gols, escanteios, handicap, cartoes e 1X2 com dados reais do feed.</p>
+        <div class="eyebrow">Painel de odds e leitura ao vivo</div>
+        <h1>Odds ao vivo, watchlist pre-jogo e leitura operacional por mercado</h1>
+        <p>O ApexGol filtra a agenda, arma a watchlist dos jogos promissores e, quando eles entram ao vivo, abre uma mesa operacional com foco em gols, escanteios, handicap, cartões e resultado final.</p>
         <div class="micro">
           <span>Scanner real do backend</span>
           <span>Watchlist pre-jogo por horario</span>
           <span>Execucao automatica quando o ciclo vence</span>
           <span>Filtros por liga, acao e busca</span>
-          <span>Painel lateral de leitura</span>
+          <span>Painel lateral com mercados</span>
           <span>Barra de pressao e corrida para o gol</span>
           <span>Alertas IA por mercado</span>
           <span>Leitura de escanteios FT, 1T e 2T</span>
@@ -2654,13 +4486,13 @@ def jogos_do_dia_page(request: Request) -> str:
       <article class="card metric"><strong id="metricWatch">0</strong><div class="muted">Aguardar / monitorar</div></article>
     </section>
 
-    <section class="card market-focus">
+    <section class="card market-focus" id="marketFocusSection">
       <div class="eyebrow">Mercados em foco</div>
       <div class="subline" style="margin:6px 0 12px">Resumo dos mercados vivos no radar atual para acelerar a leitura e a escolha do jogo.</div>
       <div class="market-quick" id="marketQuick"><span class="chip">Carregando mercados...</span></div>
     </section>
 
-    <section class="card alert-section">
+    <section class="card alert-section" id="alertSection">
       <div class="eyebrow">Live alerts</div>
       <div class="subline" style="margin:6px 0 12px">Fila de alertas vivos para gol, pressão, escanteios e mercado principal, já priorizada pelo scanner.</div>
       <div class="alert-strip" id="alertBoard">
@@ -2668,12 +4500,21 @@ def jogos_do_dia_page(request: Request) -> str:
       </div>
     </section>
 
-    <section class="card pregame-section">
+    <section class="card pregame-section" id="pregameSection">
       <div class="eyebrow">Watchlist pre-jogo</div>
       <div class="subline" style="margin:6px 0 12px">A IA vasculha a grade, escolhe os jogos mais promissores e só dispara a coleta forte quando eles realmente entram ao vivo.</div>
       <div class="pregame-strip" id="pregameBoard">
         <div class="empty">Carregando watchlist pre-jogo...</div>
       </div>
+    </section>
+
+    <section class="preset-bar" id="presetBar">
+      <button class="preset-btn active" type="button" data-preset="all">Radar geral</button>
+      <button class="preset-btn" type="button" data-preset="favorites">Favoritos</button>
+      <button class="preset-btn" type="button" data-preset="goals">Gols</button>
+      <button class="preset-btn" type="button" data-preset="corners">Escanteios</button>
+      <button class="preset-btn" type="button" data-preset="asian">Asiaticas</button>
+      <button class="preset-btn" type="button" data-preset="pressure">Alta pressao</button>
     </section>
 
     <section class="toolbar">
@@ -2722,7 +4563,7 @@ def jogos_do_dia_page(request: Request) -> str:
       <button class="btn ghost" type="button" id="scanNowBtn">Executar scanner</button>
     </section>
 
-    <section class="board">
+    <section class="board" id="liveBoardSection">
       <section class="game-list card" id="gameList">
         <div class="empty">Carregando jogos ao vivo...</div>
       </section>
@@ -2736,10 +4577,14 @@ def jogos_do_dia_page(request: Request) -> str:
     const boardState = {
       payload: null,
       selectedGameId: null,
+      detailTab: 'all',
+      preset: 'all',
+      favorites: new Set(),
       refreshTimer: null,
       bootstrapped: false,
       scanInFlight: false
     };
+    const FAVORITES_KEY = 'apexgol:jogosdodia:favorites';
 
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -2752,6 +4597,35 @@ def jogos_do_dia_page(request: Request) -> str:
       const num = Number(value);
       if (!Number.isFinite(num)) return '-';
       return digits ? num.toFixed(digits) : String(Math.round(num));
+    }
+    function formatOdd(value) {
+      const num = Number(value);
+      return Number.isFinite(num) && num > 0 ? num.toFixed(2) : '-';
+    }
+    function loadFavorites() {
+      try {
+        const raw = window.localStorage.getItem(FAVORITES_KEY);
+        const rows = JSON.parse(raw || '[]');
+        boardState.favorites = new Set(Array.isArray(rows) ? rows.map(String) : []);
+      } catch (error) {
+        boardState.favorites = new Set();
+      }
+    }
+    function saveFavorites() {
+      try {
+        window.localStorage.setItem(FAVORITES_KEY, JSON.stringify(Array.from(boardState.favorites)));
+      } catch (error) {}
+    }
+    function isFavorite(gameId) {
+      return boardState.favorites.has(String(gameId || ''));
+    }
+    function toggleFavorite(gameId) {
+      const key = String(gameId || '');
+      if (!key) return;
+      if (boardState.favorites.has(key)) boardState.favorites.delete(key);
+      else boardState.favorites.add(key);
+      saveFavorites();
+      renderGameList();
     }
     function isoAgeSeconds(value) {
       if (!value) return Number.POSITIVE_INFINITY;
@@ -2766,13 +4640,57 @@ def jogos_do_dia_page(request: Request) -> str:
       if (minutes <= 0) return `${secs}s`;
       return `${minutes}m ${String(secs).padStart(2,'0')}s`;
     }
+    function jumpToSection(id) {
+      const target = document.getElementById(id);
+      if (!target) return;
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
     function scoreText(game) {
       return `${safeNum(game.home_goals)} x ${safeNum(game.away_goals)}`;
+    }
+    function topLine(section) {
+      const cells = Array.isArray(section?.cells) ? section.cells : [];
+      return cells.filter(cell => Number(cell?.odds || 0) > 0).slice(0, 3);
+    }
+    function detailTabLabel(group) {
+      const labels = {
+        all: 'Todos',
+        '1x2': 'Resultado Final',
+        goals: 'Gols',
+        asian: 'Odds Asiaticas',
+        corners: 'Escanteios',
+        periods: '1º Tempo/2º Tempo',
+        cards: 'Cartoes',
+      };
+      return labels[group] || group;
+    }
+    function renderSectionCells(section) {
+      const cells = Array.isArray(section?.cells) ? section.cells : [];
+      const valid = cells.filter(cell => Number(cell?.odds || 0) > 0);
+      if (!valid.length) {
+        return `<div class="empty">Sem linha ao vivo nesta categoria.</div>`;
+      }
+      const cols = valid.length === 2 ? ' two' : '';
+      return `<div class="market-cells${cols}">${valid.map(cell => `
+        <article class="odds-cell">
+          <div class="small">${escapeHtml(cell.label || '-')}</div>
+          <div class="line">${escapeHtml(cell.line || '-')}</div>
+          <strong>${formatOdd(cell.odds)}</strong>
+        </article>
+      `).join('')}</div>`;
     }
     function actionClass(action) {
       if (action === 'ENTRAR') return 'enter';
       if (action === 'AGUARDAR') return 'wait';
       return 'hold';
+    }
+    function gameIntensity(game) {
+      const hp = Number(game.home_pressure || 0);
+      const ap = Number(game.away_pressure || 0);
+      const hs = Number(game.home_shots_on || 0);
+      const as = Number(game.away_shots_on || 0);
+      const minute = Number(game.minute || 0);
+      return Math.round(Math.max(hp, ap) + (hs + as) * 8 + Math.min(20, minute / 4));
     }
     function readingLabel(game) {
       if (!game.best_signal) return 'Sem sinal forte';
@@ -2787,7 +4705,8 @@ def jogos_do_dia_page(request: Request) -> str:
       const scenario = document.getElementById('filterScenario')?.value || 'all';
       const market = document.getElementById('filterMarket')?.value || 'all';
       const minMinute = Number(document.getElementById('filterMinute')?.value || '0');
-      return games.filter(game => {
+      const preset = boardState.preset || 'all';
+      const rows = games.filter(game => {
         const hay = `${game.home} ${game.away} ${game.league}`.toLowerCase();
         const actionValue = (game.best_signal && game.best_signal.action) || 'SEM DADOS';
         const bestMarket = String((game.best_signal && game.best_signal.market) || '').trim();
@@ -2806,7 +4725,46 @@ def jogos_do_dia_page(request: Request) -> str:
           && (market === 'all' || bestMarket === market || (game.market_tags || []).includes(market))
           && scenarioOk
           && Number(game.minute || 0) >= minMinute;
+      }).filter(game => {
+        if (preset === 'favorites') return isFavorite(game.game_id);
+        if (preset === 'goals') return (game.market_tags || []).includes('Gols') || String(game.best_signal?.market || '').includes('Gols');
+        if (preset === 'corners') return (game.market_tags || []).includes('Escanteios') || String(game.best_signal?.market || '').includes('Escanteios');
+        if (preset === 'asian') return (game.market_tags || []).includes('Handicap') || String(game.best_signal?.market || '').includes('Asiat');
+        if (preset === 'pressure') return Math.max(Number(game.home_pressure || 0), Number(game.away_pressure || 0)) >= 65;
+        return true;
       });
+      rows.sort((left, right) => {
+        const favoriteDiff = Number(isFavorite(right.game_id)) - Number(isFavorite(left.game_id));
+        if (favoriteDiff !== 0) return favoriteDiff;
+        const actionDiff = Number((right.best_signal || {}).action === 'ENTRAR') - Number((left.best_signal || {}).action === 'ENTRAR');
+        if (actionDiff !== 0) return actionDiff;
+        return gameIntensity(right) - gameIntensity(left);
+      });
+      return rows;
+    }
+    function applyPreset(preset) {
+      boardState.preset = preset || 'all';
+      const market = document.getElementById('filterMarket');
+      const action = document.getElementById('filterAction');
+      const minute = document.getElementById('filterMinute');
+      if (market && ['goals', 'corners', 'asian'].includes(boardState.preset)) {
+        market.value = boardState.preset === 'goals' ? 'Gols' : boardState.preset === 'corners' ? 'Escanteios' : 'Handicap';
+      } else if (market && boardState.preset === 'all') {
+        market.value = 'all';
+      }
+      if (action && boardState.preset === 'pressure') {
+        action.value = 'ENTRAR';
+      }
+      if (minute && boardState.preset === 'pressure') {
+        minute.value = '20';
+      }
+      document.querySelectorAll('[data-preset]').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-preset') === boardState.preset);
+      });
+      document.querySelectorAll('[data-sport-filter]').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-sport-filter') === boardState.preset);
+      });
+      renderGameList();
     }
     function renderLeagueFilter(games) {
       const select = document.getElementById('filterLeague');
@@ -2858,7 +4816,17 @@ def jogos_do_dia_page(request: Request) -> str:
         mount.innerHTML = '<span class="chip">Sem mercados destacados agora</span>';
         return;
       }
-      mount.innerHTML = items.map(item => `<span class="chip">${escapeHtml(item.market)} <b>${safeNum(item.games)}</b></span>`).join('');
+      mount.innerHTML = items.map(item => `<button class="chip" type="button" data-market-chip="${escapeHtml(item.market)}">${escapeHtml(item.market)} <b>${safeNum(item.games)}</b></button>`).join('');
+      mount.querySelectorAll('[data-market-chip]').forEach(button => {
+        button.addEventListener('click', () => {
+          const market = document.getElementById('filterMarket');
+          if (market) market.value = button.getAttribute('data-market-chip') || 'all';
+          boardState.preset = 'all';
+          document.querySelectorAll('[data-preset]').forEach(btn => btn.classList.remove('active'));
+          renderGameList();
+          jumpToSection('liveBoardSection');
+        });
+      });
     }
     function renderAlertBoard(payload) {
       const mount = document.getElementById('alertBoard');
@@ -2891,8 +4859,8 @@ def jogos_do_dia_page(request: Request) -> str:
       const candidateGames = Number(metrics.candidate_games || 0);
       const liveAge = isoAgeSeconds(scanner.last_scan_iso);
       const pregameAge = isoAgeSeconds(scanner.pregame_last_scan_iso);
-      const liveInterval = Math.max(45, Number(scanner.auto_scan_interval_seconds || 120));
-      const pregameInterval = Math.max(60, Number(scanner.pregame_scan_interval_seconds || liveInterval));
+      const liveInterval = Math.max(20, Number(scanner.auto_scan_interval_seconds || 120));
+      const pregameInterval = Math.max(20, Number(scanner.pregame_scan_interval_seconds || liveInterval));
       if (liveGames > 0 || candidateGames > 0) return liveAge >= liveInterval;
       if (pregameGames > 0) return pregameAge >= pregameInterval;
       return liveAge >= liveInterval;
@@ -2912,8 +4880,8 @@ def jogos_do_dia_page(request: Request) -> str:
       const pregameGames = Number(metrics.pregame_watchlist || 0);
       const liveAge = isoAgeSeconds(scanner.last_scan_iso);
       const pregameAge = isoAgeSeconds(scanner.pregame_last_scan_iso);
-      const liveInterval = Math.max(45, Number(scanner.auto_scan_interval_seconds || 120));
-      const pregameInterval = Math.max(60, Number(scanner.pregame_scan_interval_seconds || liveInterval));
+      const liveInterval = Math.max(20, Number(scanner.auto_scan_interval_seconds || 120));
+      const pregameInterval = Math.max(20, Number(scanner.pregame_scan_interval_seconds || liveInterval));
       const remaining = (liveGames > 0 || candidateGames > 0)
         ? Math.max(0, liveInterval - liveAge)
         : (pregameGames > 0 ? Math.max(0, pregameInterval - pregameAge) : Math.max(0, liveInterval - liveAge));
@@ -2930,7 +4898,7 @@ def jogos_do_dia_page(request: Request) -> str:
         const tags = (item.markets || []).length
           ? item.markets.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
           : '<span>mercados abrindo</span>';
-        return `<article class="pregame-card">
+        return `<article class="pregame-card" data-pregame-focus="${escapeHtml(item.focus || 'all')}" data-pregame-search="${escapeHtml(`${item.home || ''} ${item.away || ''}`.trim())}">
           <div class="pregame-top">
             <div>
               <div class="league">${escapeHtml(item.league || '-')}</div>
@@ -2944,6 +4912,25 @@ def jogos_do_dia_page(request: Request) -> str:
           <div class="muted">${escapeHtml(item.note || 'Watchlist pronta para virar live.')}</div>
         </article>`;
       }).join('');
+      mount.querySelectorAll('[data-pregame-focus]').forEach(card => {
+        card.addEventListener('click', () => {
+          const focus = String(card.getAttribute('data-pregame-focus') || '').toLowerCase();
+          const search = card.getAttribute('data-pregame-search') || '';
+          if (focus.includes('escanteio')) {
+            applyPreset('corners');
+          } else if (focus.includes('gol')) {
+            applyPreset('goals');
+          } else if (focus.includes('handicap') || focus.includes('asiatic')) {
+            applyPreset('asian');
+          } else {
+            applyPreset('all');
+          }
+          const searchInput = document.getElementById('filterSearch');
+          if (searchInput) searchInput.value = search;
+          renderGameList();
+          jumpToSection('liveBoardSection');
+        });
+      });
     }
     function renderGameList() {
       const mount = document.getElementById('gameList');
@@ -2956,37 +4943,94 @@ def jogos_do_dia_page(request: Request) -> str:
       if (!games.some(game => game.game_id === boardState.selectedGameId)) {
         boardState.selectedGameId = games[0].game_id;
       }
-      mount.innerHTML = games.map(game => {
-        const active = game.game_id === boardState.selectedGameId ? ' active' : '';
-        const best = game.best_signal;
-        const bestOdds = best && Number.isFinite(Number(best.odds)) ? Number(best.odds).toFixed(2) : '-';
-        const race = game.race_to_goal || {};
-        const liveAlert = game.live_alert || {};
-        return `<article class="game-card${active}" data-game-id="${escapeHtml(game.game_id)}">
-          <div class="game-top">
-            <span class="league">${escapeHtml(game.league || '-')}</span>
-            <span class="pill ${actionClass(best ? best.action : '')}">${escapeHtml(best ? best.action : 'SEM DADOS')}</span>
+      const grouped = new Map();
+      for (const game of games) {
+        const league = String(game.league || 'Sem liga');
+        if (!grouped.has(league)) grouped.set(league, []);
+        grouped.get(league).push(game);
+      }
+      mount.innerHTML = Array.from(grouped.entries()).map(([league, items]) => `
+        <section class="league-block">
+          <div class="league-head">
+            <span>${escapeHtml(league)}</span>
+            <span class="league-count">${items.length} jogo(s)</span>
           </div>
-          <div class="teams">
-            <div><strong>${escapeHtml(game.home)}</strong></div>
-            <div><strong>${escapeHtml(game.away)}</strong></div>
-          </div>
-          <div class="game-bottom">
-            <div class="scoreline"><span>${scoreText(game)}</span><span class="subline">${safeNum(game.minute)}'</span></div>
-            <div class="subline">${escapeHtml(readingLabel(game))}</div>
-          </div>
-          <div class="subline" style="margin-top:8px">${escapeHtml(race.summary || 'Corrida para o gol sem vantagem clara')}</div>
-          <div class="subline ${liveAlert.level === 'strong' ? 'status-good' : liveAlert.level === 'watch' ? 'status-warn' : ''}" style="margin-top:4px">${escapeHtml(liveAlert.title || 'Sem alerta')}</div>
-          <div class="pressure-row" style="margin-top:10px">
-            <div class="pressure-box"><div class="eyebrow">Pressao casa</div><strong>${safeNum(game.home_pressure)}</strong><div class="progress"><span style="width:${Math.min(100, Number(game.home_pressure || 0))}%"></span></div></div>
-            <div class="pressure-box"><div class="eyebrow">Pressao fora</div><strong>${safeNum(game.away_pressure)}</strong><div class="progress"><span style="width:${Math.min(100, Number(game.away_pressure || 0))}%"></span></div></div>
-            <div class="pressure-box"><div class="eyebrow">Melhor odd</div><strong>${bestOdds}</strong><div class="muted">${escapeHtml(best ? best.market : 'monitorando')}</div></div>
-          </div>
-        </article>`;
-      }).join('');
-      mount.querySelectorAll('.game-card').forEach(card => {
+          ${items.map(game => {
+            const active = game.game_id === boardState.selectedGameId ? ' active' : '';
+            const best = game.best_signal;
+            const sections = Array.isArray(game.market_sections) ? game.market_sections : [];
+            const visibleSections = sections.filter(section => topLine(section).length).slice(0, 3);
+            const liveAlert = game.live_alert || {};
+            const favorite = isFavorite(game.game_id);
+            const intensity = gameIntensity(game);
+            return `<article class="match-row${active}" data-game-id="${escapeHtml(game.game_id)}">
+              <div class="match-main">
+                <div class="row-head">
+                  <div class="league">${escapeHtml(game.league || '-')}</div>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span class="intensity-badge">intensidade ${safeNum(intensity)}</span>
+                    <button class="fav-btn${favorite ? ' active' : ''}" type="button" data-favorite-id="${escapeHtml(game.game_id)}" aria-label="favoritar jogo">${favorite ? '★' : '☆'}</button>
+                  </div>
+                </div>
+                <div class="scoreboard">
+                  <div class="team-side">
+                    <strong>${escapeHtml(game.home)}</strong>
+                    <div class="meta">Casa</div>
+                  </div>
+                  <div class="score-center">
+                    <strong>${scoreText(game)}</strong>
+                    <span>${safeNum(game.minute)}'</span>
+                  </div>
+                  <div class="team-side away">
+                    <strong>${escapeHtml(game.away)}</strong>
+                    <div class="meta">Fora</div>
+                  </div>
+                </div>
+                <div class="match-summary">
+                  <span class="reading-chip">${escapeHtml(readingLabel(game))}</span>
+                  <span class="subline">${best ? escapeHtml(best.market || '-') : 'Sem mercado dominante'}</span>
+                </div>
+                <div class="subline ${liveAlert.level === 'strong' ? 'status-good' : liveAlert.level === 'watch' ? 'status-warn' : ''}" style="margin-top:6px">${escapeHtml(liveAlert.title || 'Sem alerta')}</div>
+              </div>
+              <div class="match-market-grid">
+                ${visibleSections.length ? visibleSections.map(section => {
+                  const cells = topLine(section);
+                  const two = cells.length === 2 ? ' two' : '';
+                  return `<div class="match-market${two}">
+                    <div class="label">${escapeHtml(section.title || '-')}</div>
+                    <div class="cells">
+                      ${cells.map(cell => `<button class="odds-cell${game.game_id === boardState.selectedGameId && (boardState.detailTab === 'all' || boardState.detailTab === (section.group || 'all')) ? ' active' : ''}" type="button" data-game-id="${escapeHtml(game.game_id)}" data-market-group="${escapeHtml(section.group || 'all')}">
+                        <div class="small">${escapeHtml(cell.label || '-')}</div>
+                        <div class="line">${escapeHtml(cell.line || '-')}</div>
+                        <strong>${formatOdd(cell.odds)}</strong>
+                      </button>`).join('')}
+                    </div>
+                  </div>`;
+                }).join('') : `<div class="empty">Sem linhas fortes neste jogo.</div>`}
+              </div>
+            </article>`;
+          }).join('')}
+        </section>
+      `).join('');
+      mount.querySelectorAll('.match-row').forEach(card => {
         card.addEventListener('click', () => {
           boardState.selectedGameId = card.dataset.gameId;
+          boardState.detailTab = 'all';
+          renderGameList();
+          renderDetail(findSelectedGame());
+        });
+      });
+      mount.querySelectorAll('[data-favorite-id]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          toggleFavorite(button.getAttribute('data-favorite-id'));
+        });
+      });
+      mount.querySelectorAll('.odds-cell[data-market-group]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          boardState.selectedGameId = button.getAttribute('data-game-id');
+          boardState.detailTab = button.getAttribute('data-market-group') || 'all';
           renderGameList();
           renderDetail(findSelectedGame());
         });
@@ -3003,6 +5047,14 @@ def jogos_do_dia_page(request: Request) -> str:
         mount.innerHTML = '<div class="empty">Selecione um jogo para ver a leitura detalhada.</div>';
         return;
       }
+      const sections = Array.isArray(game.market_sections) ? game.market_sections : [];
+      const availableGroups = ['all', ...new Set(sections.map(section => section.group).filter(Boolean))];
+      if (!availableGroups.includes(boardState.detailTab)) {
+        boardState.detailTab = 'all';
+      }
+      const visibleSections = boardState.detailTab === 'all'
+        ? sections
+        : sections.filter(section => section.group === boardState.detailTab);
       const best = game.best_signal;
       const recommendations = (game.recommendations || []).length
         ? game.recommendations.map(rec => `<div class="market-line">
@@ -3033,48 +5085,81 @@ def jogos_do_dia_page(request: Request) -> str:
       const race = game.race_to_goal || {};
       const liveAlert = game.live_alert || {};
       const cornerPrediction = game.corner_prediction || {};
+      const brain = (best && best.brain) || game.brain || {};
+      const brainSkill = brain.best_skill || {};
       const marketTags = (game.market_tags || []).length
-        ? game.market_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')
+        ? game.market_tags.map(tag => {
+            const tab = String(tag).includes('Escanteios')
+              ? 'corners'
+              : String(tag).includes('Gols')
+                ? 'goals'
+                : String(tag).includes('Handicap')
+                  ? 'asian'
+                  : String(tag).includes('Cart')
+                    ? 'cards'
+                    : String(tag).includes('1X2')
+                      ? '1x2'
+                      : 'all';
+            return `<button type="button" data-detail-shortcut="${escapeHtml(tab)}">${escapeHtml(tag)}</button>`;
+          }).join('')
         : '<span>Sem mercados extras</span>';
       mount.innerHTML = `
         <div class="detail-head">
           <div>
-            <div class="eyebrow">Jogo escolhido</div>
+            <div class="eyebrow">${escapeHtml(game.league || '-')}</div>
             <h2>${escapeHtml(game.home)} x ${escapeHtml(game.away)}</h2>
             <div class="subline">${escapeHtml(game.league || '-')} · ${safeNum(game.minute)}' · ${scoreText(game)}</div>
           </div>
           <div class="market-tags">${marketTags}</div>
         </div>
-        <div class="detail-grid">
-          <div class="mini"><div class="eyebrow">Pressao casa</div><strong>${safeNum(game.home_pressure)}</strong><div class="muted">${escapeHtml(game.home)}</div></div>
-          <div class="mini"><div class="eyebrow">Pressao fora</div><strong>${safeNum(game.away_pressure)}</strong><div class="muted">${escapeHtml(game.away)}</div></div>
-          <div class="mini"><div class="eyebrow">Chutes no alvo</div><strong>${safeNum(game.home_shots_on)} / ${safeNum(game.away_shots_on)}</strong><div class="muted">casa / fora</div></div>
-          <div class="mini"><div class="eyebrow">Leitura IA</div><strong>${escapeHtml(best ? best.action : 'SEM DADOS')}</strong><div class="muted">${escapeHtml(best ? (best.market || '-') : 'apenas monitorando')}</div></div>
+        <div class="detail-tabs">
+          ${availableGroups.map(group => `<button class="detail-tab${group === boardState.detailTab ? ' active' : ''}" type="button" data-detail-tab="${escapeHtml(group)}">${escapeHtml(detailTabLabel(group))}</button>`).join('')}
+        </div>
+        <div class="summary-strip">
+          <article class="summary-card"><div class="eyebrow">Pressao casa</div><strong>${safeNum(game.home_pressure)}</strong><div class="muted">${escapeHtml(game.home)}</div></article>
+          <article class="summary-card"><div class="eyebrow">Pressao fora</div><strong>${safeNum(game.away_pressure)}</strong><div class="muted">${escapeHtml(game.away)}</div></article>
+          <article class="summary-card"><div class="eyebrow">Chutes no alvo</div><strong>${safeNum(game.home_shots_on)} / ${safeNum(game.away_shots_on)}</strong><div class="muted">casa / fora</div></article>
+          <article class="summary-card"><div class="eyebrow">Leitura IA</div><strong>${escapeHtml(best ? best.action : 'SEM DADOS')}</strong><div class="muted">${escapeHtml(best ? (best.market || '-') : 'apenas monitorando')}</div></article>
+          <article class="summary-card"><div class="eyebrow">Classe</div><strong>${escapeHtml(best ? (best.decision_class || 'NO_BET') : 'NO_BET')}</strong><div class="muted">decisao fria</div></article>
         </div>
         <section class="card">
+          <div class="eyebrow">Football Brain</div>
+          <div class="summary-strip" style="margin-top:10px">
+            <article class="summary-card"><div class="eyebrow">Amostra</div><strong>${safeNum(brain.sample_size)}</strong><div class="muted">snapshots vivos</div></article>
+            <article class="summary-card"><div class="eyebrow">Momentum</div><strong>${safeNum(brain.momentum_score)}</strong><div class="muted">pressao liquida</div></article>
+            <article class="summary-card"><div class="eyebrow">Risco</div><strong>${safeNum(brain.risk_score)}</strong><div class="muted">quanto menor, melhor</div></article>
+            <article class="summary-card"><div class="eyebrow">Qualidade</div><strong>${safeNum(brain.data_quality)}</strong><div class="muted">dados aproveitaveis</div></article>
+          </div>
+          <div class="subline" style="margin-top:10px">
+            Skill lider: ${escapeHtml(brainSkill.name || '-')} · ${escapeHtml(brainSkill.market || '-')} · ${escapeHtml(brainSkill.decision || 'SEM DADOS')}
+            ${Number.isFinite(Number(brainSkill.confidence)) ? `· conf ${safeNum(brainSkill.confidence)}%` : ''}
+          </div>
+          <div class="muted" style="margin-top:8px">${escapeHtml(brainSkill.reason || 'Brain aguardando mais amostra do jogo para consolidar leitura.')}</div>
+        </section>
+        <section class="card">
           <div class="eyebrow">Radar ao vivo</div>
-          <div class="detail-grid" style="margin-top:10px">
-            <div class="mini">
+          <div class="floating-strip" style="margin-top:10px">
+            <article class="floating-card">
               <div class="eyebrow">Barra de pressao</div>
               <strong>${escapeHtml(pressureBar.summary || 'Sem leitura')}</strong>
               <div class="progress"><span style="width:${safeNum(pressureBar.home_pct)}%"></span></div>
               <div class="muted">${escapeHtml(game.home)} ${safeNum(pressureBar.home_pct)}% · ${escapeHtml(game.away)} ${safeNum(pressureBar.away_pct)}%</div>
-            </div>
-            <div class="mini">
+            </article>
+            <article class="floating-card">
               <div class="eyebrow">Corrida para o gol</div>
               <strong>${escapeHtml(race.leader || 'Equilibrado')}</strong>
               <div class="muted">${escapeHtml(race.summary || 'Sem vantagem clara agora.')}</div>
-            </div>
-            <div class="mini">
+            </article>
+            <article class="floating-card">
               <div class="eyebrow">Alerta IA</div>
               <strong>${escapeHtml(liveAlert.title || 'Sem alerta')}</strong>
               <div class="muted">${escapeHtml(liveAlert.message || 'Jogo apenas monitorado no momento.')}</div>
-            </div>
-            <div class="mini">
+            </article>
+            <article class="floating-card">
               <div class="eyebrow">Predicao de escanteios</div>
               <strong>${escapeHtml(cornerPrediction.title || 'Sem linha')}</strong>
               <div class="muted">${escapeHtml(cornerPrediction.summary || 'Mercado de cantos sem leitura ativa agora.')}</div>
-            </div>
+            </article>
           </div>
         </section>
         <div class="comparison">
@@ -3098,15 +5183,31 @@ def jogos_do_dia_page(request: Request) -> str:
         </section>
         <section class="card">
           <div class="eyebrow">Coleta de escanteios</div>
-          <div class="detail-grid" style="margin-top:10px">
-            <div class="mini"><div class="eyebrow">Ao vivo</div><strong>${escapeHtml(corners.live || 'Sem contagem factual no feed')}</strong><div class="muted">casa · fora · total</div></div>
-            <div class="mini"><div class="eyebrow">Jogo todo</div><strong>${escapeHtml(corners.full_time || 'Sem linha ao vivo')}</strong><div class="muted">over / under</div></div>
-            <div class="mini"><div class="eyebrow">1T</div><strong>${escapeHtml(corners.first_half || 'Sem linha ao vivo')}</strong><div class="muted">escanteios 1 tempo</div></div>
-            <div class="mini"><div class="eyebrow">2T</div><strong>${escapeHtml(corners.second_half || 'Sem linha ao vivo')}</strong><div class="muted">escanteios 2 tempo</div></div>
+          <div class="summary-strip" style="margin-top:10px">
+            <article class="summary-card"><div class="eyebrow">Ao vivo</div><strong>${escapeHtml(corners.live || 'Sem contagem factual no feed')}</strong><div class="muted">casa · fora · total</div></article>
+            <article class="summary-card"><div class="eyebrow">Jogo todo</div><strong>${escapeHtml(corners.full_time || 'Sem linha ao vivo')}</strong><div class="muted">over / under</div></article>
+            <article class="summary-card"><div class="eyebrow">1T</div><strong>${escapeHtml(corners.first_half || 'Sem linha ao vivo')}</strong><div class="muted">escanteios 1 tempo</div></article>
+            <article class="summary-card"><div class="eyebrow">2T</div><strong>${escapeHtml(corners.second_half || 'Sem linha ao vivo')}</strong><div class="muted">escanteios 2 tempo</div></article>
+          </div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">Painel de mercados</div>
+          <div class="market-sections" style="margin-top:10px">
+            ${visibleSections.length
+              ? visibleSections.map(section => `
+                <article class="market-section">
+                  <div class="market-section-head">
+                    <strong>${escapeHtml(section.title || '-')}</strong>
+                    <span class="pill hold">${escapeHtml(detailTabLabel(section.group || 'all'))}</span>
+                  </div>
+                  ${renderSectionCells(section)}
+                </article>
+              `).join('')
+              : '<div class="empty">Nenhuma linha desta aba esta disponivel ao vivo agora.</div>'}
           </div>
         </section>
         <section class="market-board">
-          <div class="eyebrow">Mercados monitorados</div>
+          <div class="eyebrow">Recomendacoes do scanner</div>
           ${recommendations}
         </section>
         <section class="card">
@@ -3115,6 +5216,18 @@ def jogos_do_dia_page(request: Request) -> str:
           <div class="subline" style="margin-top:8px">${escapeHtml(best ? (best.risk_note || best.note || '') : '')}</div>
         </section>
       `;
+      mount.querySelectorAll('[data-detail-tab]').forEach(tabBtn => {
+        tabBtn.addEventListener('click', () => {
+          boardState.detailTab = tabBtn.getAttribute('data-detail-tab') || 'all';
+          renderDetail(findSelectedGame());
+        });
+      });
+      mount.querySelectorAll('[data-detail-shortcut]').forEach(button => {
+        button.addEventListener('click', () => {
+          boardState.detailTab = button.getAttribute('data-detail-shortcut') || 'all';
+          renderDetail(findSelectedGame());
+        });
+      });
     }
     async function loadBoardData(silent = false) {
       const button = document.getElementById('refreshBoardBtn');
@@ -3166,12 +5279,17 @@ def jogos_do_dia_page(request: Request) -> str:
       }, 15000);
     }
     async function runScannerNow(silent = false) {
+      if (typeof silent !== 'boolean') silent = false;
       const button = document.getElementById('scanNowBtn');
       const refresh = document.getElementById('refreshBoardBtn');
       boardState.scanInFlight = true;
       renderNextScanLabel();
       if (button) button.disabled = true;
       if (refresh) refresh.disabled = true;
+      if (!silent) {
+        document.getElementById('heroStatus').textContent = 'scanner rodando';
+        document.getElementById('heroNote').textContent = 'Buscando novos jogos ao vivo e atualizando a watchlist pre-jogo.';
+      }
       try {
         const res = await fetch('/api/scanner-run', {
           method: 'POST',
@@ -3180,6 +5298,10 @@ def jogos_do_dia_page(request: Request) -> str:
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Falha ao executar o scanner.');
         await loadBoardData(true);
+        if (!silent) {
+          document.getElementById('heroStatus').textContent = 'scanner atualizado';
+          document.getElementById('heroNote').textContent = data.message || data.scan_scope || 'Scanner concluido com sucesso.';
+        }
       } catch (error) {
         if (!silent) {
           document.getElementById('heroStatus').textContent = 'scanner com erro';
@@ -3200,8 +5322,27 @@ def jogos_do_dia_page(request: Request) -> str:
       });
     });
     window.addEventListener('load', () => {
+      loadFavorites();
+      document.querySelectorAll('[data-preset]').forEach(button => {
+        button.addEventListener('click', () => applyPreset(button.getAttribute('data-preset') || 'all'));
+      });
+      document.querySelectorAll('[data-sport-filter]').forEach(button => {
+        button.addEventListener('click', () => {
+          applyPreset(button.getAttribute('data-sport-filter') || 'all');
+          if (button.getAttribute('data-sport-filter') === 'favorites') {
+            jumpToSection('liveBoardSection');
+          }
+        });
+      });
+      document.querySelectorAll('[data-jump-target]').forEach(button => {
+        button.addEventListener('click', () => jumpToSection(button.getAttribute('data-jump-target') || 'liveBoardSection'));
+      });
+      document.getElementById('topLiveBadge')?.addEventListener('click', () => jumpToSection('liveBoardSection'));
+      document.getElementById('topPregameBadge')?.addEventListener('click', () => jumpToSection('pregameSection'));
+      document.getElementById('topAutoScan')?.addEventListener('click', () => runScannerNow(false));
       document.getElementById('refreshBoardBtn')?.addEventListener('click', () => loadBoardData(false));
-      document.getElementById('scanNowBtn')?.addEventListener('click', runScannerNow);
+      document.getElementById('scanNowBtn')?.addEventListener('click', () => runScannerNow(false));
+      applyPreset('all');
       loadBoardData(false);
     });
   </script>
@@ -3220,6 +5361,8 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
     history = state.history or []
     visible_history = _green_red(history)
     live_signals = _simulation_signals(state, settings)
+    brain = get_football_brain(settings)
+    football_provider = _football_api_provider(settings)
     return JSONResponse(
         {
             "active_signal": state.active_signal,
@@ -3227,6 +5370,8 @@ def api_state(_: None = Depends(_auth)) -> JSONResponse:
             "history": visible_history,
             "stats": _stats(state, visible_history),
             "learning": _learning_context(state, visible_history),
+            "football_brain": brain.status() if brain else {"enabled": False},
+            "football_provider": football_provider.status_snapshot(),
             "scanner": _scanner_status(state, settings),
             "pregame_watchlist": _fresh_pregame_watchlist(state, settings),
             "paper_opportunities": paper_opportunities(live_signals),
@@ -3246,6 +5391,8 @@ def api_healthz() -> JSONResponse:
     settings = load_settings()
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     provider = build_provider(settings)
+    brain = get_football_brain(settings)
+    football_provider = _football_api_provider(settings)
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
     return JSONResponse(
         {
@@ -3272,16 +5419,320 @@ def api_healthz() -> JSONResponse:
                 "odds_api_io": bool(settings.odds_api_io_key),
                 "gemini": bool(settings.gemini_api_key),
                 "supabase": bool(settings.supabase_url and settings.supabase_service_role_key),
+                "football_brain": bool(brain),
             },
+            "football_brain": brain.status() if brain else {"enabled": False},
+            "api_football_provider": football_provider.status_snapshot(),
         }
     )
+
+
+async def _football_live_fallback_payload(settings: Settings) -> dict[str, Any]:
+    provider = build_provider(settings)
+    games = await provider.get_live_games()
+    items = []
+    for game in games:
+        plain = _to_plain_dict(game)
+        items.append(
+            {
+                "fixture_id": str(plain.get("game_id") or ""),
+                "league": plain.get("league"),
+                "home_team": plain.get("home"),
+                "away_team": plain.get("away"),
+                "minute": plain.get("minute"),
+                "status": plain.get("status"),
+                "score_home": plain.get("home_goals"),
+                "score_away": plain.get("away_goals"),
+                "odds": {
+                    "summary": {
+                        "home": plain.get("odds_home"),
+                        "draw": plain.get("odds_draw"),
+                        "away": plain.get("odds_away"),
+                    }
+                },
+                "stats": {
+                    "home": {
+                        "pressure_index": plain.get("home_pressure"),
+                        "shots_on": plain.get("home_shots_on"),
+                    },
+                    "away": {
+                        "pressure_index": plain.get("away_pressure"),
+                        "shots_on": plain.get("away_shots_on"),
+                    },
+                },
+                "source": "fallback",
+                "fallback": True,
+            }
+        )
+    return {
+        "ok": True,
+        "source": "fallback",
+        "fallback_active": True,
+        "message": "Fonte API indisponível, usando fallback.",
+        "last_update_at": datetime.now(timezone.utc).isoformat(),
+        "fixtures": items,
+    }
+
+
+@app.get("/api/football/provider/status")
+async def api_football_provider_status(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    health = await provider.health_check()
+    status_payload = provider.status_snapshot()
+    return JSONResponse(
+        {
+            "ok": bool(health.get("ok")),
+            "provider": "api-football",
+            "message": health.get("message"),
+            "status": status_payload,
+            "fallback_active": bool(status_payload.get("fallback_active")),
+            "last_update_at": status_payload.get("last_live_update_at") or status_payload.get("last_success_at"),
+        }
+    )
+
+
+@app.get("/api/football/leagues")
+async def api_football_leagues(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        leagues = await provider.get_leagues()
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "leagues": leagues,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "provider": "api-football",
+                "fallback_active": True,
+                "message": f"Fonte API indisponível, usando fallback. {type(exc).__name__}",
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "leagues": [],
+            }
+        )
+
+
+@app.get("/api/football/live")
+async def api_football_live(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        fixtures = await provider.get_live_fixtures()
+        status_payload = provider.status_snapshot()
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(status_payload.get("fallback_active")),
+                "message": (
+                    "Fonte API indisponível, usando fallback."
+                    if status_payload.get("fallback_active")
+                    else "Leitura ao vivo atualizada."
+                ),
+                "last_update_at": status_payload.get("last_live_update_at") or status_payload.get("last_success_at"),
+                "status": status_payload,
+                "fixtures": fixtures,
+            }
+        )
+    except Exception:
+        payload = await _football_live_fallback_payload(settings)
+        payload["status"] = provider.status_snapshot()
+        return JSONResponse(payload)
+
+
+@app.get("/api/football/fixtures")
+async def api_football_fixtures(date: str, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        fixtures = await provider.get_fixtures_by_date(date)
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixtures": fixtures,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "provider": "api-football",
+                "fallback_active": True,
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "message": f"Fonte API indisponível, usando fallback. {type(exc).__name__}",
+                "fixtures": [],
+            }
+        )
+
+
+@app.get("/api/football/fixtures/{fixture_id}/stats")
+async def api_football_fixture_stats(fixture_id: str, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        stats = await provider.get_fixture_statistics(fixture_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "stats": stats,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "provider": "api-football",
+                "fallback_active": True,
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "message": f"Fonte API indisponível, usando fallback. {type(exc).__name__}",
+                "stats": {},
+            }
+        )
+
+
+@app.get("/api/football/fixtures/{fixture_id}/events")
+async def api_football_fixture_events(fixture_id: str, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        events = await provider.get_fixture_events(fixture_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "events": events,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "provider": "api-football",
+                "fallback_active": True,
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "message": f"Fonte API indisponível, usando fallback. {type(exc).__name__}",
+                "events": [],
+            }
+        )
+
+
+@app.get("/api/football/fixtures/{fixture_id}/lineups")
+async def api_football_fixture_lineups(fixture_id: str, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        lineups = await provider.get_fixture_lineups(fixture_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "lineups": lineups,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "provider": "api-football",
+                "fallback_active": True,
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "message": f"Fonte API indisponível, usando fallback. {type(exc).__name__}",
+                "lineups": [],
+            }
+        )
+
+
+@app.get("/api/football/fixtures/{fixture_id}/odds")
+async def api_football_fixture_odds(fixture_id: str, _: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        odds = await provider.get_fixture_odds(fixture_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider": "api-football",
+                "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "odds": odds,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "provider": "api-football",
+                "fallback_active": True,
+                "last_update_at": provider.status_snapshot().get("last_success_at"),
+                "fixture_id": fixture_id,
+                "message": f"Fonte API indisponível, usando fallback. {type(exc).__name__}",
+                "odds": {},
+            }
+        )
 
 
 @app.get("/api/jogosdodia-board")
 def api_jogosdodia_board(_: None = Depends(_auth)) -> JSONResponse:
     settings = load_settings()
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
-    return JSONResponse(_jogosdodia_board_payload(state, settings))
+    try:
+        return JSONResponse(_jogosdodia_board_payload(state, settings))
+    except Exception as exc:
+        scanner = _scanner_status(state, settings)
+        scanner["last_scan_brt"] = _brazil_datetime_label(scanner.get("last_scan_iso"), settings)
+        scanner["pregame_last_scan_brt"] = _brazil_datetime_label(scanner.get("pregame_last_scan_iso"), settings)
+        return JSONResponse(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at_brt": _brazil_datetime_label(datetime.now(timezone.utc), settings),
+                "scanner": scanner,
+                "metrics": {
+                    "live_games": len(_fresh_live_games(state, settings)),
+                    "candidate_games": len(_fresh_candidate_signals(state, settings)),
+                    "enter_count": 0,
+                    "watch_count": 0,
+                    "pregame_watchlist": len(_fresh_pregame_watchlist(state, settings)),
+                },
+                "highlights": [],
+                "market_overview": [],
+                "live_alerts": [],
+                "pregame_watchlist": [],
+                "games": [],
+                "selected_game_id": None,
+                "notes": {
+                    "mode": "fallback",
+                    "mock": False,
+                    "message": "Painel entrou em modo seguro por inconsistência temporária do feed/estado.",
+                    "error": str(exc.__class__.__name__),
+                },
+            },
+            status_code=200,
+        )
 
 
 @app.get("/api/scanner-preference")
@@ -3312,6 +5763,42 @@ def api_set_scanner_preference(
     )
 
 
+@app.get("/api/risk-profile")
+def api_risk_profile(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
+    state = store.load()
+    profile = str(getattr(state, "risk_profile", "moderado") or "moderado")
+    return JSONResponse(
+        {
+            "ok": True,
+            "profile": profile,
+            "profile_label": _risk_profile_label(profile),
+            "decision_audit_db": settings.decision_audit_db_file,
+        }
+    )
+
+
+@app.post("/api/risk-profile")
+def api_set_risk_profile(
+    payload: RiskProfilePayload,
+    request: Request,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    _assert_dashboard_write_request(request)
+    store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
+    state = store.set_risk_profile(payload.profile)
+    profile = str(getattr(state, "risk_profile", "moderado") or "moderado")
+    return JSONResponse(
+        {
+            "ok": True,
+            "profile": profile,
+            "profile_label": _risk_profile_label(profile),
+            "message": f"Perfil de risco ajustado para {_risk_profile_label(profile)}.",
+        }
+    )
+
+
 @app.post("/api/scanner-request")
 def api_scanner_request(request: Request, _: None = Depends(_auth)) -> JSONResponse:
     _assert_dashboard_write_request(request)
@@ -3336,6 +5823,7 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
     mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
     pregame_watchlist: list[dict[str, Any]] = []
     pregame_scope = "agenda indisponivel"
+    brain = get_football_brain(settings)
     try:
         pregame_watchlist, pregame_scope = await discover_pregame_watchlist(
             provider,
@@ -3346,6 +5834,11 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
     except Exception:
         pregame_watchlist = []
     store.set_pregame_watchlist(pregame_watchlist)
+    if brain:
+        try:
+            brain.record_pregame_watchlist(pregame_watchlist)
+        except Exception:
+            pass
     preferred_game_ids = {
         str(item.get("game_id") or "").strip()
         for item in pregame_watchlist
@@ -3363,6 +5856,11 @@ async def api_scanner_run(request: Request, _: None = Depends(_auth)) -> JSONRes
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Falha no scanner: {type(exc).__name__}",
         ) from exc
+    if brain:
+        try:
+            brain.record_live_games(games, provider_label(provider))
+        except Exception:
+            pass
 
     fetched_at = datetime.now(timezone.utc).isoformat()
     store.set_last_games(
@@ -3422,8 +5920,9 @@ def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
     state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
     live_games = _fresh_live_games(state, settings)
     simulation_signals = _simulation_signals(state, settings)
-    opportunities = paper_opportunities(simulation_signals)
+    opportunities = _sort_decision_items(paper_opportunities(simulation_signals))
     default_signal = simulation_signals[0] if simulation_signals else None
+    default_game_id = (default_signal.get("game") or {}).get("game_id") if default_signal else None
     simulation_rows = "\n".join(
         _simulation_row(item) for item in opportunities
     )
@@ -3431,13 +5930,50 @@ def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
         {
             "best_html": _best_simulation(best_paper_entry(simulation_signals)),
             "rows_html": simulation_rows,
+            "dashboard_feed_html": _dashboard_live_feed(opportunities, default_game_id),
             "thermometer_html": _thermometer_rows(opportunities),
             "championship_rows_html": _championship_rows(live_games),
             "leadership_rows_html": _leadership_rows(live_games),
             "market_tape_html": _market_tape(live_games),
             "match_stats_html": _match_stats_panel(default_signal, _green_red(state.history or [])),
-            "default_game_id": (default_signal.get("game") or {}).get("game_id") if default_signal else None,
+            "default_game_id": default_game_id,
             "updated_at": _short_datetime(state.last_scan_at),
+        }
+    )
+
+
+@app.post("/api/backtest-quick")
+def api_backtest_quick(
+    payload: QuickBacktestPayload,
+    request: Request,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    _assert_dashboard_write_request(request)
+    settings = load_settings()
+    store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
+    state = store.load()
+    visible_history = _green_red(state.history or [])
+    result = filtered_backtest(
+        visible_history,
+        league=payload.league,
+        market=payload.market,
+        min_ev=payload.min_ev,
+        min_confidence_score=payload.min_confidence_score,
+        odd_min=payload.odd_min,
+        odd_max=payload.odd_max,
+        bankroll_start=payload.bankroll,
+        lookback_days=payload.lookback_days,
+    )
+    decision_store = _decision_log_store(settings)
+    run_id = decision_store.save_backtest(result)
+    latest = decision_store.latest_backtests(limit=10)
+    return JSONResponse(
+        {
+            "ok": True,
+            "run_id": run_id,
+            "result": result,
+            "panel_html": _quick_backtest_panel(result),
+            "history_html": _quick_backtest_history_panel(latest),
         }
     )
 
@@ -3997,6 +6533,21 @@ def _stats(state, history: list[dict[str, Any]]) -> dict[str, Any]:
     hit_rate = round((wins / len(settled)) * 100, 1) if settled else 0
     sample = learning.get("sample_size", 0)
     readiness = "baixa" if sample < 30 else "media" if sample < 100 else "alta"
+    roi = _safe_float(learning.get("roi_units"))
+    if roi < -10:
+        roi_alert = {
+            "level": "high",
+            "message": "ROI negativo forte detectado. Recomenda-se modo conservador, EV minimo de 8% e stake maxima de 1%.",
+            "suggested_profile": "conservador",
+        }
+    elif roi < 0:
+        roi_alert = {
+            "level": "medium",
+            "message": "ROI negativo detectado. Recomenda-se reduzir entradas e aplicar filtros mais rigidos.",
+            "suggested_profile": "conservador",
+        }
+    else:
+        roi_alert = None
     return {
         "total": len(settled),
         "wins": wins,
@@ -4006,6 +6557,11 @@ def _stats(state, history: list[dict[str, Any]]) -> dict[str, Any]:
         "roi_units": learning.get("roi_units", 0),
         "brier_score": learning.get("brier_score") or "-",
         "readiness": readiness,
+        "best_market": learning.get("best_market"),
+        "worst_market": learning.get("worst_market"),
+        "best_league": learning.get("best_league"),
+        "worst_league": learning.get("worst_league"),
+        "roi_alert": roi_alert,
     }
 
 
@@ -4055,35 +6611,369 @@ def _simulation_signals(state, settings=None) -> list[dict[str, Any]]:
     return deduped
 
 
+def _performance_breakdown_panel(
+    title: str,
+    rows: list[dict[str, Any]],
+    *,
+    empty_label: str,
+) -> str:
+    if not rows:
+        return f"<h2>{_esc(title)}</h2><p class='muted'>{_esc(empty_label)}</p>"
+    body = []
+    for row in rows[:12]:
+        status = str(row.get("status") or "ok")
+        status_label = "Liga em observacao" if status == "observacao" and "liga" in title.lower() else "Mercado em observacao" if status == "observacao" else "OK"
+        body.append(
+            "<tr>"
+            f"<td>{_esc(row.get('name') or row.get('category') or '-')}</td>"
+            f"<td>{_esc(row.get('entries') or 0)}</td>"
+            f"<td>{_esc(row.get('greens') or 0)}</td>"
+            f"<td>{_esc(row.get('reds') or 0)}</td>"
+            f"<td>{_esc(row.get('hit_rate') or 0)}%</td>"
+            f"<td class='{_value_class(row.get('roi_units'))}'>{_esc(row.get('roi_units') or 0)}%</td>"
+            f"<td class='{_value_class(row.get('profit_units'))}'>{_format_brl(row.get('profit_units') or 0)}</td>"
+            f"<td class='neg'>{_format_brl(row.get('drawdown_units') or 0)}</td>"
+            f"<td>{_risk_badge(status_label)}</td>"
+            "</tr>"
+        )
+    return (
+        f"<h2>{_esc(title)}</h2>"
+        "<table><thead><tr><th>Nome</th><th>Entradas</th><th>Greens</th><th>Reds</th><th>Hit rate</th><th>ROI</th><th>Lucro</th><th>Drawdown</th><th>Status</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
+    )
+
+
+def _quick_backtest_panel(run: dict[str, Any] | None) -> str:
+    if not run:
+        return (
+            "<div class='notice muted'>"
+            "<strong>Backtest rapido ainda nao rodado.</strong> "
+            "Escolha liga, mercado e filtros acima para gerar uma leitura fria dos sinais."
+            "</div>"
+        )
+    summary = run.get("summary") if isinstance(run.get("summary"), dict) else run
+    filters = run.get("filters") if isinstance(run.get("filters"), dict) else summary.get("filters", {})
+    return (
+        "<div class='active-line'>"
+        f"<div class='mini'><div class='muted'>Liga</div><strong>{_esc(run.get('league') or summary.get('league') or 'all')}</strong></div>"
+        f"<div class='mini'><div class='muted'>Mercado</div><strong>{_esc(run.get('market') or summary.get('market') or 'all')}</strong></div>"
+        f"<div class='mini'><div class='muted'>Entradas</div><strong>{_esc(summary.get('entries') or 0)}</strong></div>"
+        f"<div class='mini'><div class='muted'>Greens / Reds</div><strong>{_esc(summary.get('greens') or 0)} / {_esc(summary.get('reds') or 0)}</strong></div>"
+        f"<div class='mini'><div class='muted'>Hit rate</div><strong>{_esc(summary.get('hit_rate') or 0)}%</strong></div>"
+        f"<div class='mini'><div class='muted'>ROI</div><strong class='{_value_class(summary.get('roi_units'))}'>{_esc(summary.get('roi_units') or 0)}%</strong></div>"
+        f"<div class='mini'><div class='muted'>Lucro</div><strong class='{_value_class(summary.get('profit_units'))}'>{_format_brl(summary.get('profit_units') or 0)}</strong></div>"
+        f"<div class='mini'><div class='muted'>Drawdown</div><strong class='neg'>{_format_brl(summary.get('max_drawdown_units') or 0)}</strong></div>"
+        "</div>"
+        f"<p class='muted'>Filtro usado: EV >= {_edge(filters.get('min_ev'))}, confiança >= {_esc(round(_safe_float(filters.get('min_confidence_score')) * 100, 1))}% e odds entre {_esc(filters.get('odd_min') or '-')} e {_esc(filters.get('odd_max') or '-')}.</p>"
+    )
+
+
+def _quick_backtest_history_panel(runs: list[dict[str, Any]]) -> str:
+    if not runs:
+        return ""
+    rows = []
+    for run in runs[:10]:
+        summary = run.get("summary") if isinstance(run.get("summary"), dict) else {}
+        rows.append(
+            "<tr>"
+            f"<td>{_esc((run.get('created_at') or '')[:16])}</td>"
+            f"<td>{_esc(run.get('league') or 'all')}</td>"
+            f"<td>{_esc(run.get('market') or 'all')}</td>"
+            f"<td>{_esc(summary.get('entries') or 0)}</td>"
+            f"<td>{_esc(summary.get('hit_rate') or 0)}%</td>"
+            f"<td class='{_value_class(summary.get('roi_units'))}'>{_esc(summary.get('roi_units') or 0)}%</td>"
+            f"<td class='{_value_class(summary.get('profit_units'))}'>{_format_brl(summary.get('profit_units') or 0)}</td>"
+            "</tr>"
+        )
+    return (
+        "<section class='section' style='margin-top:14px'>"
+        "<h2>Historico de backtests rapidos</h2>"
+        "<table><thead><tr><th>Data</th><th>Liga</th><th>Mercado</th><th>Entradas</th><th>Hit rate</th><th>ROI</th><th>Lucro</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+        "</section>"
+    )
+
+
 def _best_simulation(item: dict[str, Any] | None) -> str:
     if not item:
         return "<p class='muted'>Nenhuma oportunidade ao vivo real no momento. Use Somente ao vivo ou aguarde o proximo ciclo.</p>"
+    decision = build_scanner_decision(item)
+    checklist_html = "".join(
+        f"<span class='decision-check {decision_item.get('state') or 'neutral'}'>{_esc(decision_item.get('text'))}</span>"
+        for decision_item in decision.get("checklist", [])[:4]
+    )
     return (
-        "<div class='active-line'>"
-        f"<div class='mini'><div class='muted'>Melhor jogo ao vivo</div><strong>{_esc(item.get('match'))}</strong></div>"
-        f"<div class='mini'><div class='muted'>Mercado</div><strong>{_esc(item.get('market'))}</strong></div>"
-        f"<div class='mini'><div class='muted'>Entrada</div><strong>{_esc(item.get('selection'))} {_esc(item.get('line'))}</strong></div>"
-        f"<div class='mini'><div class='muted'>Odd</div><strong>{_esc(item.get('odds') or 'sem odd')}</strong></div>"
-        f"<div class='mini'><div class='muted'>Score</div><strong>{_esc(item.get('score'))}/100</strong></div>"
-        f"<div class='mini'><div class='muted'>Acao</div>{_action_badge(item.get('action'))}</div>"
+        "<div class='decision-highlight'>"
+        "<div class='decision-highlight-head'>"
+        f"{_recommendation_badge(decision.get('decision_label'))}"
+        f"<div class='decision-highlight-meta'><strong>{_esc(item.get('match'))}</strong><span>{_esc(item.get('league'))} | {_esc(item.get('minute'))}' | {_esc(item.get('scoreline'))}</span></div>"
+        f"<div class='decision-highlight-action'>{_esc(decision.get('action_label'))}</div>"
+        "</div>"
+        "<div class='decision-highlight-grid'>"
+        f"{_decision_metric_tile('Mercado', decision.get('market_label'))}"
+        f"{_decision_metric_tile('Odd', decision.get('odd_label'))}"
+        f"{_decision_metric_tile('EV', decision.get('ev_label'))}"
+        f"{_decision_metric_tile('Confianca', decision.get('confidence_label'))}"
+        f"{_decision_metric_tile('Score', decision.get('score_label'))}"
+        f"{_decision_metric_tile('Risco', decision.get('risk_level'))}"
+        "</div>"
+        f"<p class='decision-highlight-reason'>{_esc(decision.get('main_reason'))}</p>"
+        f"<div class='decision-checklist'>{checklist_html}</div>"
         "</div>"
     )
 
 
+def _decision_metric_tile(label: str, value: Any) -> str:
+    return (
+        "<div class='mini decision-metric-tile'>"
+        f"<div class='muted'>{_esc(label)}</div>"
+        f"<strong>{_esc(value or '-')}</strong>"
+        "</div>"
+    )
+
+
+def _decision_status_counts(items: list[dict[str, Any]]) -> Counter:
+    counts: Counter = Counter()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        counts[build_scanner_decision(item).get("decision_status") or "MONITOR_ONLY"] += 1
+    return counts
+
+
+def _decision_order(status: str) -> int:
+    mapping = {
+        "ENTER_NOW": 0,
+        "WAIT_CONFIRMATION": 1,
+        "MONITOR_ONLY": 2,
+        "DO_NOT_ENTER": 3,
+        "NO_DATA": 4,
+    }
+    return mapping.get(str(status or "MONITOR_ONLY"), 5)
+
+
+def _sort_decision_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+        decision = build_scanner_decision(item)
+        return (
+            _decision_order(decision.get("decision_status") or "MONITOR_ONLY"),
+            -(int(decision.get("card_priority") or 0)),
+            -_safe_int(item.get("minute")),
+            str(item.get("match") or ""),
+        )
+
+    return sorted(items or [], key=_sort_key)
+
+
 def _simulation_row(item: dict[str, Any]) -> str:
     game_id = _js_string(item.get("game_id") or "")
+    decision = build_scanner_decision(item)
+    checklist_html = "".join(
+        f"<span class='decision-check compact {decision_item.get('state') or 'neutral'}'>{_esc(decision_item.get('text'))}</span>"
+        for decision_item in decision.get("checklist", [])[:4]
+    )
     return (
-        f"<tr class='clickable-row' onclick=\"selectScannedGame('{game_id}')\">"
-        f"<td data-label='Jogo'>{_esc(item.get('match'))}<br><span class='muted'>{_esc(item.get('league'))} | { _esc(item.get('minute'))}' | { _esc(item.get('scoreline'))}</span></td>"
-        f"<td data-label='Mercado'>{_esc(item.get('market'))}</td>"
+        f"<tr class='clickable-row' data-league='{_esc(item.get('league') or '')}' data-market='{_esc(item.get('market_category') or item.get('market') or '')}' "
+        f"data-recommendation='{_esc(item.get('recommendation') or '')}' data-entry-allowed='{str(bool(item.get('entry_allowed'))).lower()}' "
+        f"data-status='{_esc(decision.get('decision_code') or 'monitor_only')}' data-decision='{_esc(decision.get('decision_status') or 'MONITOR_ONLY')}' "
+        f"data-ev='{_esc(item.get('expected_value') or 0)}' data-confidence='{_esc(item.get('confidence_score') or 0)}' "
+        f"data-score='{_esc(decision.get('score_value') or 0)}' data-odd='{_esc(decision.get('odd_value') or 0)}' "
+        f"onclick=\"selectScannedGame('{game_id}')\">"
+        f"<td data-label='Jogo'><div class='scanner-row-lead'>{_recommendation_badge(decision.get('decision_label'))}<strong>{_esc(item.get('match'))}</strong><span class='muted'>{_esc(item.get('league'))} | { _esc(item.get('minute'))}' | { _esc(item.get('scoreline'))}</span></div></td>"
+        f"<td data-label='Mercado'><strong>{_esc(decision.get('market_label'))}</strong><br><span class='muted'>{_esc(item.get('selection'))}</span></td>"
         f"<td data-label='Selecao'>{_esc(item.get('selection'))}</td>"
         f"<td data-label='Linha'>{_esc(item.get('line'))}</td>"
-        f"<td data-label='Odd'>{_esc(item.get('odds') or '-')}</td>"
-        f"<td data-label='Acao'>{_action_badge(item.get('action'))}</td>"
-        f"<td data-label='Score'>{_esc(item.get('score'))}/100<br><span class='muted'>risco { _esc(item.get('risk'))}/100</span></td>"
-        f"<td data-label='Leitura'>{_esc(item.get('reason'))}</td>"
+        f"<td data-label='Odd'><strong>{_esc(item.get('odds') or '-')}</strong><br><span class='muted'>{_esc(decision.get('odd_label'))}</span></td>"
+        f"<td data-label='EV' class='{_value_class(item.get('expected_value'), multiplier=100)}'><strong>{_esc(decision.get('ev_label'))}</strong></td>"
+        f"<td data-label='Confianca'><strong>{_esc(decision.get('confidence_label'))}</strong></td>"
+        f"<td data-label='Recomendacao'>{_recommendation_badge(decision.get('decision_label'))}<br><span class='muted'>{_esc(decision.get('action_label'))}</span></td>"
+        f"<td data-label='Risco'>{_risk_badge(decision.get('risk_level'))}</td>"
+        f"<td data-label='Score'><strong>{_esc(decision.get('score_label'))}</strong></td>"
+        f"<td data-label='Leitura'><div class='scanner-row-reading'><strong>{_esc(decision.get('main_reason'))}</strong><div class='decision-checklist compact'>{checklist_html}</div></div></td>"
         "</tr>"
     )
+
+
+def _match_label_parts(label: str) -> tuple[str, str]:
+    raw = str(label or "").strip()
+    if not raw:
+        return "-", "-"
+    parts = re.split(r"\s+x\s+", raw, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip() or "-", parts[1].strip() or "-"
+    return raw, "-"
+
+
+def _dashboard_live_feed(items: list[dict[str, Any]], selected_game_id: str | None = None) -> str:
+    if not items:
+        return (
+            "<div class='dashboard-feed-empty'>"
+            "<strong>Radar aguardando jogos vivos</strong>"
+            "<span>Assim que o scanner identificar partidas com odds e leitura real, a mesa ao vivo aparece aqui.</span>"
+            "</div>"
+        )
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        game_id = str(item.get("game_id") or "").strip()
+        if not game_id:
+            continue
+        bucket = grouped.setdefault(
+            game_id,
+            {
+                "game_id": game_id,
+                "match": str(item.get("match") or "-"),
+                "league": str(item.get("league") or "-"),
+                "minute": str(item.get("minute") or "-"),
+                "scoreline": str(item.get("scoreline") or "-"),
+                "markets": [],
+                "best": None,
+            },
+        )
+        bucket["markets"].append(item)
+        current = bucket.get("best")
+        current_score = (
+            _action_weight((current or {}).get("action")),
+            _safe_int((current or {}).get("score")) - _safe_int((current or {}).get("risk")),
+            _safe_int((current or {}).get("score")),
+        )
+        candidate_score = (
+            _action_weight(item.get("action")),
+            _safe_int(item.get("score")) - _safe_int(item.get("risk")),
+            _safe_int(item.get("score")),
+        )
+        if current is None or candidate_score > current_score:
+            bucket["best"] = item
+            bucket["minute"] = str(item.get("minute") or bucket["minute"])
+            bucket["scoreline"] = str(item.get("scoreline") or bucket["scoreline"])
+
+    by_league: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for bucket in grouped.values():
+        by_league[str(bucket.get("league") or "Sem liga")].append(bucket)
+
+    sections: list[str] = []
+    selected = str(selected_game_id or "").strip()
+    ranked_leagues = sorted(
+        by_league.items(),
+        key=lambda item: (
+            len(item[1]),
+            max(int(build_scanner_decision(row.get("best") or {}).get("card_priority") or 0) for row in item[1]),
+        ),
+        reverse=True,
+    )
+    for league, league_games in ranked_leagues:
+        cards: list[str] = []
+        ordered_games = sorted(
+            league_games,
+            key=lambda row: (
+                _decision_order(build_scanner_decision(row.get("best") or {}).get("decision_status") or "MONITOR_ONLY"),
+                -(int(build_scanner_decision(row.get("best") or {}).get("card_priority") or 0)),
+                -_safe_int(row.get("minute")),
+            ),
+        )
+        for row in ordered_games:
+            best = row.get("best") or {}
+            decision = build_scanner_decision(best)
+            home, away = _match_label_parts(str(row.get("match") or "-"))
+            active = " active" if selected and selected == row["game_id"] else ""
+            reason = str(decision.get("main_reason") or best.get("reason") or "Leitura ao vivo em atualizacao.").strip()
+            score = _safe_int(best.get("score"))
+            game_id = _js_string(row["game_id"])
+            search_blob = _esc(
+                " ".join(
+                    filter(
+                        None,
+                        [
+                            row.get("match"),
+                            row.get("league"),
+                            best.get("market"),
+                            best.get("selection"),
+                            reason,
+                        ],
+                    )
+                )
+            )
+            tiles: list[str] = []
+            seen_tiles: set[tuple[str, str, str]] = set()
+            for market_item in sorted(
+                row.get("markets") or [],
+                key=lambda entry: (
+                    _action_weight(entry.get("action")),
+                    _safe_int(entry.get("score")),
+                    entry.get("odds") is not None,
+                ),
+                reverse=True,
+            ):
+                market = str(market_item.get("market") or "-").strip()
+                selection = str(market_item.get("selection") or "-").strip()
+                line = str(market_item.get("line") or "-").strip()
+                marker = (market, selection, line)
+                if marker in seen_tiles:
+                    continue
+                seen_tiles.add(marker)
+                odd = market_item.get("odds")
+                odd_label = f"{float(odd):.2f}" if isinstance(odd, (int, float)) else _esc(odd or "-")
+                tiles.append(
+                    "<button class='dashboard-feed-odd' type='button' "
+                    f"onclick=\"selectScannedGame('{game_id}'); highlightDashboardFeed('{game_id}')\">"
+                    f"<span>{_esc(market)}</span>"
+                    f"<strong>{_esc(selection)}</strong>"
+                    f"<b>{odd_label}</b>"
+                    "</button>"
+                )
+                if len(tiles) >= 3:
+                    break
+            if not tiles:
+                tiles.append(
+                    f"<div class='dashboard-feed-odd empty'><span>{_esc(best.get('market') or 'Mercado')}</span><strong>sem linha</strong><b>-</b></div>"
+                )
+            checklist_html = "".join(
+                f"<span class='decision-check compact {decision_item.get('state') or 'neutral'}'>{_esc(decision_item.get('text'))}</span>"
+                for decision_item in decision.get("checklist", [])[:4]
+            )
+            priority_label = f"{int(decision.get('card_priority') or 0)}/100"
+            cards.append(
+                f"<article class='dashboard-feed-card{active}' data-game-id='{_esc(row['game_id'])}' "
+                f"data-search='{search_blob}' data-action='{_esc(str(decision.get('decision_code') or 'monitor_only').lower())}' "
+                f"onclick=\"selectScannedGame('{game_id}'); highlightDashboardFeed('{game_id}')\">"
+                "<div class='dashboard-feed-card-top'>"
+                f"{_recommendation_badge(decision.get('decision_label'))}"
+                f"<div class='dashboard-feed-score'>{_esc(row.get('minute'))}' · {_esc(row.get('scoreline'))}</div>"
+                "</div>"
+                "<div class='dashboard-feed-title'>"
+                f"<strong>{_esc(home)} x {_esc(away)}</strong>"
+                f"<span>{_esc(league)} | {_esc(row.get('minute'))}' | {_esc(row.get('scoreline'))}</span>"
+                "</div>"
+                "<div class='dashboard-feed-market'>"
+                f"<span class='dashboard-feed-market-tag'>{_esc(decision.get('market_label'))}</span>"
+                f"<strong>{_esc(decision.get('action_label'))}</strong>"
+                "</div>"
+                "<div class='dashboard-feed-metrics'>"
+                f"{_decision_metric_tile('Odd', decision.get('odd_label'))}"
+                f"{_decision_metric_tile('EV', decision.get('ev_label'))}"
+                f"{_decision_metric_tile('Confianca', decision.get('confidence_label'))}"
+                f"{_decision_metric_tile('Score', decision.get('score_label'))}"
+                f"{_decision_metric_tile('Risco', decision.get('risk_level'))}"
+                f"{_decision_metric_tile('Prioridade', priority_label)}"
+                "</div>"
+                f"<div class='dashboard-feed-odds-row'>{''.join(tiles)}</div>"
+                f"<div class='dashboard-feed-reason'>{_esc(reason)}</div>"
+                f"<div class='decision-checklist compact'>{checklist_html}</div>"
+                "</article>"
+            )
+        sections.append(
+            "<section class='dashboard-feed-group'>"
+            "<div class='dashboard-feed-group-head'>"
+            f"<span>{_esc(league)}</span>"
+            f"<span class='dashboard-feed-group-total'>{len(league_games)} jogo(s)</span>"
+            "</div>"
+            f"{''.join(cards)}"
+            "</section>"
+        )
+
+    return "".join(sections)
 
 
 def _thermometer_rows(items: list[dict[str, Any]]) -> str:
@@ -4137,6 +7027,7 @@ def _match_stats_panel(signal: dict[str, Any] | None, history: list[dict[str, An
     away_goals = int(game.get("away_goals") or 0)
     home_hist = _team_history(home, history)
     away_hist = _team_history(away, history)
+    decision = build_scanner_decision(signal)
     panel_id = _safe_dom_id(game.get("game_id") or f"{home}-{away}")
     stats_id = f"stats-{panel_id}"
     history_id = f"history-{panel_id}"
@@ -4151,6 +7042,38 @@ def _match_stats_panel(signal: dict[str, Any] | None, history: list[dict[str, An
         "</div>"
         f"<div class='stats-title'>{_esc(home)} x {_esc(away)}</div>"
         f"<div class='muted'>{_esc(game.get('league') or game.get('division') or '-')} | { _esc(game.get('minute', '-'))}' | Placar {home_goals}x{away_goals}</div>"
+        f"<div class='decision-detail-hero { _esc(decision.get('status_class')) }'>"
+        f"<div class='decision-detail-status'>{_recommendation_badge(decision.get('decision_label'))}<strong>{_esc(decision.get('action_label'))}</strong></div>"
+        f"<p>{_esc(decision.get('main_reason'))}</p>"
+        "</div>"
+        "<div class='decision-detail-grid'>"
+        f"{_decision_metric_tile('Mercado', decision.get('market_label'))}"
+        f"{_decision_metric_tile('Odd', decision.get('odd_label'))}"
+        f"{_decision_metric_tile('EV', decision.get('ev_label'))}"
+        f"{_decision_metric_tile('Confianca', decision.get('confidence_label'))}"
+        f"{_decision_metric_tile('Score', decision.get('score_label'))}"
+        f"{_decision_metric_tile('Risco', decision.get('risk_level'))}"
+        f"{_decision_metric_tile('Fonte', decision.get('source_label'))}"
+        f"{_decision_metric_tile('Ultima atualizacao', decision.get('updated_at'))}"
+        "</div>"
+        "<div class='decision-detail-columns'>"
+        "<section class='decision-explain-card'>"
+        "<h3>Checklist</h3>"
+        + "".join(
+            f"<span class='decision-check {item.get('state') or 'neutral'}'>{_esc(item.get('text'))}</span>"
+            for item in decision.get("checklist", [])
+        )
+        + "</section>"
+        "<section class='decision-explain-card'>"
+        "<h3>Por que essa decisao?</h3>"
+        "<div class='decision-reason-group'><strong>Fatores positivos</strong>"
+        + "".join(f"<span>{_esc(text)}</span>" for text in (decision.get("positive_reasons") or ["Nenhum destaque forte."]))
+        + "</div>"
+        "<div class='decision-reason-group'><strong>Fatores bloqueantes</strong>"
+        + "".join(f"<span>{_esc(text)}</span>" for text in (decision.get("blocking_reasons") or ["Sem bloqueio forte."]))
+        + "</div>"
+        "</section>"
+        "</div>"
         f"<div id='{stats_id}' class='stats-pane active'>"
         f"{_match_visual_card(signal, metrics)}"
         f"{_live_match_card(metrics)}"
@@ -4568,11 +7491,12 @@ def _possession_share(left: int, right: int) -> int:
     return max(0, min(100, int((left / total) * 100)))
 
 
-def _safe_int(value: Any) -> int:
+def _safe_int(value: Any, default: int = 0) -> int:
     try:
-        return int(float(value or 0))
+        base = value if value is not None else default
+        return int(float(base))
     except (TypeError, ValueError):
-        return 0
+        return int(default)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -4632,11 +7556,49 @@ def _action_badge(action: Any) -> str:
     return f"<span class='action-pill {cls}'>{_esc(text)}</span>"
 
 
+def _recommendation_badge(recommendation: Any) -> str:
+    text = str(recommendation or "Monitorar").strip()
+    clean = text.lower()
+    if "entrar agora" in clean or "liberada" in clean or "forte" in clean:
+        cls = "enter"
+    elif "aguardar" in clean:
+        cls = "wait"
+    elif "monitor" in clean:
+        cls = "monitor"
+    elif "sem dados" in clean:
+        cls = "hold"
+    else:
+        cls = "exit"
+    return f"<span class='action-pill {cls}'>{_esc(text)}</span>"
+
+
+def _risk_badge(level: Any) -> str:
+    text = str(level or "Medio").strip()
+    clean = text.lower()
+    if "sem valor" in clean or "alto" in clean:
+        cls = "exit"
+    elif "medio" in clean:
+        cls = "wait"
+    else:
+        cls = "hold"
+    return f"<span class='action-pill {cls}'>{_esc(text)}</span>"
+
+
+def _risk_profile_label(profile: str) -> str:
+    labels = {
+        "conservador": "Conservador",
+        "moderado": "Moderado",
+        "agressivo": "Agressivo",
+    }
+    return labels.get(str(profile or "").strip().lower(), "Moderado")
+
+
 def _scanner_status(state, settings=None) -> dict[str, Any]:
     settings = settings or load_settings()
     candidates = len(_fresh_candidate_signals(state, settings))
     has_active = bool(state.active_signal)
     scan_mode = str(getattr(state, "scan_preference", "brazil_first") or "brazil_first")
+    risk_profile = str(getattr(state, "risk_profile", "moderado") or "moderado")
     live_games = _fresh_live_games(state, settings)
     pregame_games = _fresh_pregame_watchlist(state, settings)
     idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
@@ -4664,6 +7626,8 @@ def _scanner_status(state, settings=None) -> dict[str, Any]:
             if has_active
             else ("radar ao vivo" if live_games or candidates else ("watchlist pre-jogo" if pregame_games else "scanner livre"))
         ),
+        "risk_profile": risk_profile,
+        "risk_profile_label": _risk_profile_label(risk_profile),
         "scan_preference": scan_mode,
         "scan_profile": _scan_mode_label(scan_mode),
         "idle_scan_interval_seconds": idle_seconds,
@@ -4796,11 +7760,17 @@ def _fresh_live_games(state, settings) -> list[dict[str, Any]]:
 def _fresh_candidate_signals(state, settings) -> list[dict[str, Any]]:
     if _scanner_cache_is_stale(state, settings):
         return []
-    return [
-        item
-        for item in (state.candidate_signals or [])
-        if isinstance(item, dict) and _is_live_game(item.get("game") or {})
-    ]
+    rows: list[dict[str, Any]] = []
+    for item in (state.candidate_signals or []):
+        if not isinstance(item, dict):
+            continue
+        game = item.get("game")
+        if not isinstance(game, dict):
+            continue
+        if not _is_live_game(game):
+            continue
+        rows.append(item)
+    return rows
 
 
 def _is_upcoming_game(game: dict[str, Any] | None) -> bool:
@@ -4878,9 +7848,11 @@ def _jogosdodia_best_signal(signals: list[dict[str, Any]]) -> dict[str, Any] | N
         "confidence": _safe_int(signal.get("confidence")),
         "entry_score": _safe_int(signal.get("entry_score")),
         "risk_score": _safe_int(signal.get("risk_score")),
+        "decision_class": str(signal.get("decision_class") or ""),
         "reason": str(signal.get("reason") or ""),
         "risk_note": str(signal.get("risk_note") or ""),
         "note": str(signal.get("score_note") or ""),
+        "brain": _jogosdodia_brain_summary(signal),
     }
 
 
@@ -4909,6 +7881,31 @@ def _jogosdodia_focus_signal(
         "selection": str(top.get("selection") or base_signal.get("selection") or "-"),
         "odds": _safe_float(top.get("odds"), default=base_signal.get("odds") or -1.0),
         "reason": str(top.get("reason") or base_signal.get("reason") or ""),
+    }
+
+
+def _jogosdodia_brain_summary(signal: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(signal, dict):
+        return {"enabled": False}
+    brain = _as_dict(signal.get("brain"))
+    best_skill = _as_dict(brain.get("best_skill"))
+    if not brain:
+        return {"enabled": False}
+    return {
+        "enabled": bool(brain.get("enabled")),
+        "sample_size": _safe_int(brain.get("sample_size")),
+        "momentum_score": _safe_float(brain.get("momentum_score"), default=0.0),
+        "risk_score": _safe_float(brain.get("risk_score"), default=0.0),
+        "data_quality": _safe_float(brain.get("data_quality"), default=0.0),
+        "pressure_trend": _safe_float(brain.get("pressure_trend"), default=0.0),
+        "best_skill": {
+            "name": str(best_skill.get("name") or "-"),
+            "decision": str(best_skill.get("decision") or "SEM DADOS"),
+            "market": str(best_skill.get("market") or "-"),
+            "confidence": _safe_int(best_skill.get("confidence")),
+            "edge": _safe_float(best_skill.get("edge"), default=0.0),
+            "reason": str(best_skill.get("reason") or ""),
+        },
     }
 
 
@@ -4986,6 +7983,81 @@ def _market_period_snapshot(game: dict[str, Any], key: str, period: str) -> str:
     if over == "Sem linha ao vivo" and under == "Sem linha ao vivo":
         return "Sem linha ao vivo"
     return f"Over {over} | Under {under}"
+
+
+def _market_cell(label: str, odds: Any, line: Any = "") -> dict[str, Any]:
+    return {
+        "label": str(label or "-"),
+        "line": _market_line_label(line) if line else "",
+        "odds": _safe_float(odds, default=-1.0),
+    }
+
+
+def _valid_market_cell(cell: dict[str, Any]) -> bool:
+    return bool(cell.get("label")) and _safe_float(cell.get("odds"), default=-1.0) > 0
+
+
+def _jogosdodia_market_sections(game: dict[str, Any]) -> list[dict[str, Any]]:
+    markets = _as_dict(game.get("markets"))
+    sections: list[dict[str, Any]] = []
+
+    result_cells = [
+        _market_cell(str(game.get("home") or "Casa"), game.get("odds_home")),
+        _market_cell("Empate", game.get("odds_draw")),
+        _market_cell(str(game.get("away") or "Fora"), game.get("odds_away")),
+    ]
+    if any(_valid_market_cell(cell) for cell in result_cells):
+        sections.append({"group": "1x2", "title": "Resultado Final", "cells": result_cells})
+
+    goals = _as_dict(markets.get("goals"))
+    goal_cells = [
+        _market_cell("Over", _as_dict(goals.get("over")).get("odds"), _as_dict(goals.get("over")).get("line")),
+        _market_cell("Under", _as_dict(goals.get("under")).get("odds"), _as_dict(goals.get("under")).get("line")),
+    ]
+    if any(_valid_market_cell(cell) for cell in goal_cells):
+        sections.append({"group": "goals", "title": "Partida - Gols", "cells": goal_cells})
+
+    asian = _as_dict(markets.get("asian"))
+    asian_cells = [
+        _market_cell(str(game.get("home") or "Casa"), _as_dict(asian.get("home")).get("odds"), _as_dict(asian.get("home")).get("line")),
+        _market_cell(str(game.get("away") or "Fora"), _as_dict(asian.get("away")).get("odds"), _as_dict(asian.get("away")).get("line")),
+    ]
+    if any(_valid_market_cell(cell) for cell in asian_cells):
+        sections.append({"group": "asian", "title": "Odds Asiaticas", "cells": asian_cells})
+
+    corners = _as_dict(markets.get("corners"))
+    corners_full = [
+        _market_cell("Over", _as_dict(corners.get("over")).get("odds"), _as_dict(corners.get("over")).get("line")),
+        _market_cell("Under", _as_dict(corners.get("under")).get("odds"), _as_dict(corners.get("under")).get("line")),
+    ]
+    if any(_valid_market_cell(cell) for cell in corners_full):
+        sections.append({"group": "corners", "title": "Escanteios - FT", "cells": corners_full})
+
+    corners_1t = _as_dict(corners.get("first_half"))
+    corners_1t_cells = [
+        _market_cell("Over", _as_dict(corners_1t.get("over")).get("odds"), _as_dict(corners_1t.get("over")).get("line")),
+        _market_cell("Under", _as_dict(corners_1t.get("under")).get("odds"), _as_dict(corners_1t.get("under")).get("line")),
+    ]
+    if any(_valid_market_cell(cell) for cell in corners_1t_cells):
+        sections.append({"group": "periods", "title": "Escanteios - 1º Tempo", "cells": corners_1t_cells})
+
+    corners_2t = _as_dict(corners.get("second_half"))
+    corners_2t_cells = [
+        _market_cell("Over", _as_dict(corners_2t.get("over")).get("odds"), _as_dict(corners_2t.get("over")).get("line")),
+        _market_cell("Under", _as_dict(corners_2t.get("under")).get("odds"), _as_dict(corners_2t.get("under")).get("line")),
+    ]
+    if any(_valid_market_cell(cell) for cell in corners_2t_cells):
+        sections.append({"group": "periods", "title": "Escanteios - 2º Tempo", "cells": corners_2t_cells})
+
+    cards = _as_dict(markets.get("cards"))
+    cards_cells = [
+        _market_cell("Over", _as_dict(cards.get("over")).get("odds"), _as_dict(cards.get("over")).get("line")),
+        _market_cell("Under", _as_dict(cards.get("under")).get("odds"), _as_dict(cards.get("under")).get("line")),
+    ]
+    if any(_valid_market_cell(cell) for cell in cards_cells):
+        sections.append({"group": "cards", "title": "Cartoes", "cells": cards_cells})
+
+    return sections
 
 
 def _jogosdodia_corners_collection(game: dict[str, Any]) -> dict[str, str]:
@@ -5184,7 +8256,9 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
     market_counter: Counter[str] = Counter()
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for signal in candidate_signals:
-        game = signal.get("game") or {}
+        game = signal.get("game")
+        if not isinstance(game, dict):
+            continue
         game_id = str(game.get("game_id") or "").strip()
         if game_id:
             grouped[game_id].append(signal)
@@ -5205,6 +8279,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
             recommendations = _jogosdodia_recommendations(best_signal_raw)
             best_signal = _jogosdodia_focus_signal(best_signal, recommendations)
             market_skills = _jogosdodia_market_skills(game, recommendations)
+            market_sections = _jogosdodia_market_sections(game)
             for rec in recommendations:
                 market_name = str(rec.get("market") or "").strip()
                 if market_name:
@@ -5255,8 +8330,10 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
                     "market_tags": _jogosdodia_market_tags(game),
                     "signal_count": len(related),
                     "best_signal": best_signal,
+                    "brain": (best_signal or {}).get("brain") or _jogosdodia_brain_summary(best_signal_raw),
                     "recommendations": recommendations,
                     "market_skills": market_skills,
+                    "market_sections": market_sections,
                     "corners_collection": corners_collection,
                     "pressure_bar": pressure_bar,
                     "race_to_goal": race_to_goal,
@@ -5330,7 +8407,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         "notes": {
             "mode": "pregame_then_real_live",
             "mock": False,
-            "message": "Modulo isolado com watchlist de pre-jogo e leitura apenas quando o jogo realmente vira ao vivo.",
+            "message": "Fluxo com watchlist pre-jogo e mesa de leitura ativada quando a partida realmente entra ao vivo.",
         },
     }
 
@@ -5563,6 +8640,54 @@ def _account_bankroll_panel(settings: Settings, user: dict[str, Any] | None, sta
 """
 
 
+def _dashboard_menu_panel(
+    build_stamp: str,
+    user: dict[str, Any] | None,
+    learning: dict[str, Any],
+    brain_status: dict[str, Any] | None = None,
+) -> str:
+    items = [
+        ("Scanner Mundial", "Radar principal, modos de leitura e ciclo automatico", "#scanner", "radar"),
+        ("Jogos do Dia", "Mesa ao vivo com watchlist, odds e filtros rapidos", "/app/jogosdodia", "live"),
+        ("Mercado Ao Vivo", "Campeonatos, liderancas e termometro do jogo", "#simulador", "pulse"),
+        ("Fantasy IA", "Montagem, leitura e importacao da sala do fantasy", "/fantasy-ia", "fantasy"),
+        ("Conta e Banca", "Stake, saldo disponivel e entradas abertas", "#conta-banca", "wallet"),
+        ("Resultados", "Importar, revisar historico e acompanhar curva", "#importar", "history"),
+    ]
+    cards: list[str] = []
+    for title, subtitle, href, icon in items:
+        cards.append(
+            "<a class='menu-card' "
+            f"href='{_esc(href)}' onclick=\"toggleDashboardMenu(false)\">"
+            f"<span class='menu-card-icon {icon}'></span>"
+            "<span class='menu-card-copy'>"
+            f"<strong>{_esc(title)}</strong>"
+            f"<small>{_esc(subtitle)}</small>"
+            "</span>"
+            "<span class='menu-card-arrow'>›</span>"
+            "</a>"
+        )
+    top_chips = (
+        "<div class='menu-utility-row'>"
+        f"<span class='menu-build'>{_esc('Build ' + build_stamp)}</span>"
+        "<button class='theme-toggle menu-theme' id='menu-theme-toggle' type='button' onclick='toggleTheme()' aria-pressed='false'>Tema claro</button>"
+        f"<button class='account-toggle menu-account' type='button' onclick=\"toggleDashboardMenu(false); toggleAccountPanel(true)\">{_esc((user or {}).get('name') or 'Conta')}</button>"
+        "<div class='status-chip-plain menu-status'><span class='status-dot'></span> Sistema online</div>"
+        "</div>"
+    )
+    return (
+        "<aside class='menu-panel' id='menu-panel' aria-label='Menu principal da dashboard'>"
+        "<div class='menu-panel-head'>"
+        "<button class='menu-icon-btn' type='button' onclick='toggleDashboardMenu(false)' aria-label='Fechar menu'>×</button>"
+        "<strong>Menu</strong>"
+        "</div>"
+        f"{top_chips}"
+        f"{_learning_menu_panel(learning, brain_status or {'enabled': False})}"
+        f"<div class='menu-card-list'>{''.join(cards)}</div>"
+        "</aside>"
+    )
+
+
 def _suggested_stake(account: dict[str, Any]) -> float:
     balance = _safe_float(account.get("balance_brl"))
     percent = _safe_float(account.get("default_stake_percent"), 2.0)
@@ -5677,6 +8802,112 @@ def _fast_learning_panel(fast: dict[str, Any]) -> str:
             f"<tbody>{''.join(body)}</tbody></table>"
         )
     return "".join(blocks)
+
+
+def _learning_market_row(learning: dict[str, Any], *tokens: str) -> dict[str, Any] | None:
+    rows = learning.get("by_market") or []
+    normalized = [str(token).strip().lower() for token in tokens if str(token).strip()]
+    for row in rows:
+        name = str(row.get("name") or "").strip().lower()
+        if any(token in name for token in normalized):
+            return row
+    return None
+
+
+def _learning_accelerator_skills(learning: dict[str, Any]) -> list[dict[str, Any]]:
+    sample_size = _safe_int(learning.get("sample_size"))
+    specs = [
+        ("Gols FT", ("gols", "over", "under")),
+        ("Gols 1T", ("1t", "primeiro tempo", "1o tempo")),
+        ("Gols 2T", ("2t", "segundo tempo", "2o tempo")),
+        ("Escanteios FT", ("escanteios", "corners")),
+        ("Escanteios 1T", ("escanteios 1t", "corners 1t", "first half corners")),
+        ("Escanteios 2T", ("escanteios 2t", "corners 2t", "second half corners")),
+        ("BTTS", ("btts", "ambos marcam")),
+        ("Dupla Chance", ("dupla chance", "double chance")),
+        ("Handicap", ("handicap", "asiat")),
+        ("Cartoes", ("cartoes", "cards")),
+        ("Proximo Gol", ("proximo gol", "next goal")),
+        ("Linha Asiática de Gols", ("asian total", "gols asiaticos", "asian goals")),
+        ("Escanteios 75+", ("escanteios 75", "corners 75", "escanteios fim")),
+    ]
+    skills: list[dict[str, Any]] = []
+    for title, tokens in specs:
+        row = _learning_market_row(learning, *tokens)
+        if not row:
+            status = "coleta" if sample_size > 0 else "sem base"
+            summary = (
+                "Sem amostra fechada ainda. Prioridade: registrar greens e reds reais deste mercado."
+                if sample_size == 0
+                else "Mercado ainda sem massa critica. Continue alimentando esse tipo de entrada."
+            )
+            confidence = "0"
+        else:
+            total = _safe_int(row.get("total"))
+            hit_rate = _safe_float(row.get("hit_rate"))
+            profit = _safe_float(row.get("profit_units"))
+            confidence = str(_safe_int(row.get("confidence")))
+            if total >= 18 and hit_rate >= 58 and profit >= 0:
+                status = "quente"
+                summary = f"{total} leituras fechadas com {hit_rate:.1f}% de acerto. Vale acelerar coleta deste mercado."
+            elif total >= 12 and hit_rate <= 45:
+                status = "frio"
+                summary = f"{total} leituras fechadas com {hit_rate:.1f}% de acerto. A IA ainda precisa recalibrar esse mercado."
+            else:
+                status = "aprendendo"
+                summary = f"{total} leituras fechadas com {hit_rate:.1f}% de acerto. Mercado em fase de ajuste fino."
+        skills.append(
+            {
+                "title": title,
+                "status": status,
+                "summary": summary,
+                "confidence": confidence,
+            }
+        )
+    return skills
+
+
+def _learning_menu_panel(learning: dict[str, Any], brain_status: dict[str, Any]) -> str:
+    sample = _safe_int(learning.get("sample_size"))
+    real_sample = _safe_int(learning.get("real_sample_size"))
+    sim_sample = _safe_int(learning.get("simulation_sample_size"))
+    fast = learning.get("fast_learning") or {}
+    momentum = _safe_int(fast.get("momentum_score"), 50)
+    mode = str(fast.get("mode") or "neutro")
+    readiness = "crua" if sample < 10 else "aprendendo" if sample < 40 else "afinando"
+    brain_enabled = bool(brain_status.get("enabled"))
+    brain_snapshots = _safe_int(brain_status.get("live_snapshots"))
+    brain_skills = _safe_int(brain_status.get("skill_rows"))
+    skills = _learning_accelerator_skills(learning)
+    skill_cards = "".join(
+        "<article class='menu-skill-card'>"
+        f"<div class='menu-skill-top'><strong>{_esc(item['title'])}</strong><span class='menu-skill-status { _safe_dom_id(item['status']) }'>{_esc(item['status'])}</span></div>"
+        f"<small>{_esc(item['summary'])}</small>"
+        f"<div class='menu-skill-meta'>conf { _esc(item['confidence']) } · foco de coleta</div>"
+        "</article>"
+        for item in skills
+    )
+    return (
+        "<section class='menu-learning-panel'>"
+        "<div class='menu-learning-head'>"
+        "<strong>Aprendizado da IA</strong>"
+        f"<span>{_esc(readiness)}</span>"
+        "</div>"
+        "<div class='menu-learning-grid'>"
+        f"<div class='mini'><div class='muted'>Amostra total</div><strong>{sample}</strong></div>"
+        f"<div class='mini'><div class='muted'>Reais</div><strong>{real_sample}</strong></div>"
+        f"<div class='mini'><div class='muted'>Simuladas</div><strong>{sim_sample}</strong></div>"
+        f"<div class='mini'><div class='muted'>Momentum</div><strong>{momentum}/100</strong></div>"
+        f"<div class='mini'><div class='muted'>Brain</div><strong>{'ativo' if brain_enabled else 'off'}</strong></div>"
+        f"<div class='mini'><div class='muted'>Snapshots</div><strong>{brain_snapshots}</strong></div>"
+        f"<div class='mini'><div class='muted'>Skills logadas</div><strong>{brain_skills}</strong></div>"
+        "</div>"
+        f"<p class='muted'>Modo atual: {_esc(mode)}. Hoje a IA ainda esta {'sem memoria fechada suficiente' if sample == 0 else 'em consolidacao'}. Quanto mais greens e reds reais fechados por mercado, mais rapido ela sai do neutro.</p>"
+        "<div class='menu-skill-list'>"
+        f"{skill_cards}"
+        "</div>"
+        "</section>"
+    )
 
 
 def _simulate_live_session(

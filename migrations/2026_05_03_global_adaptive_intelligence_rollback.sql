@@ -1,0 +1,31 @@
+drop table if exists public.system_logs cascade;
+drop table if exists public.analysis_logs cascade;
+drop table if exists public.rollback_points cascade;
+drop table if exists public.change_history cascade;
+drop table if exists public.approval_requests cascade;
+drop table if exists public.exposure_snapshots cascade;
+drop table if exists public.risk_events cascade;
+drop table if exists public.long_term_memory cascade;
+drop table if exists public.pattern_insights cascade;
+drop table if exists public.drift_events cascade;
+drop table if exists public.feature_performance cascade;
+drop table if exists public.generated_features cascade;
+drop table if exists public.meta_model_decisions cascade;
+drop table if exists public.consensus_decisions cascade;
+drop table if exists public.agent_trust_scores cascade;
+drop table if exists public.agent_outputs cascade;
+drop table if exists public.agents cascade;
+drop table if exists public.strategy_population cascade;
+drop table if exists public.strategy_experiments cascade;
+drop table if exists public.strategy_versions cascade;
+drop table if exists public.monte_carlo_results cascade;
+drop table if exists public.monte_carlo_runs cascade;
+drop table if exists public.backtest_batches cascade;
+drop table if exists public.ensemble_configs cascade;
+drop table if exists public.normalized_stats cascade;
+drop table if exists public.normalized_odds cascade;
+drop table if exists public.normalized_events cascade;
+drop table if exists public.normalized_entities cascade;
+drop table if exists public.raw_imports cascade;
+-- Não removemos public.data_sources no rollback, porque ela pode já existir e ser compartilhada com outros módulos.
+

@@ -85,6 +85,18 @@ def _parse_matches(matches: list[dict], live_only: bool) -> list[LiveGame]:
         home_goals = _safe_int(running.get("home"))
         away_goals = _safe_int(running.get("away"))
         home_pressure, away_pressure = _estimated_pressure(minute, home_goals, away_goals, status)
+        markets = {
+            "live_facts": {
+                "possession_home": 50.0,
+                "possession_away": 50.0,
+                "shots_home": max(home_goals + (1 if home_pressure >= 55 else 0), 0),
+                "shots_away": max(away_goals + (1 if away_pressure >= 55 else 0), 0),
+                "shots_on_home": max(home_goals, 1 if home_pressure >= 57 else 0),
+                "shots_on_away": max(away_goals, 1 if away_pressure >= 57 else 0),
+                "corners_home": max(0, minute // 20 + (1 if home_pressure > away_pressure else 0)),
+                "corners_away": max(0, minute // 20 + (1 if away_pressure > home_pressure else 0)),
+            },
+        }
         games.append(
             LiveGame(
                 game_id=f"fdorg-{match.get('id')}",
@@ -106,7 +118,7 @@ def _parse_matches(matches: list[dict], live_only: bool) -> list[LiveGame]:
                 odds_away=None,
                 priority=_priority(_division(_league_name(match), home, away)),
                 division=_division(_league_name(match), home, away),
-                markets={},
+                markets=markets,
             )
         )
     games.sort(key=lambda game: (game.priority, -game.minute))
