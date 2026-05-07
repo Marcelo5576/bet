@@ -62,6 +62,7 @@ SYSTEM_CHECK_INTERVAL_SECONDS = 30 * 60
 SOURCE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 DAILY_SIMULATION_CHECK_INTERVAL_SECONDS = 15 * 60
 APPROVED_SIGNAL_ALERT_TTL_SECONDS = 20 * 60
+PASSIVE_SERVICE_HEARTBEAT_SECONDS = 5 * 60
 TELEGRAM_DICE = {
     "scan": "⚽",
     "signal": "🎯",
@@ -2616,64 +2617,97 @@ async def remember_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     settings = load_settings()
     if not settings.telegram_bot_token:
-        raise SystemExit("Preencha TELEGRAM_BOT_TOKEN no .env")
+        logger.warning(
+            "TELEGRAM_BOT_TOKEN ausente. BetSignal vai iniciar em modo passivo ate a integracao ser configurada."
+        )
+        asyncio.run(_passive_service_loop(settings, "TELEGRAM_BOT_TOKEN ausente"))
+        return
 
-    app = (
-        Application.builder()
-        .token(settings.telegram_bot_token)
-        .post_init(setup_bot_commands)
-        .build()
-    )
-    app.bot_data["settings"] = settings
-    app.bot_data["store"] = StateStore(settings.state_file)
-    app.bot_data["provider"] = build_provider(settings)
-    app.bot_data["supabase"] = SupabaseSink.from_settings(settings)
+    try:
+        app = (
+            Application.builder()
+            .token(settings.telegram_bot_token)
+            .post_init(setup_bot_commands)
+            .build()
+        )
+        app.bot_data["settings"] = settings
+        app.bot_data["store"] = StateStore(settings.state_file)
+        app.bot_data["provider"] = build_provider(settings)
+        app.bot_data["supabase"] = SupabaseSink.from_settings(settings)
 
-    app.add_handler(CommandHandler("start", _with_chat_memory(start)))
-    app.add_handler(CommandHandler("menu", _with_chat_memory(main_menu_cmd)))
-    app.add_handler(CommandHandler("jogos", _with_chat_memory(games_cmd)))
-    app.add_handler(CommandHandler("sistema", _with_chat_memory(health_cmd)))
-    app.add_handler(CommandHandler("checkout", _with_chat_memory(checkout_cmd)))
-    app.add_handler(CommandHandler("relatorios", _with_chat_memory(reports_cmd)))
-    app.add_handler(CommandHandler("oferta", _with_chat_memory(offer_cmd)))
-    app.add_handler(CommandHandler("chatid", _with_chat_memory(chatid_cmd)))
-    app.add_handler(CommandHandler("iamenu", _with_chat_memory(ia_menu_cmd)))
-    app.add_handler(CommandHandler("scan", _with_chat_memory(scan)))
-    app.add_handler(CommandHandler("status", _with_chat_memory(status)))
-    app.add_handler(CommandHandler("stop", _with_chat_memory(stop)))
-    app.add_handler(CommandHandler("test", _with_chat_memory(test)))
-    app.add_handler(CommandHandler("dashboard", _with_chat_memory(dashboard_cmd)))
-    app.add_handler(CommandHandler("stats", _with_chat_memory(stats_cmd)))
-    app.add_handler(CommandHandler("aprendizado", _with_chat_memory(learning_cmd)))
-    app.add_handler(CommandHandler("suporte", _with_chat_memory(support_cmd)))
-    app.add_handler(CommandHandler("ia", _with_chat_memory(ia_cmd)))
-    app.add_handler(CommandHandler("entrada", _with_chat_memory(entry_cmd)))
-    app.add_handler(CommandHandler("importar", _with_chat_memory(import_cmd)))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _with_chat_memory(pending_text)))
-    app.add_error_handler(on_error)
+        app.add_handler(CommandHandler("start", _with_chat_memory(start)))
+        app.add_handler(CommandHandler("menu", _with_chat_memory(main_menu_cmd)))
+        app.add_handler(CommandHandler("jogos", _with_chat_memory(games_cmd)))
+        app.add_handler(CommandHandler("sistema", _with_chat_memory(health_cmd)))
+        app.add_handler(CommandHandler("checkout", _with_chat_memory(checkout_cmd)))
+        app.add_handler(CommandHandler("relatorios", _with_chat_memory(reports_cmd)))
+        app.add_handler(CommandHandler("oferta", _with_chat_memory(offer_cmd)))
+        app.add_handler(CommandHandler("chatid", _with_chat_memory(chatid_cmd)))
+        app.add_handler(CommandHandler("iamenu", _with_chat_memory(ia_menu_cmd)))
+        app.add_handler(CommandHandler("scan", _with_chat_memory(scan)))
+        app.add_handler(CommandHandler("status", _with_chat_memory(status)))
+        app.add_handler(CommandHandler("stop", _with_chat_memory(stop)))
+        app.add_handler(CommandHandler("test", _with_chat_memory(test)))
+        app.add_handler(CommandHandler("dashboard", _with_chat_memory(dashboard_cmd)))
+        app.add_handler(CommandHandler("stats", _with_chat_memory(stats_cmd)))
+        app.add_handler(CommandHandler("aprendizado", _with_chat_memory(learning_cmd)))
+        app.add_handler(CommandHandler("suporte", _with_chat_memory(support_cmd)))
+        app.add_handler(CommandHandler("ia", _with_chat_memory(ia_cmd)))
+        app.add_handler(CommandHandler("entrada", _with_chat_memory(entry_cmd)))
+        app.add_handler(CommandHandler("importar", _with_chat_memory(import_cmd)))
+        app.add_handler(CallbackQueryHandler(button))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _with_chat_memory(pending_text)))
+        app.add_error_handler(on_error)
 
-    app.job_queue.run_once(scheduled_scan, when=10)
-    app.job_queue.run_repeating(
-        scheduled_system_checkout,
-        interval=SYSTEM_CHECK_INTERVAL_SECONDS,
-        first=60,
-        name="system_checkout",
+        app.job_queue.run_once(scheduled_scan, when=10)
+        app.job_queue.run_repeating(
+            scheduled_system_checkout,
+            interval=SYSTEM_CHECK_INTERVAL_SECONDS,
+            first=60,
+            name="system_checkout",
+        )
+        app.job_queue.run_repeating(
+            scheduled_source_sync,
+            interval=SOURCE_SYNC_INTERVAL_SECONDS,
+            first=120,
+            name="source_sync",
+        )
+        app.job_queue.run_repeating(
+            scheduled_daily_simulation,
+            interval=DAILY_SIMULATION_CHECK_INTERVAL_SECONDS,
+            first=180,
+            name="daily_simulation",
+        )
+        logger.info("BetSignal Cloud iniciado em polling")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as exc:
+        logger.exception("Falha ao iniciar o bot Telegram. Entrando em modo passivo: %s", exc)
+        asyncio.run(_passive_service_loop(settings, f"falha no Telegram: {exc}"))
+
+
+async def _passive_service_loop(settings: Settings, reason: str) -> None:
+    logger.warning(
+        "BetSignal em modo passivo. Motivo: %s. Dashboard e servicos locais seguem ativos.",
+        reason,
     )
-    app.job_queue.run_repeating(
-        scheduled_source_sync,
-        interval=SOURCE_SYNC_INTERVAL_SECONDS,
-        first=120,
-        name="source_sync",
-    )
-    app.job_queue.run_repeating(
-        scheduled_daily_simulation,
-        interval=DAILY_SIMULATION_CHECK_INTERVAL_SECONDS,
-        first=180,
-        name="daily_simulation",
-    )
-    logger.info("BetSignal Cloud iniciado em polling")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        StateStore(settings.state_file).load()
+    except Exception as exc:
+        logger.warning("Modo passivo: nao consegui inicializar o StateStore: %s", exc)
+    try:
+        build_provider(settings)
+    except Exception as exc:
+        logger.warning("Modo passivo: provider inicializado com alerta: %s", exc)
+    try:
+        SupabaseSink.from_settings(settings)
+    except Exception as exc:
+        logger.warning("Modo passivo: Supabase indisponivel no bootstrap: %s", exc)
+
+    while True:
+        logger.info(
+            "Modo passivo ativo ha espera da configuracao do Telegram ou da correcao do token."
+        )
+        await asyncio.sleep(PASSIVE_SERVICE_HEARTBEAT_SECONDS)
 
 
 def _with_chat_memory(handler):
