@@ -4448,6 +4448,9 @@ def jogos_do_dia_page(request: Request) -> str:
     .pregame-card strong { font-size: 16px; line-height: 1.18; }
     .pregame-time { color: #d8e6f8; font-size: 13px; font-weight: 800; }
     .pregame-focus { color: #c9d6e6; font-size: 13px; }
+    .pregame-inline-preview {
+      display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); margin-top:14px;
+    }
     .preset-bar {
       display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px;
     }
@@ -5032,14 +5035,22 @@ def jogos_do_dia_page(request: Request) -> str:
     function renderMetrics(payload) {
       const metrics = payload.metrics || {};
       const scanner = payload.scanner || {};
+      const liveGames = Number(metrics.live_games || 0);
+      const candidateGames = Number(metrics.candidate_games || 0);
+      const pregameGames = Number(metrics.pregame_watchlist || 0);
       document.getElementById('metricLive').textContent = safeNum(metrics.live_games);
       document.getElementById('metricCandidateGames').textContent = safeNum(metrics.candidate_games);
       document.getElementById('metricEnter').textContent = safeNum(metrics.enter_count);
       document.getElementById('metricWatch').textContent = safeNum(metrics.watch_count);
       document.getElementById('heroLastScan').textContent = scanner.last_scan_brt || payload.generated_at_brt || scanner.last_scan || '-';
       document.getElementById('heroMode').textContent = scanner.mode || '-';
-      document.getElementById('heroStatus').textContent = scanner.status || '-';
-      document.getElementById('heroNote').textContent = `Horario Brasil · perfil ${scanner.scan_profile || '-'} · ${safeNum(scanner.candidates)} candidatos vivos`;
+      if (liveGames === 0 && candidateGames === 0 && pregameGames > 0) {
+        document.getElementById('heroStatus').textContent = 'watchlist pre-jogo ativa';
+        document.getElementById('heroNote').textContent = `Sem live aprovada agora. ${safeNum(pregameGames)} jogo(s) promissor(es) aguardando kickoff. Perfil ${scanner.scan_profile || '-'}.`;
+      } else {
+        document.getElementById('heroStatus').textContent = scanner.status || '-';
+        document.getElementById('heroNote').textContent = `Horario Brasil · perfil ${scanner.scan_profile || '-'} · ${safeNum(scanner.candidates)} candidatos vivos`;
+      }
       document.getElementById('heroPregame').textContent = safeNum(metrics.pregame_watchlist);
       document.getElementById('heroPregameNote').textContent = scanner.pregame_last_scan_brt
         ? `Agenda lida em ${scanner.pregame_last_scan_brt}`
@@ -5178,7 +5189,33 @@ def jogos_do_dia_page(request: Request) -> str:
       const mount = document.getElementById('gameList');
       const games = filteredGames();
       if (!games.length) {
-        mount.innerHTML = '<div class="empty">Nenhum jogo ao vivo real passou pelos filtros neste momento.</div>';
+        const payload = boardState.payload || {};
+        const pregameItems = Array.isArray(payload.pregame_watchlist) ? payload.pregame_watchlist : [];
+        if (pregameItems.length) {
+          const preview = pregameItems.slice(0, 3).map(item => `
+            <article class="pregame-card">
+              <div class="pregame-top">
+                <div>
+                  <div class="league">${escapeHtml(item.league || '-')}</div>
+                  <strong>${escapeHtml(item.home || '-')} x ${escapeHtml(item.away || '-')}</strong>
+                </div>
+                <span class="pill hold">${safeNum(item.promising_score)}/100</span>
+              </div>
+              <div class="pregame-time">${escapeHtml(item.kickoff_brt || '-')} · ${escapeHtml(item.starts_in_label || '-')}</div>
+              <div class="pregame-focus">Foco: ${escapeHtml(item.focus || 'mercados abrindo')}</div>
+              <div class="muted">${escapeHtml(item.note || 'Watchlist pronta para virar live.')}</div>
+            </article>
+          `).join('');
+          mount.innerHTML = `
+            <div class="empty">
+              <strong>Sem live aprovada agora.</strong><br>
+              A watchlist pre-jogo segue ativa e o scanner volta a acelerar assim que algum jogo entrar ao vivo com leitura util.
+            </div>
+            <div class="pregame-inline-preview">${preview}</div>
+          `;
+        } else {
+          mount.innerHTML = '<div class="empty">Nenhum jogo ao vivo real passou pelos filtros neste momento.</div>';
+        }
         renderDetail(null);
         return;
       }
