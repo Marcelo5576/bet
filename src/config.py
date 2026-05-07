@@ -121,7 +121,7 @@ def load_settings() -> Settings:
         product_name=os.getenv("PRODUCT_NAME", "ApexGol AI").strip() or "ApexGol AI",
         product_tagline=os.getenv(
             "PRODUCT_TAGLINE",
-            "Inteligência de operação ao vivo para futebol, odds e gestão de risco.",
+            "Central Quantitativa de Inteligência Esportiva.",
         ).strip(),
         website_url=os.getenv("WEBSITE_URL", "https://novo.tickpost.com.br").strip(),
         sales_whatsapp=os.getenv("SALES_WHATSAPP", "").strip(),
@@ -155,9 +155,9 @@ def load_settings() -> Settings:
         ),
         gemini_max_rpm=max(1, int(os.getenv("GEMINI_MAX_RPM", "10"))),
         odds_max_rpm=max(1, int(os.getenv("ODDS_MAX_RPM", "20"))),
-        events_live_ttl=max(5, int(os.getenv("EVENTS_LIVE_TTL", "20"))),
-        odds_event_ttl=max(10, int(os.getenv("ODDS_EVENT_TTL", "30"))),
-        refine_signal_ttl=max(30, int(os.getenv("REFINE_SIGNAL_TTL", "90"))),
+        events_live_ttl=max(30, int(os.getenv("EVENTS_LIVE_TTL", "30"))),
+        odds_event_ttl=max(30, int(os.getenv("ODDS_EVENT_TTL", "45"))),
+        refine_signal_ttl=max(900, int(os.getenv("REFINE_SIGNAL_TTL", "900"))),
         provider_cooldown_429=max(15, int(os.getenv("PROVIDER_COOLDOWN_429", "60"))),
         min_score_to_refine=max(0, min(100, int(os.getenv("MIN_SCORE_TO_REFINE", "60")))),
         min_confidence_to_refine=max(

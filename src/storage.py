@@ -25,6 +25,7 @@ class BotState:
     risk_profile: str = "moderado"
     scan_requested_at: str | None = None
     pregame_last_scan_at: str | None = None
+    approved_signal_alerts: dict[str, str] | None = None
 
 
 class StateStore:
@@ -75,6 +76,15 @@ class StateStore:
             raw["last_auto_simulation_at"] = str(raw.get("last_auto_simulation_at"))
         if raw.get("pregame_last_scan_at") is not None:
             raw["pregame_last_scan_at"] = str(raw.get("pregame_last_scan_at"))
+        alerts = raw.get("approved_signal_alerts")
+        if not isinstance(alerts, dict):
+            raw["approved_signal_alerts"] = {}
+        else:
+            raw["approved_signal_alerts"] = {
+                str(key): str(value)
+                for key, value in alerts.items()
+                if str(key).strip() and str(value).strip()
+            }
 
         active_signal = raw.get("active_signal")
         if isinstance(active_signal, dict):

@@ -44,8 +44,11 @@ class FootballStatsService:
             home_away_bias=round(self._home_away_bias(last10, team_name), 2),
         )
 
-    def league_baseline(self, league: str, season: int | None = None) -> dict[str, float]:
+    def league_baseline(self, league: str, season: int | None = None, before_date: str | datetime | None = None) -> dict[str, float]:
         matches = self.repository.list_historical_matches(league=league, season=season, limit=500)
+        if before_date:
+            cutoff = before_date.isoformat() if isinstance(before_date, datetime) else str(before_date)
+            matches = [row for row in matches if str(row.get("match_date") or "") < cutoff]
         if not matches:
             return {"home_goals_avg": 1.35, "away_goals_avg": 1.05, "total_goals_avg": 2.4}
         home_goals = [float(item.get("home_goals") or 0) for item in matches]
@@ -121,4 +124,3 @@ def _rate(rows: list[dict[str, Any]], predicate) -> float:
     if not rows:
         return 0.0
     return round((sum(1 for row in rows if predicate(row)) / len(rows)) * 100, 2)
-

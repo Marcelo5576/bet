@@ -7,6 +7,8 @@ import sqlite3
 import threading
 from typing import Any
 
+from services.markets import build_market_intelligence
+
 
 _BRAIN_CACHE: dict[str, "FootballBrain"] = {}
 _BRAIN_LOCK = threading.Lock()
@@ -82,11 +84,13 @@ class FootballBrain:
         captured_at = datetime.now(timezone.utc).isoformat()
         with self._write_lock:
             with self._connect() as conn:
+                touched_match_ids: set[str] = set()
                 for raw_game in games:
                     game = _to_dict(raw_game)
                     match_id = str(game.get("game_id") or "").strip()
                     if not match_id:
                         continue
+                    touched_match_ids.add(match_id)
                     facts = _extract_live_facts(game)
                     conn.execute(
                         """
@@ -186,6 +190,8 @@ class FootballBrain:
                             _safe_float(goal_market.get("under_odd"), None),
                         ),
                     )
+                for match_id in touched_match_ids:
+                    self._harvest_learning_events(conn, match_id)
                 conn.commit()
 
     def enrich_signal(self, signal: dict[str, Any]) -> dict[str, Any]:
@@ -220,6 +226,11 @@ class FootballBrain:
         facts = _extract_live_facts(game)
         features = _build_live_features(game, facts, snapshots)
         skills = _evaluate_skills(signal, game, facts, features, pregame)
+        market_intelligence = build_market_intelligence(game)
+        market_skills = _market_intelligence_skills(market_intelligence)
+        if market_skills:
+            skills.extend(market_skills)
+        _merge_market_recommendations(signal, market_intelligence.get("recommendations") or [])
         best_skill = _best_skill(skills)
         live_sample = len(snapshots)
         if skills:
@@ -257,6 +268,7 @@ class FootballBrain:
             "facts": facts,
             "best_skill": best_skill,
             "skills": skills,
+            "market_intelligence": market_intelligence,
             "pregame_context": _pregame_summary(pregame),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -322,9 +334,25 @@ class FootballBrain:
                     (SELECT COUNT(*) FROM brain_live_snapshots) AS snapshots_count,
                     (SELECT COUNT(*) FROM brain_pregame_watchlist) AS pregame_rows,
                     (SELECT COUNT(*) FROM brain_skill_results) AS skill_rows,
+                    (SELECT COUNT(*) FROM brain_learning_events) AS learning_events,
                     (SELECT MAX(captured_at) FROM brain_live_snapshots) AS last_snapshot_at
                 """
             ).fetchone()
+            learning_summary = conn.execute(
+                """
+                SELECT
+                    market,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN label = 'green' THEN 1 ELSE 0 END) AS greens,
+                    SUM(CASE WHEN label = 'red' THEN 1 ELSE 0 END) AS reds,
+                    ROUND(AVG(confidence_before), 1) AS avg_confidence,
+                    ROUND(AVG(score_before), 1) AS avg_score
+                FROM brain_learning_events
+                GROUP BY market
+                ORDER BY total DESC
+                LIMIT 6
+                """
+            ).fetchall()
         return {
             "enabled": True,
             "db_file": self.db_file,
@@ -332,6 +360,19 @@ class FootballBrain:
             "live_snapshots": _safe_int(counts["snapshots_count"]),
             "pregame_rows": _safe_int(counts["pregame_rows"]),
             "skill_rows": _safe_int(counts["skill_rows"]),
+            "learning_events": _safe_int(counts["learning_events"]),
+            "learning_summary": [
+                {
+                    "market": row["market"],
+                    "total": _safe_int(row["total"]),
+                    "greens": _safe_int(row["greens"]),
+                    "reds": _safe_int(row["reds"]),
+                    "green_rate": round((_safe_int(row["greens"]) / max(1, _safe_int(row["total"]))) * 100, 1),
+                    "avg_confidence": _safe_float(row["avg_confidence"], 0.0),
+                    "avg_score": _safe_float(row["avg_score"], 0.0),
+                }
+                for row in learning_summary
+            ],
             "last_snapshot_at": counts["last_snapshot_at"],
         }
 
@@ -427,9 +468,183 @@ class FootballBrain:
                 );
                 CREATE INDEX IF NOT EXISTS idx_brain_skill_results_match
                 ON brain_skill_results(match_id, captured_at DESC);
+
+                CREATE TABLE IF NOT EXISTS brain_learning_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    source_snapshot_id INTEGER NOT NULL,
+                    resolved_snapshot_id INTEGER NOT NULL,
+                    horizon_minutes INTEGER NOT NULL,
+                    market TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    confidence_before REAL,
+                    score_before REAL,
+                    odd_before REAL,
+                    minute_before INTEGER,
+                    minute_after INTEGER,
+                    scoreline_before TEXT,
+                    scoreline_after TEXT,
+                    reason TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_brain_learning_unique
+                ON brain_learning_events(source_snapshot_id, horizon_minutes, market);
+                CREATE INDEX IF NOT EXISTS idx_brain_learning_match
+                ON brain_learning_events(match_id, created_at DESC);
                 """
             )
             conn.commit()
+
+    def _harvest_learning_events(self, conn: sqlite3.Connection, match_id: str) -> None:
+        sources = conn.execute(
+            """
+            SELECT s.*
+            FROM brain_live_snapshots s
+            WHERE s.match_id = ?
+              AND COALESCE(s.minute, 0) BETWEEN 5 AND 84
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM brain_learning_events e
+                  WHERE e.source_snapshot_id = s.id
+                    AND e.horizon_minutes = 10
+                    AND e.market = 'GOAL_NEXT_10'
+              )
+            ORDER BY s.id DESC
+            LIMIT 80
+            """,
+            (match_id,),
+        ).fetchall()
+        for source in sources:
+            event = _resolve_goal_next_10_event(conn, source)
+            if not event:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO brain_learning_events (
+                    match_id, created_at, source_snapshot_id, resolved_snapshot_id,
+                    horizon_minutes, market, label, confidence_before, score_before,
+                    odd_before, minute_before, minute_after, scoreline_before,
+                    scoreline_after, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    match_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    int(source["id"]),
+                    int(event["resolved_snapshot_id"]),
+                    10,
+                    "GOAL_NEXT_10",
+                    event["label"],
+                    event["confidence_before"],
+                    event["score_before"],
+                    event["odd_before"],
+                    _safe_int(source["minute"]),
+                    event["minute_after"],
+                    event["scoreline_before"],
+                    event["scoreline_after"],
+                    event["reason"],
+                ),
+            )
+
+
+def _resolve_goal_next_10_event(conn: sqlite3.Connection, source: sqlite3.Row) -> dict[str, Any] | None:
+    source_minute = _safe_int(source["minute"])
+    if source_minute <= 0 or source_minute >= 85:
+        return None
+    source_total_goals = _safe_int(source["home_goals"]) + _safe_int(source["away_goals"])
+    future_rows = conn.execute(
+        """
+        SELECT *
+        FROM brain_live_snapshots
+        WHERE match_id = ?
+          AND id > ?
+          AND COALESCE(minute, 0) >= ?
+        ORDER BY minute ASC, id ASC
+        LIMIT 80
+        """,
+        (source["match_id"], int(source["id"]), source_minute),
+    ).fetchall()
+    if not future_rows:
+        return None
+
+    first_goal_row = None
+    latest_row = future_rows[-1]
+    for row in future_rows:
+        row_total_goals = _safe_int(row["home_goals"]) + _safe_int(row["away_goals"])
+        if row_total_goals > source_total_goals:
+            first_goal_row = row
+            break
+
+    if first_goal_row is not None:
+        minute_after = _safe_int(first_goal_row["minute"])
+        if minute_after - source_minute <= 12:
+            return _learning_event_payload(
+                source,
+                first_goal_row,
+                label="green",
+                reason="Gol real apareceu dentro da janela de 10 minutos com tolerancia operacional.",
+            )
+
+    latest_minute = _safe_int(latest_row["minute"])
+    if latest_minute - source_minute >= 10:
+        return _learning_event_payload(
+            source,
+            latest_row,
+            label="red",
+            reason="Janela de 10 minutos fechou sem novo gol real.",
+        )
+    return None
+
+
+def _learning_event_payload(
+    source: sqlite3.Row,
+    resolved: sqlite3.Row,
+    *,
+    label: str,
+    reason: str,
+) -> dict[str, Any]:
+    confidence = _snapshot_goal_pressure_confidence(source)
+    score = _snapshot_goal_pressure_score(source)
+    return {
+        "resolved_snapshot_id": int(resolved["id"]),
+        "label": label,
+        "confidence_before": confidence,
+        "score_before": score,
+        "odd_before": _safe_float(source["over_odd"], None),
+        "minute_after": _safe_int(resolved["minute"]),
+        "scoreline_before": _snapshot_scoreline(source),
+        "scoreline_after": _snapshot_scoreline(resolved),
+        "reason": reason,
+    }
+
+
+def _snapshot_goal_pressure_confidence(row: sqlite3.Row) -> float:
+    shots_on_total = _safe_float(row["home_shots_on"]) + _safe_float(row["away_shots_on"])
+    pressure_total = _safe_float(row["home_pressure"]) + _safe_float(row["away_pressure"])
+    dangerous_total = _safe_float(row["dangerous_attacks_home"]) + _safe_float(row["dangerous_attacks_away"])
+    corners_total = _safe_float(row["corners_home"]) + _safe_float(row["corners_away"])
+    red_total = _safe_float(row["red_home"]) + _safe_float(row["red_away"])
+    minute = _safe_int(row["minute"])
+    late_penalty = 8 if minute >= 78 else 0
+    confidence = 32 + shots_on_total * 7 + pressure_total * 0.16 + dangerous_total * 0.22 + corners_total * 2.2
+    confidence -= red_total * 8 + late_penalty
+    return round(max(5.0, min(95.0, confidence)), 2)
+
+
+def _snapshot_goal_pressure_score(row: sqlite3.Row) -> float:
+    home_pressure = _safe_float(row["home_pressure"])
+    away_pressure = _safe_float(row["away_pressure"])
+    shots_on_total = _safe_float(row["home_shots_on"]) + _safe_float(row["away_shots_on"])
+    shots_total = _safe_float(row["shots_home"]) + _safe_float(row["shots_away"])
+    corners_total = _safe_float(row["corners_home"]) + _safe_float(row["corners_away"])
+    dangerous_total = _safe_float(row["dangerous_attacks_home"]) + _safe_float(row["dangerous_attacks_away"])
+    score = 25 + max(home_pressure, away_pressure) * 0.28 + shots_on_total * 7 + shots_total * 1.5
+    score += corners_total * 2.0 + dangerous_total * 0.18
+    return round(max(1.0, min(100.0, score)), 2)
+
+
+def _snapshot_scoreline(row: sqlite3.Row) -> str:
+    return f"{_safe_int(row['home_goals'])}x{_safe_int(row['away_goals'])}"
 
 
 def _build_live_features(game: dict[str, Any], facts: dict[str, Any], snapshots: list[sqlite3.Row]) -> dict[str, float]:
@@ -629,20 +844,28 @@ def _skill_corners_live(game: dict[str, Any], facts: dict[str, Any], features: d
     dangerous_total = _safe_int(facts.get("dangerous_attacks_home")) + _safe_int(facts.get("dangerous_attacks_away"))
     market = _market_totals(game, "corners")
     over_odd = _safe_float(market.get("over_odd"), None)
+    has_confirmed_odd = bool(over_odd and over_odd > 1)
     line = _as_text(market.get("line")) or "linha aberta"
     probability = 0.32 + min(0.28, corners_total * 0.035 + dangerous_total * 0.004)
     probability += min(0.08, pressure_total * 0.0012)
     confidence = max(40, min(92, int(round(probability * 100))))
     active = (corners_total >= 4 and minute >= 20) or (dangerous_total >= 16 and pressure_total >= 105)
+    decision = "ENTRA" if has_confirmed_odd and active and confidence >= 70 and features["risk_score"] <= 66 else "MONITORAR"
+    if not has_confirmed_odd:
+        reason = "Mercado de escanteios em leitura, mas sem odd real confirmada para liberar entrada."
+    elif active:
+        reason = "Escanteios e pressão lateral sustentam leitura de corners."
+    else:
+        reason = "Mercado de corners vivo, mas ainda sem aceleração suficiente."
     return {
         "name": "SKILL_CORNERS_LIVE",
         "market": "Escanteios",
         "selection": f"Over {line}",
-        "decision": "ENTRA" if active and confidence >= 70 and features["risk_score"] <= 66 else "MONITORAR",
+        "decision": decision,
         "confidence": confidence,
         "odd": over_odd,
         "edge": _edge_from_probability(probability, over_odd),
-        "reason": "Escanteios e pressão lateral sustentam leitura de corners." if active else "Mercado de corners vivo, mas ainda sem aceleração suficiente.",
+        "reason": reason,
     }
 
 
@@ -714,6 +937,74 @@ def _skill_ev_value(skills: list[dict[str, Any]]) -> dict[str, Any]:
             else "Sem edge positivo. Melhor evitar entrada agora."
         ),
     }
+
+
+def _market_intelligence_skills(market_intelligence: dict[str, Any]) -> list[dict[str, Any]]:
+    skills: list[dict[str, Any]] = []
+    for rec in market_intelligence.get("recommendations") or []:
+        if not isinstance(rec, dict):
+            continue
+        confirmed = bool(rec.get("confirmed"))
+        odd = _safe_float(rec.get("odds"), None)
+        confidence = _safe_int(rec.get("confidence"))
+        edge = _edge_from_probability(confidence / 100, odd) if odd and odd > 1 else None
+        action = str(rec.get("action") or "MONITORAR").upper()
+        decision = "MONITORAR"
+        reason = str(rec.get("reason") or "").strip()
+        blocking = rec.get("blocking_reasons") or []
+        if action == "ENTRAR" and confirmed and odd and odd > 1 and edge is not None and edge > 0:
+            decision = "ENTRA"
+        elif not confirmed:
+            reason = "Sem odd real confirmada. Entrada bloqueada para este mercado."
+        elif edge is not None and edge <= 0:
+            reason = f"Odd confirmada, mas sem valor esperado positivo ({round(edge * 100, 2)}pp)."
+        elif blocking:
+            reason = "; ".join(str(item) for item in blocking if item)[:280] or reason
+        skills.append(
+            {
+                "name": f"MARKET_INTELLIGENCE_{str(rec.get('market') or 'mercado').upper()}",
+                "market": str(rec.get("market") or "Mercado quantitativo"),
+                "selection": str(rec.get("selection") or rec.get("entry") or "-"),
+                "decision": decision,
+                "confidence": confidence,
+                "odd": odd,
+                "edge": edge,
+                "reason": reason or "Mercado quantitativo em monitoramento com filtros de odd real.",
+            }
+        )
+    return skills
+
+
+def _merge_market_recommendations(signal: dict[str, Any], recommendations: list[dict[str, Any]]) -> None:
+    if not recommendations:
+        return
+    existing = signal.get("market_recommendations")
+    merged = list(existing) if isinstance(existing, list) else []
+    seen = {
+        (
+            str(item.get("market") or "").lower(),
+            str(item.get("selection") or "").lower(),
+            str(item.get("line") or "").lower(),
+        )
+        for item in merged
+        if isinstance(item, dict)
+    }
+    for rec in recommendations:
+        if not isinstance(rec, dict):
+            continue
+        key = (
+            str(rec.get("market") or "").lower(),
+            str(rec.get("selection") or "").lower(),
+            str(rec.get("line") or "").lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(rec)
+        if not row.get("confirmed") and str(row.get("action") or "").upper() == "ENTRAR":
+            row["action"] = "MONITORAR"
+        merged.append(row)
+    signal["market_recommendations"] = merged[:12]
 
 
 def _best_skill(skills: list[dict[str, Any]]) -> dict[str, Any] | None:

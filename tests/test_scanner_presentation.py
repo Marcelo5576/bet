@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from src.intelligence.scanner_presentation import build_decision_view_model
 
@@ -94,6 +95,72 @@ class ScannerPresentationTests(unittest.TestCase):
         self.assertIn("❌ Confiança baixa", checklist)
         self.assertIn("❌ Score baixo", checklist)
         self.assertIn("Não entrar", decision["main_reason"])
+
+    def test_legacy_enter_action_cannot_override_failed_criteria(self):
+        decision = build_decision_view_model(
+            _base_signal(
+                action="ENTRAR",
+                confidence=52,
+                confidence_score=0.52,
+                final_score=45,
+                entry_score=45,
+                entry_allowed=True,
+            )
+        )
+        self.assertEqual(decision["decision_status"], "DO_NOT_ENTER")
+        self.assertNotEqual(decision["action_label"], "ENTRAR AGORA")
+
+    def test_negative_historical_1x2_home_roi_blocks_enter_now(self):
+        with patch(
+            "src.intelligence.scanner_presentation._market_learning_guard",
+            return_value={
+                "active": True,
+                "market": "match_winner_home",
+                "label": "1X2 casa",
+                "entries": 16,
+                "roi_on_staked": -50.29,
+                "reason": "1X2 casa rebaixado: odds historicas reais mostram ROI paper -50.3% em 16 entradas.",
+            },
+        ):
+            decision = build_decision_view_model(
+                _base_signal(
+                    market="Resultado Final",
+                    selection="Time A",
+                    entry_allowed=True,
+                    confidence=82,
+                    confidence_score=0.82,
+                    entry_score=78,
+                    final_score=78,
+                    expected_value=0.11,
+                    target_odds=1.91,
+                    entry_odds=1.91,
+                )
+            )
+        self.assertEqual(decision["decision_status"], "DO_NOT_ENTER")
+        self.assertFalse(decision["entry_allowed"])
+        self.assertIn("1X2 casa rebaixado", decision["main_reason"])
+        self.assertIn("❌ Histórico 1X2 ruim", [item["text"] for item in decision["checklist"]])
+
+    def test_returns_full_decision_view_model_shape(self):
+        decision = build_decision_view_model(_base_signal())
+        for key in (
+            "decision_status",
+            "decision_label",
+            "decision_emoji",
+            "decision_color",
+            "action_label",
+            "main_reason",
+            "risk_level",
+            "risk_color",
+            "confidence_label",
+            "score_label",
+            "ev_label",
+            "checklist",
+            "blocking_reasons",
+            "positive_reasons",
+            "card_priority",
+        ):
+            self.assertIn(key, decision)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import sqlite3
+import time
 from typing import Any
+import unicodedata
 
 
 PROFILE_RULES: dict[str, dict[str, float]] = {
@@ -34,6 +40,10 @@ DEFAULT_PROFILE = "moderado"
 MONITOR_CONFIDENCE_MIN = 0.55
 MONITOR_SCORE_MIN = 55
 MONITOR_EV_MIN = 0.03
+MARKET_GUARD_TTL_SECONDS = 300
+MARKET_GUARD_MIN_ENTRIES = 10
+MARKET_GUARD_MAX_ROI = -10.0
+_MARKET_GUARD_CACHE: tuple[float, dict[str, dict[str, Any]]] | None = None
 
 
 def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +70,7 @@ def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]
     confidence_pct = round(confidence_ratio * 100.0, 1)
     score_value = _resolve_score(signal)
     recommendation = str(signal.get("recommendation") or "").strip()
+    selection = str(signal.get("entry_selection") or signal.get("selection") or "").strip()
     raw_action = str(signal.get("action") or "").strip().upper()
     risk_level = str(signal.get("risk_level") or _fallback_risk(score_value, confidence_pct)).strip() or "Médio"
     data_quality = _safe_int(signal.get("data_quality"))
@@ -104,6 +115,8 @@ def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]
     ev_near = ev is not None and MONITOR_EV_MIN <= ev < profile["min_ev"]
     risk_high = _is_high_risk(risk_level)
     contradictory_signal = raw_action in {"SEGURAR", "SAIR"} or "contradit" in ai_explanation.lower()
+    market_guard = _market_learning_guard(signal, market=market, selection=selection, home=home)
+    market_blocked = bool(market_guard)
     incomplete_data = (
         not fixture_present
         or market == "-"
@@ -147,6 +160,19 @@ def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]
         minute_danger=minute_danger,
         profile=profile,
     )
+    if market_guard:
+        guard_reason = str(market_guard.get("reason") or "Mercado rebaixado por aprendizado histórico.").strip()
+        blocking_reasons.insert(0, guard_reason)
+        checklist.append(
+            {
+                "state": "negative",
+                "passed": False,
+                "text": "❌ Histórico 1X2 ruim",
+            }
+        )
+        entry_allowed = False
+        risk_level = "Alto"
+        historical_performance_score = 0.0
 
     if missing_essentials:
         decision_status = "NO_DATA"
@@ -158,6 +184,7 @@ def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]
         and ev_ok
         and not risk_high
         and not contradictory_signal
+        and not market_blocked
         and not minute_danger
         and stats_present
     ):
@@ -169,6 +196,7 @@ def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]
         or score_value < MONITOR_SCORE_MIN
         or risk_high
         or contradictory_signal
+        or market_blocked
     ):
         decision_status = "DO_NOT_ENTER"
     elif (
@@ -287,6 +315,7 @@ def build_decision_view_model(match_or_signal: dict[str, Any]) -> dict[str, Any]
         "has_fixture": fixture_present,
         "data_quality": data_quality,
         "market_quality_score": market_quality_score,
+        "market_learning_guard": market_guard,
     }
     return model
 
@@ -348,6 +377,160 @@ def _resolve_market_quality_score(signal: dict[str, Any], odd: float | None, dat
     midpoint = 2.20
     odd_factor = max(0.35, 1.0 - (abs(odd - midpoint) / max(0.1, midpoint)))
     return round(max(0.0, min(1.0, (quality * 0.65) + (odd_factor * 0.35))), 4)
+
+
+def _market_learning_guard(
+    signal: dict[str, Any],
+    *,
+    market: str,
+    selection: str,
+    home: str,
+) -> dict[str, Any] | None:
+    market_key = _normalize_learning_market(signal, market=market, selection=selection, home=home)
+    if not market_key:
+        return None
+    summary = _historical_market_guard_summary().get(market_key)
+    if not summary:
+        return None
+    entries = int(summary.get("entries") or 0)
+    roi = float(summary.get("roi_on_staked") or 0.0)
+    if entries < MARKET_GUARD_MIN_ENTRIES or roi > MARKET_GUARD_MAX_ROI:
+        return None
+    label = str(summary.get("label") or market_key)
+    return {
+        "active": True,
+        "market": market_key,
+        "label": label,
+        "entries": entries,
+        "roi_on_staked": roi,
+        "profit_paper": float(summary.get("profit_paper") or 0.0),
+        "reason": (
+            f"{label} rebaixado: odds historicas reais mostram ROI paper "
+            f"{roi:+.1f}% em {entries} entradas."
+        ),
+    }
+
+
+def _normalize_learning_market(
+    signal: dict[str, Any],
+    *,
+    market: str,
+    selection: str,
+    home: str,
+) -> str | None:
+    explicit = _clean_token(
+        signal.get("learning_market")
+        or signal.get("market_key")
+        or signal.get("market_code")
+        or signal.get("entry_market_key")
+    )
+    if explicit in {"match_winner_home", "home_win", "1x2_home"}:
+        return "match_winner_home"
+    market_text = _clean_token(
+        " ".join(
+            str(value or "")
+            for value in (
+                market,
+                signal.get("entry_market"),
+                signal.get("market_category"),
+                signal.get("market_group"),
+            )
+        )
+    )
+    selection_text = _clean_token(selection or signal.get("selection") or signal.get("entry_selection"))
+    home_text = _clean_token(home)
+    is_1x2 = any(
+        token in market_text
+        for token in (
+            "1x2",
+            "resultado final",
+            "match winner",
+            "vencedor",
+            "moneyline",
+        )
+    )
+    is_home_selection = selection_text in {"home", "casa", "mandante", "time casa"} or (
+        bool(selection_text and home_text) and selection_text == home_text
+    )
+    if is_1x2 and is_home_selection:
+        return "match_winner_home"
+    return None
+
+
+def _historical_market_guard_summary() -> dict[str, dict[str, Any]]:
+    global _MARKET_GUARD_CACHE
+    now = time.time()
+    if _MARKET_GUARD_CACHE and now - _MARKET_GUARD_CACHE[0] < MARKET_GUARD_TTL_SECONDS:
+        return _MARKET_GUARD_CACHE[1]
+    summary = _load_historical_market_guard_summary()
+    _MARKET_GUARD_CACHE = (now, summary)
+    return summary
+
+
+def _load_historical_market_guard_summary() -> dict[str, dict[str, Any]]:
+    db_file = Path(os.getenv("FOOTBALL_RESEARCH_DB_FILE", "data/football_quant_research.db"))
+    if not db_file.exists():
+        return {}
+    grouped: dict[str, dict[str, Any]] = {}
+    try:
+        with sqlite3.connect(str(db_file)) as con:
+            rows = con.execute(
+                "SELECT payload_json FROM learning_events WHERE event_type = ?",
+                ("historical_odds_ev",),
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    for (payload_json,) in rows:
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, ValueError):
+            continue
+        market_key = str(payload.get("market") or "").strip()
+        if not market_key:
+            continue
+        item = grouped.setdefault(
+            market_key,
+            {
+                "label": _market_label(market_key),
+                "analyzed": 0,
+                "entries": 0,
+                "wins": 0,
+                "losses": 0,
+                "profit_paper": 0.0,
+                "stake_paper": 0.0,
+            },
+        )
+        item["analyzed"] += 1
+        stake = _safe_float(payload.get("stake_paper"), 0.0) or 0.0
+        profit = _safe_float(payload.get("profit_paper"), 0.0) or 0.0
+        result = str(payload.get("result") or "").upper()
+        if stake > 0 or bool(payload.get("entry_allowed")):
+            item["entries"] += 1
+            item["stake_paper"] += stake
+            item["profit_paper"] += profit
+            if result == "WIN":
+                item["wins"] += 1
+            elif result == "LOSS":
+                item["losses"] += 1
+    for item in grouped.values():
+        stake = float(item.get("stake_paper") or 0.0)
+        item["roi_on_staked"] = (float(item.get("profit_paper") or 0.0) / stake * 100.0) if stake > 0 else 0.0
+    return grouped
+
+
+def _market_label(market_key: str) -> str:
+    return {
+        "match_winner_home": "1X2 casa",
+        "over_2_5": "Over 2.5",
+        "btts_yes": "BTTS sim",
+    }.get(market_key, market_key)
+
+
+def _clean_token(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return " ".join(text.split())
 
 
 def _collect_positive_reasons(
@@ -434,7 +617,7 @@ def _main_reason(
     primary_block = blocking_reasons[0] if blocking_reasons else ""
     if decision_status == "ENTER_NOW":
         return (
-            "Entrada liberada porque odd, confiança, score e EV passaram nos critérios."
+            "Entrada aprovada porque odd, confiança, score e EV passaram nos critérios."
             if not ai_explanation
             else ai_explanation
         )
@@ -500,7 +683,7 @@ def _card_priority(
 def _decision_meta(status: str) -> dict[str, str]:
     mapping = {
         "ENTER_NOW": {
-            "label": "ENTRAR AGORA",
+            "label": "ENTRADA APROVADA",
             "emoji": "🟢",
             "color": "#10b981",
             "action_label": "ENTRAR AGORA",

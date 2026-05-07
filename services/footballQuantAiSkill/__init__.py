@@ -19,6 +19,7 @@ class FootballQuantAiSkill:
         from .continuous_learning.strategy_rule_service import StrategyRuleService
         from .data_source_service import DataSourceService
         from .evaluation.database_discovery_service import DatabaseDiscoveryService
+        from .feature_engineering.historical_feature_store import HistoricalFeatureStore
         from .historical_data_service import HistoricalDataService
         from .models.hybrid_prediction_service import HybridPredictionService
         from .models.poisson_model_service import PoissonModelService
@@ -48,6 +49,7 @@ class FootballQuantAiSkill:
             min_confidence_to_recommend=self.settings.min_confidence_to_recommend,
         )
         self.historical = HistoricalDataService(self.repository, self.data_sources)
+        self.feature_store = HistoricalFeatureStore(self.repository)
         self.backtesting = BacktestingService(self.repository, self.prediction)
         self.learning_memory = LearningMemoryService(self.repository)
         self.strategy_rules = StrategyRuleService(self.repository)

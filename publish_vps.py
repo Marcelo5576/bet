@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 import posixpath
 import socket
 import sys
@@ -32,7 +33,9 @@ SYNC_ITEMS = [
     "TELEGRAM_CONNECT_GUIDE_BR.md",
     "supabase_schema.sql",
     "assets",
+    "migrations",
     "scripts",
+    "services",
     "src",
 ]
 
@@ -112,7 +115,7 @@ def main() -> int:
     host = DEFAULT_HOST
     user = DEFAULT_USER
     port = DEFAULT_PORT
-    password = getpass.getpass(f"Senha SSH para {user}@{host}: ")
+    password = os.getenv("VPS_SSH_PASSWORD") or getpass.getpass(f"Senha SSH para {user}@{host}: ")
 
     _check_port(host, port)
 
@@ -139,7 +142,10 @@ def main() -> int:
                 [
                     f"mkdir -p {backup_dir}",
                     f"cp -a {REMOTE_ROOT}/src {backup_dir}/src",
+                    f"cp -a {REMOTE_ROOT}/services {backup_dir}/services 2>/dev/null || true",
                     f"cp -a {REMOTE_ROOT}/assets {backup_dir}/assets",
+                    f"cp -a {REMOTE_ROOT}/scripts {backup_dir}/scripts 2>/dev/null || true",
+                    f"cp -a {REMOTE_ROOT}/migrations {backup_dir}/migrations 2>/dev/null || true",
                     f"cp -a {REMOTE_ROOT}/requirements.txt {backup_dir}/requirements.txt",
                     f"cp -a {REMOTE_ROOT}/docker-compose.yml {backup_dir}/docker-compose.yml",
                     f"cp -a {REMOTE_ROOT}/Caddyfile {backup_dir}/Caddyfile",

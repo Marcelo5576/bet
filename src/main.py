@@ -61,6 +61,7 @@ TELEGRAM_TEXT_LIMIT = 3900
 SYSTEM_CHECK_INTERVAL_SECONDS = 30 * 60
 SOURCE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 DAILY_SIMULATION_CHECK_INTERVAL_SECONDS = 15 * 60
+APPROVED_SIGNAL_ALERT_TTL_SECONDS = 20 * 60
 TELEGRAM_DICE = {
     "scan": "⚽",
     "signal": "🎯",
@@ -2003,6 +2004,84 @@ def _notification_chat_ids(settings: Settings | None, state) -> set[int]:
     return chats
 
 
+def _approved_signal_chat_ids(settings: Settings | None) -> set[int]:
+    if not settings:
+        return set()
+    try:
+        portal = PortalStore(settings.portal_db_file)
+        return set(portal.approved_signal_telegram_chat_ids())
+    except Exception as exc:
+        logger.info("Nao consegui carregar Telegram de entradas aprovadas: %s", exc)
+        return set()
+
+
+def _approved_signal_alert_key(signal: dict) -> str:
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    parts = [
+        str(game.get("game_id") or signal.get("game_id") or ""),
+        str(signal.get("entry_market") or signal.get("market") or ""),
+        str(signal.get("entry_selection") or signal.get("selection") or ""),
+        str(signal.get("entry_line") or signal.get("line") or ""),
+    ]
+    raw = "|".join(part.strip().lower() for part in parts if part is not None)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_approved_signal_for_telegram(signal: dict) -> bool:
+    try:
+        decision = build_scanner_decision(signal)
+    except Exception as exc:
+        logger.info("Nao consegui validar decisao para Telegram aprovado: %s", exc)
+        return False
+    if decision.get("decision_status") != "ENTER_NOW":
+        return False
+    return bool(decision.get("entry_allowed"))
+
+
+def _approved_signals_to_alert(store: StateStore, state) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    sent = dict(state.approved_signal_alerts or {})
+    pruned: dict[str, str] = {}
+    for key, value in sent.items():
+        parsed = _parse_utc(value)
+        if parsed and (now - parsed).total_seconds() < APPROVED_SIGNAL_ALERT_TTL_SECONDS:
+            pruned[str(key)] = str(value)
+    approved: list[dict] = []
+    for signal in _checkout_signals(state):
+        if not _is_approved_signal_for_telegram(signal):
+            continue
+        key = _approved_signal_alert_key(signal)
+        if not key or key in pruned:
+            continue
+        approved.append(signal)
+        pruned[key] = now.isoformat()
+    if pruned != sent:
+        state.approved_signal_alerts = pruned
+        store.save(state)
+    return approved
+
+
+def _approved_signal_text(signal: dict) -> str:
+    return _shorten(
+        "✅ APEXGOL AI · ENTRADA APROVADA\n"
+        "Este envio passou pelos filtros de odd, confiança, score, EV e risco.\n\n"
+        + signal_text(signal),
+        TELEGRAM_TEXT_LIMIT,
+    )
+
+
 def _simulation_learning_summary(sessions: list[dict]) -> dict:
     recent = [
         item
@@ -2460,6 +2539,7 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
     store: StateStore = context.application.bot_data["store"]
     state, scan_requested = store.consume_scan_request()
     chat_ids = _notification_chat_ids(settings, state)
+    approved_chat_ids = _approved_signal_chat_ids(settings)
     idle_interval = settings.idle_scan_interval_seconds
     active_interval = settings.active_scan_interval_seconds
     try:
@@ -2476,7 +2556,7 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         active_interval=active_interval,
     )
     context.job_queue.run_once(scheduled_scan, when=interval)
-    if not chat_ids and not scan_requested:
+    if not chat_ids and not approved_chat_ids and not scan_requested:
         return
 
     stop = red_stop_status(state.history or [], settings.daily_red_limit)
@@ -2491,6 +2571,25 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         text = await refresh_active_signal(context, state)
     else:
         text = await run_scan(context, auto_pick=False)
+
+    if approved_chat_ids:
+        refreshed_state = store.load()
+        approved_signals = _approved_signals_to_alert(store, refreshed_state)
+        if not approved_signals:
+            return
+        for signal in approved_signals:
+            message = _approved_signal_text(signal)
+            for chat_id in approved_chat_ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        reply_markup=candidate_menu(store.load()),
+                    )
+                except Exception as exc:
+                    logger.warning("Falha ao enviar entrada aprovada para chat %s: %s", chat_id, exc)
+        return
+
     if not chat_ids:
         return
     for chat_id in chat_ids:
@@ -2719,7 +2818,7 @@ def _paper_text(state) -> str:
                 "🔵🧠 SIMULADOR EM TEMPO REAL",
                 "",
                 "Ainda nao tenho uma entrada simulada com sinal ao vivo.",
-                f"Jogos do dia no radar: {today_count}",
+                f"Agenda do dia no radar: {today_count}",
                 "",
                 "📌 Proximo passo:",
                 "Rode Jogos > Scan agora para gerar candidatos ao vivo.",

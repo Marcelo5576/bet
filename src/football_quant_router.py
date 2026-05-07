@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from services.footballQuantAiSkill import get_football_quant_ai_skill
+from services.footballQuantAiSkill.feature_engineering import get_training_context
 from services.footballQuantAiSkill.schemas import BacktestRequest
 from src.portal_web import _require_admin, _require_user
 
@@ -60,6 +61,7 @@ def _esc(value: Any) -> str:
 def _shell(title: str, mode: str) -> str:
     tabs = [
         ("/app/analise-futebol", "Análise Futebol"),
+        ("/app/base-historica", "Base Histórica"),
         ("/app/backtesting", "Backtesting"),
         ("/app/skill-futebol", "Skill Futebol"),
         ("/app/aperfeicoamento-ia", "Aperfeiçoamento IA"),
@@ -210,6 +212,67 @@ def _shell(title: str, mode: str) -> str:
           `)}</div>
         </div>`;
     }}
+    async function loadHistoricalBase() {{
+      const data = await api('/api/football-research/historical-base');
+      const summary = data.summary || {{}};
+      const top = summary.top_leagues || [];
+      const weak = summary.weak_leagues || [];
+      root.innerHTML = `
+        <div class="grid">
+          <div class="span-12">${card('Base Histórica', `
+            <div class="kpis">
+              <div class="mini"><div class="muted">Jogos importados</div><strong>${{fmt(summary.total_matches)}}</strong></div>
+              <div class="mini"><div class="muted">Válidos para treino</div><strong>${{fmt(summary.trainable_matches)}}</strong></div>
+              <div class="mini"><div class="muted">Odds reais</div><strong>${{fmt(summary.matches_with_real_odds)}}</strong></div>
+              <div class="mini"><div class="muted">Com estatísticas</div><strong>${{fmt(summary.matches_with_stats)}}</strong></div>
+              <div class="mini"><div class="muted">Qualidade média</div><strong>${{fmt(summary.avg_data_quality)}}</strong></div>
+              <div class="mini"><div class="muted">Duplicatas bloqueadas</div><strong>${{fmt(summary.duplicates_blocked)}}</strong></div>
+            </div>
+            <div class="actions" style="margin-top:14px">
+              <button class="good" onclick="rebuildHistoricalFeatures()">Recalcular features</button>
+              <button class="primary" onclick="loadBacktesting()">Rodar backtest por liga</button>
+              <button class="warn" onclick="loadHistoricalBase()">Ver ligas confiáveis</button>
+            </div>
+          `)}</div>
+          <div class="span-6">${card('Ligas com melhor qualidade', `
+            <div class="list">
+              ${top.map(row => `
+                <div class="mini">
+                  <div class="pill green">${row.classification}</div>
+                  <strong>${row.league} ${row.season || ''}</strong>
+                  <div class="muted">Score ${Number(row.league_reliability_score || 0).toFixed(1)} • jogos ${row.match_count} • odds ${row.odds_count} • stats ${row.stats_count}</div>
+                </div>
+              `).join('') || `<div class="mini muted">Recalcule as features para gerar ranking.</div>`}
+            </div>
+          `)}</div>
+          <div class="span-6">${card('Ligas ruins / em observação', `
+            <div class="list">
+              ${weak.map(row => `
+                <div class="mini">
+                  <div class="pill ${row.classification === 'Evitar' ? 'red' : 'amber'}">${row.classification}</div>
+                  <strong>${row.league} ${row.season || ''}</strong>
+                  <div class="muted">Score ${Number(row.league_reliability_score || 0).toFixed(1)} • qualidade ${row.avg_data_quality} • válidos ${row.trainable_count}/${row.match_count}</div>
+                </div>
+              `).join('') || `<div class="mini muted">Sem ligas classificadas ainda.</div>`}
+            </div>
+          `)}</div>
+          <div class="span-12">${card('Regra anti-vazamento', `
+            <div class="mini">
+              <strong>${data.training_rule || 'Backtest usa somente dados anteriores à partida.'}</strong>
+              <div class="muted" style="margin-top:8px">Split temporal: ano inicial para treino, ano seguinte para validação e ano mais recente para teste/backtest final. Jogos com qualidade abaixo de 70 ficam apenas para consulta.</div>
+            </div>
+          `)}</div>
+        </div>`;
+    }}
+    async function rebuildHistoricalFeatures() {{
+      try {{
+        root.insertAdjacentHTML('afterbegin', `<div class="notice">Recalculando qualidade, features e ranking de ligas...</div>`);
+        await api('/api/football-research/features/rebuild', {{ method:'POST', body: JSON.stringify({{}}) }});
+        await loadHistoricalBase();
+      }} catch (error) {{
+        alert(error.message);
+      }}
+    }}
     async function predictMatch(matchId, market) {{
       try {{
         const data = await api(`/api/football-research/predict/${{matchId}}`, {{ method:'POST', body: JSON.stringify({{ market }}) }});
@@ -349,6 +412,7 @@ def _shell(title: str, mode: str) -> str:
       document.getElementById('agent-answer').textContent = JSON.stringify(data, null, 2);
     }}
     if (mode === 'analise-futebol') loadAnalysis();
+    if (mode === 'base-historica') loadHistoricalBase();
     if (mode === 'backtesting') loadBacktesting();
     if (mode === 'skill-futebol') loadSkill();
     if (mode === 'aperfeicoamento-ia') loadLearning();
@@ -370,6 +434,11 @@ def _shell(title: str, mode: str) -> str:
 @router.get("/app/analise-futebol", response_class=HTMLResponse)
 def football_analysis_page(_: dict[str, Any] = Depends(_require_user)) -> str:
     return _shell("Análise Futebol", "analise-futebol")
+
+
+@router.get("/app/base-historica", response_class=HTMLResponse)
+def football_historical_base_page(_: dict[str, Any] = Depends(_require_user)) -> str:
+    return _shell("Base Histórica", "base-historica")
 
 
 @router.get("/app/backtesting", response_class=HTMLResponse)
@@ -423,6 +492,29 @@ async def football_research_import_local(payload: ImportLocalPayload, user: dict
 def football_research_matches(league: str | None = None, season: int | None = None, limit: int = 80, _: dict[str, Any] = Depends(_require_user)) -> JSONResponse:
     matches = _skill().repository.list_historical_matches(league=league, season=season, limit=limit)
     return JSONResponse({"matches": matches, "notice": NOTICE})
+
+
+@router.get("/api/football-research/historical-base")
+def football_research_historical_base(_: dict[str, Any] = Depends(_require_user)) -> JSONResponse:
+    summary = _skill().feature_store.summary()
+    return JSONResponse(
+        {
+            "summary": summary,
+            "training_rule": "get_training_context(match_date) retorna apenas registros com data anterior ao jogo alvo.",
+            "notice": NOTICE,
+        }
+    )
+
+
+@router.post("/api/football-research/features/rebuild")
+def football_research_features_rebuild(_: dict[str, Any] = Depends(_require_admin)) -> JSONResponse:
+    result = _skill().feature_store.rebuild()
+    return JSONResponse(result)
+
+
+@router.get("/api/football-research/training-context")
+def football_research_training_context(match_date: str, limit: int = 50, _: dict[str, Any] = Depends(_require_admin)) -> JSONResponse:
+    return JSONResponse(get_training_context(_skill().repository, match_date, limit=limit))
 
 
 @router.post("/api/football-research/predict/{historical_match_id}")

@@ -9,6 +9,8 @@ if not hasattr(httpx, "HTTPError"):
 
 from services.footballQuantAiSkill.data_sources.api_football_provider import (
     ApiFootballProvider,
+    normalize_market_name,
+    normalize_selection_name,
 )
 from src.cache import TTLCache
 from src.intelligence.recommendation_policy import apply_recommendation_policy
@@ -22,14 +24,16 @@ class FakeResponse:
         payload: list[dict] | dict | None = None,
         *,
         headers: dict[str, str] | None = None,
+        errors: dict[str, str] | list[str] | str | None = None,
     ) -> None:
         self.status_code = status_code
         self._payload = payload if payload is not None else []
         self.headers = headers or {}
+        self.errors = errors or []
         self.content = b"{}"
 
     def json(self) -> dict[str, object]:
-        return {"response": self._payload}
+        return {"response": self._payload, "errors": self.errors}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -202,6 +206,158 @@ class ApiFootballProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decided["entry_allowed"])
         self.assertEqual(decided["stake_value"], 0.0)
         self.assertIn("Odd invalida ou ausente", " ".join(decided["decision_reasons"]))
+
+    def test_normalize_market_name(self):
+        self.assertEqual(normalize_market_name("Match Winner"), "1X2")
+        self.assertEqual(normalize_market_name("Goals Over/Under"), "OVER_UNDER")
+        self.assertEqual(normalize_market_name("Both Teams Score"), "BTTS")
+        self.assertEqual(normalize_market_name("Exact Score"), "UNSUPPORTED")
+
+    def test_normalize_selection_name_with_team_names(self):
+        self.assertEqual(normalize_selection_name("Botafogo", "Botafogo", "Bahia"), "home")
+        self.assertEqual(normalize_selection_name("Bahia", "Botafogo", "Bahia"), "away")
+        self.assertEqual(normalize_selection_name("Draw", "Botafogo", "Bahia"), "draw")
+        self.assertEqual(normalize_selection_name("Over 2.5"), "over_2_5")
+        self.assertEqual(normalize_selection_name("Yes"), "btts_yes")
+
+    def test_normalize_odds_1x2_with_team_names(self):
+        provider = ApiFootballProvider("test-key", "https://v3.football.api-sports.io", cache=TTLCache(), limiter=ProviderRateLimiter())
+        odds = provider.normalize_odds(
+            {
+                "bookmakers": [
+                    {
+                        "name": "Book",
+                        "bets": [
+                            {
+                                "name": "Match Winner",
+                                "values": [
+                                    {"value": "Botafogo", "odd": "2.10"},
+                                    {"value": "Draw", "odd": "3.15"},
+                                    {"value": "Bahia", "odd": "3.80"},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            home_team="Botafogo",
+            away_team="Bahia",
+        )
+
+        self.assertEqual(odds["1x2"]["home"], 2.1)
+        self.assertEqual(odds["1x2"]["draw"], 3.15)
+        self.assertEqual(odds["1x2"]["away"], 3.8)
+        self.assertTrue(odds["_meta"]["confirmed"])
+
+    def test_normalize_odds_over_under_and_btts(self):
+        provider = ApiFootballProvider("test-key", "https://v3.football.api-sports.io", cache=TTLCache(), limiter=ProviderRateLimiter())
+        odds = provider.normalize_odds(
+            {
+                "bookmakers": [
+                    {
+                        "name": "Book",
+                        "bets": [
+                            {
+                                "name": "Goals Over/Under",
+                                "values": [
+                                    {"value": "Over 2.5", "odd": "1.91"},
+                                    {"value": "Under 2.5", "odd": "1.89"},
+                                ],
+                            },
+                            {
+                                "name": "Both Teams Score",
+                                "values": [
+                                    {"value": "Yes", "odd": "1.75"},
+                                    {"value": "No", "odd": "2.05"},
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(odds["goals"]["over"]["line"], "2.5")
+        self.assertEqual(odds["goals"]["under"]["odds"], 1.89)
+        self.assertEqual(odds["btts"]["yes"], 1.75)
+        self.assertEqual(odds["btts"]["no"], 2.05)
+
+    def test_unsupported_market_is_preserved_in_debug_metadata(self):
+        provider = ApiFootballProvider("test-key", "https://v3.football.api-sports.io", cache=TTLCache(), limiter=ProviderRateLimiter())
+        detailed = provider.normalize_odds_detailed(
+            {
+                "bookmakers": [
+                    {
+                        "name": "Book",
+                        "bets": [
+                            {
+                                "name": "Exact Score",
+                                "values": [{"value": "1:0", "odd": "7.00"}],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(detailed["normalized_count"], 0)
+        self.assertEqual(detailed["unsupported_markets"][0]["market"], "Exact Score")
+        self.assertIn("unsupported_market", detailed["diagnosis"])
+
+    async def test_empty_odds_returns_unavailable(self):
+        client = FakeAsyncClient([FakeResponse(200, [])])
+        provider = ApiFootballProvider(
+            "test-key",
+            "https://v3.football.api-sports.io",
+            cache=TTLCache(),
+            limiter=ProviderRateLimiter(),
+            client_factory=lambda timeout: client,
+        )
+
+        result = await provider.get_odds_by_fixture_or_fallback("123")
+
+        self.assertTrue(result["odds_unavailable"])
+        self.assertEqual(result["raw_count"], 0)
+        self.assertIn("0 odds", result["reason"])
+
+    async def test_odds_api_200_with_error_is_not_treated_as_success(self):
+        client = FakeAsyncClient(
+            [
+                FakeResponse(
+                    200,
+                    [],
+                    errors={"requests": "You have reached the request limit for the day."},
+                )
+            ]
+        )
+        provider = ApiFootballProvider(
+            "test-key",
+            "https://v3.football.api-sports.io",
+            cache=TTLCache(),
+            limiter=ProviderRateLimiter(),
+            client_factory=lambda timeout: client,
+        )
+
+        with self.assertRaises(RuntimeError):
+            await provider.get_odds_by_fixture_or_fallback("123")
+
+        self.assertIn("request limit", provider.status_snapshot()["last_error"])
+
+    async def test_fixture_odds_debug_reports_403_plan(self):
+        client = FakeAsyncClient([FakeResponse(403, [])])
+        provider = ApiFootballProvider(
+            "test-key",
+            "https://v3.football.api-sports.io",
+            cache=TTLCache(),
+            limiter=ProviderRateLimiter(),
+            client_factory=lambda timeout: client,
+        )
+
+        debug = await provider.fixture_odds_debug("123")
+
+        self.assertEqual(debug["status"], 403)
+        self.assertIn("plano", debug["diagnosis"])
+        self.assertNotIn("test-key", debug["request_url"])
 
 if __name__ == "__main__":
     unittest.main()

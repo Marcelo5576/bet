@@ -12,6 +12,7 @@ import httpx
 from .base import LiveGame, LiveProvider, provider_label
 from src.cache import get_runtime_cache
 from src.rate_limiter import get_provider_limiter, retry_after_seconds, sanitize_text
+from src.request_queue_service import get_request_queue_service
 from src.usage_metrics import UsageTracker
 
 _TEAM_STOPWORDS = {
@@ -76,8 +77,8 @@ class OddsApiIoEnricher(LiveProvider):
         usage_tracker: UsageTracker | None = None,
         cost_per_request_brl: float = 0.0,
         max_rpm: int = 20,
-        events_live_ttl: int = 20,
-        odds_event_ttl: int = 30,
+        events_live_ttl: int = 30,
+        odds_event_ttl: int = 45,
         provider_cooldown_seconds: int = 60,
     ):
         self.upstream = upstream
@@ -92,6 +93,7 @@ class OddsApiIoEnricher(LiveProvider):
         self.provider_cooldown_seconds = max(15, int(provider_cooldown_seconds or 60))
         self.cache = get_runtime_cache()
         self.limiter = get_provider_limiter()
+        self.request_queue = get_request_queue_service()
         self.label = f"{provider_label(upstream)} + Odds-API.io"
 
     async def get_live_games(self) -> list[LiveGame]:
@@ -119,7 +121,11 @@ class OddsApiIoEnricher(LiveProvider):
                 return games
             matches = self._candidate_matches(matches)
             tasks = [
-                self._fetch_event_odds(client, match["event_id"])
+                self._fetch_event_odds(
+                    client,
+                    str(match["event_id"]),
+                    state_key=str(match.get("state_key") or ""),
+                )
                 for match in matches
             ]
             odds_payloads = await asyncio.gather(*tasks, return_exceptions=True)
@@ -138,85 +144,111 @@ class OddsApiIoEnricher(LiveProvider):
         if cached and isinstance(cached.value, list):
             return cached.value
         stale = self.cache.get(cache_key, allow_stale=True)
-        decision = self.limiter.acquire("odds_api_io", self.max_rpm)
-        if not decision.allowed:
-            return stale.value if stale and isinstance(stale.value, list) else []
-        params = {
-            "apiKey": self.api_key,
-            "sport": "football",
-            "status": "live",
-            "limit": "120",
-        }
-        try:
-            response = await self._request_with_backoff(
-                client,
-                f"{self.base_url}/events",
-                params=params,
-                operation="events_live",
-            )
-        except Exception as exc:
-            self._track(False, operation="events_live", error=exc)
-            return stale.value if stale and isinstance(stale.value, list) else []
-        self._track(True, operation="events_live", response_bytes=len(response.content))
-        payload = response.json()
-        if isinstance(payload, list):
-            rows = [item for item in payload if isinstance(item, dict)]
+        async def _request_events() -> list[dict]:
+            decision = self.limiter.acquire("odds_api_io", self.max_rpm)
+            if not decision.allowed:
+                return stale.value if stale and isinstance(stale.value, list) else []
+            params = {
+                "apiKey": self.api_key,
+                "sport": "football",
+                "status": "live",
+                "limit": "120",
+            }
+            try:
+                response = await self._request_with_backoff(
+                    client,
+                    f"{self.base_url}/events",
+                    params=params,
+                    operation="events_live",
+                )
+            except Exception as exc:
+                self._track(False, operation="events_live", error=exc)
+                return stale.value if stale and isinstance(stale.value, list) else []
+            self._track(True, operation="events_live", response_bytes=len(response.content))
+            return self._normalize_live_events_payload(response.json())
+
+        rows = await self.request_queue.run(
+            "odds_api_io",
+            cache_key,
+            _request_events,
+            max_concurrency=2,
+        )
+        if rows:
             self.cache.set(
                 cache_key,
                 rows,
                 self.events_live_ttl,
-                stale_seconds=max(self.events_live_ttl * 6, self.provider_cooldown_seconds * 2),
+                stale_seconds=max(self.events_live_ttl * 8, self.provider_cooldown_seconds * 3),
             )
             return rows
+        return stale.value if stale and isinstance(stale.value, list) else []
+
+    def _normalize_live_events_payload(self, payload: object) -> list[dict]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
         if isinstance(payload, dict):
             rows = payload.get("data") or payload.get("events") or []
             if isinstance(rows, list):
-                normalized = [item for item in rows if isinstance(item, dict)]
-                self.cache.set(
-                    cache_key,
-                    normalized,
-                    self.events_live_ttl,
-                    stale_seconds=max(self.events_live_ttl * 6, self.provider_cooldown_seconds * 2),
-                )
-                return normalized
+                return [item for item in rows if isinstance(item, dict)]
         return []
 
-    async def _fetch_event_odds(self, client: httpx.AsyncClient, event_id: str) -> dict:
+    async def _fetch_event_odds(self, client: httpx.AsyncClient, event_id: str, *, state_key: str = "") -> dict:
         cache_key = self._odds_cache_key(event_id)
         cached = self.cache.get(cache_key)
         if cached and isinstance(cached.value, dict):
             return cached.value
         stale = self.cache.get(cache_key, allow_stale=True)
-        decision = self.limiter.acquire("odds_api_io", self.max_rpm)
-        if not decision.allowed:
-            return stale.value if stale and isinstance(stale.value, dict) else {}
-        params = {
-            "apiKey": self.api_key,
-            "eventId": str(event_id),
-        }
-        if self.bookmakers:
-            params["bookmakers"] = ",".join(self.bookmakers)
-        try:
-            response = await self._request_with_backoff(
-                client,
-                f"{self.base_url}/odds",
-                params=params,
-                operation="odds_event",
-            )
-        except Exception as exc:
-            self._track(False, operation="odds_event", error=exc)
-            return stale.value if stale and isinstance(stale.value, dict) else {}
-        self._track(True, operation="odds_event", response_bytes=len(response.content))
-        payload = response.json()
-        if isinstance(payload, dict):
+        if state_key and stale and isinstance(stale.value, dict):
+            previous_state = self.cache.get(self._odds_state_cache_key(event_id), allow_stale=True)
+            if previous_state and previous_state.value == state_key:
+                return stale.value
+
+        async def _request_odds() -> dict:
+            decision = self.limiter.acquire("odds_api_io", self.max_rpm)
+            if not decision.allowed:
+                return stale.value if stale and isinstance(stale.value, dict) else {}
+            params = {
+                "apiKey": self.api_key,
+                "eventId": str(event_id),
+            }
+            if self.bookmakers:
+                params["bookmakers"] = ",".join(self.bookmakers)
+            try:
+                response = await self._request_with_backoff(
+                    client,
+                    f"{self.base_url}/odds",
+                    params=params,
+                    operation="odds_event",
+                )
+            except Exception as exc:
+                self._track(False, operation="odds_event", error=exc)
+                return stale.value if stale and isinstance(stale.value, dict) else {}
+            self._track(True, operation="odds_event", response_bytes=len(response.content))
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {}
+
+        payload = await self.request_queue.run(
+            "odds_api_io",
+            cache_key,
+            _request_odds,
+            max_concurrency=3,
+        )
+        if isinstance(payload, dict) and payload:
             self.cache.set(
                 cache_key,
                 payload,
                 self.odds_event_ttl,
-                stale_seconds=max(self.odds_event_ttl * 6, self.provider_cooldown_seconds * 2),
+                stale_seconds=max(self.odds_event_ttl * 8, self.provider_cooldown_seconds * 3),
             )
+            if state_key:
+                self.cache.set(
+                    self._odds_state_cache_key(event_id),
+                    state_key,
+                    max(self.odds_event_ttl * 4, 120),
+                    stale_seconds=max(self.odds_event_ttl * 10, self.provider_cooldown_seconds * 4),
+                )
             return payload
-        return {}
+        return stale.value if stale and isinstance(stale.value, dict) else {}
 
     def _match_games_to_events(self, games: list[LiveGame], events: list[dict]) -> list[dict[str, object]]:
         used_event_ids: set[str] = set()
@@ -241,6 +273,7 @@ class OddsApiIoEnricher(LiveProvider):
                         "event": best_event,
                         "event_id": event_id,
                         "score": round(best_score, 4),
+                        "state_key": self._fixture_state_key(game, best_event),
                     }
                 )
         return matches
@@ -285,6 +318,22 @@ class OddsApiIoEnricher(LiveProvider):
 
     def _odds_cache_key(self, event_id: str) -> str:
         return f"odds_api_io:odds_event:{event_id}:{','.join(self.bookmakers)}"
+
+    def _odds_state_cache_key(self, event_id: str) -> str:
+        return f"odds_api_io:odds_event_state:{event_id}:{','.join(self.bookmakers)}"
+
+    def _fixture_state_key(self, game: LiveGame, event: dict) -> str:
+        home_score = _safe_int(getattr(game, "home_goals", 0))
+        away_score = _safe_int(getattr(game, "away_goals", 0))
+        event_score = event.get("score") if isinstance(event.get("score"), dict) else {}
+        if isinstance(event_score, dict):
+            home_score = _safe_int(event_score.get("home"), home_score)
+            away_score = _safe_int(event_score.get("away"), away_score)
+        minute = _safe_int(getattr(game, "minute", 0))
+        event_minute = event.get("minute") or event.get("time") or event.get("clock")
+        minute = _safe_int(event_minute, minute)
+        status = str(event.get("status") or getattr(game, "status", "") or "").strip().lower()
+        return f"{minute}:{home_score}:{away_score}:{status}"
 
     async def _request_with_backoff(
         self,

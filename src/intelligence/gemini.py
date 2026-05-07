@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 
 import httpx
 from src.cache import CacheResult, get_runtime_cache
 from src.rate_limiter import get_provider_limiter, retry_after_seconds, sanitize_text
+from src.request_queue_service import get_request_queue_service
 from src.usage_metrics import UsageTracker, estimate_text_tokens
 
 _GEMINI_PROVIDER = "gemini"
 _GEMINI_BACKOFF_DELAYS = (2, 5, 10, 30)
+_GEMINI_CACHE_TTL_SECONDS = 15 * 60
 
 
 async def refine_signal(
@@ -22,20 +26,32 @@ async def refine_signal(
     output_cost_per_1m_brl: float = 0.0,
     *,
     max_rpm: int = 10,
-    ttl_seconds: int = 90,
+    ttl_seconds: int = _GEMINI_CACHE_TTL_SECONDS,
     cooldown_seconds: int = 60,
     min_score: int = 60,
     min_confidence: int = 55,
+    user_id: str | int | None = None,
 ) -> dict:
     if not api_key:
         return signal
     cache = get_runtime_cache()
     limiter = get_provider_limiter()
+    request_queue = get_request_queue_service()
     cache_key = _refine_cache_key(signal)
     cached = cache.get(cache_key)
     if cached:
         return _apply_cached_refine(signal, cached)
     if not _should_refine_signal(signal, min_score=min_score, min_confidence=min_confidence):
+        return signal
+
+    resolved_user_id = _resolve_user_id(user_id, signal)
+    user_cooldown = request_queue.user_status(_GEMINI_PROVIDER, resolved_user_id)
+    if user_cooldown.active:
+        signal["gemini_note"] = (
+            "Gemini em cooldown para este usuario. "
+            f"Nova tentativa em {user_cooldown.wait_seconds}s."
+        )
+        signal["gemini_user_cooldown"] = True
         return signal
 
     fallback_cached = cache.get(cache_key, allow_stale=True)
@@ -61,19 +77,35 @@ async def refine_signal(
         "Responda em no maximo 900 caracteres, direto ao ponto, sem markdown longo. "
         f"Sinal: {signal}. Historico resumido: {learning_context or {}}"
     )
+    prompt_cache_key = _prompt_cache_key("refine_signal", prompt)
+    prompt_cached = cache.get(prompt_cache_key)
+    if prompt_cached:
+        return _apply_cached_refine(signal, prompt_cached)
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model_name}:generateContent"
     )
     try:
-        payload, text, response_bytes = await _call_gemini(
-            url=url,
-            api_key=api_key,
-            prompt=prompt,
-            cooldown_seconds=cooldown_seconds,
+        payload, text, response_bytes = await request_queue.run(
+            _GEMINI_PROVIDER,
+            prompt_cache_key,
+            lambda: _call_gemini(
+                url=url,
+                api_key=api_key,
+                prompt=prompt,
+                cooldown_seconds=cooldown_seconds,
+            ),
+            max_concurrency=2,
         )
     except Exception as exc:
         error_text = sanitize_text(str(exc), api_key)
+        if "429" in error_text or "rate" in error_text.lower():
+            request_queue.cooldown_user(
+                _GEMINI_PROVIDER,
+                resolved_user_id,
+                cooldown_seconds,
+                reason=error_text[:160],
+            )
         _track_gemini(
             usage_tracker,
             operation="refine_signal",
@@ -104,7 +136,9 @@ async def refine_signal(
         output_cost_per_1m_brl=output_cost_per_1m_brl,
     )
     note = text.strip()[:1200]
-    cache.set(cache_key, {"note": note}, ttl_seconds, stale_seconds=max(ttl_seconds * 6, cooldown_seconds * 2))
+    cached_payload = {"note": note}
+    cache.set(cache_key, cached_payload, ttl_seconds, stale_seconds=max(ttl_seconds * 6, cooldown_seconds * 2))
+    cache.set(prompt_cache_key, cached_payload, ttl_seconds, stale_seconds=max(ttl_seconds * 6, cooldown_seconds * 2))
     signal["gemini_note"] = note
     return signal
 
@@ -120,11 +154,28 @@ async def answer_question(
     *,
     max_rpm: int = 10,
     cooldown_seconds: int = 60,
+    ttl_seconds: int = _GEMINI_CACHE_TTL_SECONDS,
+    user_id: str | int | None = None,
 ) -> str:
     if not api_key:
         return "Gemini nao esta configurado no momento."
+    cache = get_runtime_cache()
+    request_queue = get_request_queue_service()
+    resolved_user_id = _resolve_user_id(user_id, context)
+    user_cooldown = request_queue.user_status(_GEMINI_PROVIDER, resolved_user_id)
+    if user_cooldown.active:
+        return f"IA em cooldown para este usuario. Tente novamente em {user_cooldown.wait_seconds}s."
+    cache_seed = {"question": question, "context": _compact_context_for_cache(context)}
+    cache_key = _prompt_cache_key("answer_question", cache_seed)
+    cached = cache.get(cache_key)
+    if cached:
+        return str(cached.value or "")[:1400]
+
     decision = get_provider_limiter().acquire(_GEMINI_PROVIDER, max_rpm)
     if not decision.allowed:
+        stale = cache.get(cache_key, allow_stale=True)
+        if stale:
+            return str(stale.value or "")[:1400]
         if decision.cooling_down:
             return "IA em cooldown rapido para respeitar o limite do provider. Tente de novo em instantes."
         return "IA em espera por limite local de requisicoes. Vamos tentar de novo daqui a pouco."
@@ -149,11 +200,16 @@ async def answer_question(
         f"{model_name}:generateContent"
     )
     try:
-        payload, text, response_bytes = await _call_gemini(
-            url=url,
-            api_key=api_key,
-            prompt=prompt,
-            cooldown_seconds=cooldown_seconds,
+        payload, text, response_bytes = await request_queue.run(
+            _GEMINI_PROVIDER,
+            cache_key,
+            lambda: _call_gemini(
+                url=url,
+                api_key=api_key,
+                prompt=prompt,
+                cooldown_seconds=cooldown_seconds,
+            ),
+            max_concurrency=2,
         )
         _track_gemini(
             usage_tracker,
@@ -167,9 +223,21 @@ async def answer_question(
             input_cost_per_1m_brl=input_cost_per_1m_brl,
             output_cost_per_1m_brl=output_cost_per_1m_brl,
         )
-        return text.strip()[:1400]
+        answer = text.strip()[:1400]
+        cache.set(cache_key, answer, ttl_seconds, stale_seconds=max(ttl_seconds * 6, cooldown_seconds * 2))
+        return answer
     except Exception as exc:
         error_text = sanitize_text(str(exc), api_key)
+        if "429" in error_text or "rate" in error_text.lower():
+            request_queue.cooldown_user(
+                _GEMINI_PROVIDER,
+                resolved_user_id,
+                cooldown_seconds,
+                reason=error_text[:160],
+            )
+        stale = cache.get(cache_key, allow_stale=True)
+        if stale:
+            return str(stale.value or "")[:1400]
         _track_gemini(
             usage_tracker,
             operation="answer_question",
@@ -294,6 +362,53 @@ def _refine_cache_key(signal: dict[str, Any]) -> str:
     market = str(signal.get("market") or _best_market_from_signal(signal) or "default").strip().lower()
     market = "".join(ch if ch.isalnum() else "_" for ch in market).strip("_") or "default"
     return f"refine_signal:{game_id}:{market}"
+
+
+def _prompt_cache_key(prefix: str, payload: Any) -> str:
+    try:
+        serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+    except TypeError:
+        serialized = str(payload)
+    digest = hashlib.sha256(serialized.encode("utf-8", errors="ignore")).hexdigest()[:32]
+    return f"gemini:{prefix}:{digest}"
+
+
+def _resolve_user_id(explicit_user_id: str | int | None, payload: Any) -> str | int | None:
+    if explicit_user_id is not None:
+        return explicit_user_id
+    if isinstance(payload, dict):
+        for key in ("user_id", "client_id", "chat_id", "session_id"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return value
+        game = payload.get("game")
+        if isinstance(game, dict):
+            for key in ("user_id", "client_id", "chat_id", "session_id"):
+                value = game.get(key)
+                if value not in (None, ""):
+                    return value
+    return None
+
+
+def _compact_context_for_cache(context: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+    keys = (
+        "game_id",
+        "fixture_id",
+        "market",
+        "minute",
+        "score",
+        "decision",
+        "entry_score",
+        "confidence",
+        "ev",
+        "risk_level",
+    )
+    compact = {key: context.get(key) for key in keys if key in context}
+    if not compact:
+        return {"fingerprint": str(context)[:700]}
+    return compact
 
 
 def _should_refine_signal(signal: dict[str, Any], *, min_score: int, min_confidence: int) -> bool:

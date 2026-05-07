@@ -15,6 +15,13 @@ class BacktestingService:
 
     def runBacktest(self, payload: BacktestRequest) -> BacktestSummary:
         matches = self.repository.list_historical_matches(league=payload.league, season=payload.season, limit=2000)
+        matches = [
+            match
+            for match in matches
+            if int(match.get("usable_for_training") or 0) == 1
+            and (not payload.date_from or str(match.get("match_date") or "") >= payload.date_from)
+            and (not payload.date_to or str(match.get("match_date") or "") <= payload.date_to)
+        ]
         bankroll = payload.bankroll
         initial_bankroll = bankroll
         peak_bankroll = bankroll
@@ -178,4 +185,3 @@ def _ev_band(ev: float) -> str:
     if ev < 0.08:
         return "Moderado"
     return "Alto"
-

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,7 +51,7 @@ class HybridPredictionService:
             raise ValueError(f"Partida histórica {historical_match_id} não encontrada.")
         home_ctx = self.stats_service.team_context(str(match["home_team"]), str(match["league"]), match["match_date"])
         away_ctx = self.stats_service.team_context(str(match["away_team"]), str(match["league"]), match["match_date"])
-        baseline = self.stats_service.league_baseline(str(match["league"]), match.get("season"))
+        baseline = self.stats_service.league_baseline(str(match["league"]), match.get("season"), match["match_date"])
         poisson = self.poisson_service.predict(home_ctx, away_ctx, baseline)
         estimated_probability = self._market_probability(poisson, market)
         confidence_score = self._confidence_score(home_ctx, away_ctx, poisson, market)
@@ -65,11 +66,11 @@ class HybridPredictionService:
             bankroll_profile or self.default_profile,
         )
         explanation = {
-            "home_context": home_ctx.__dict__,
-            "away_context": away_ctx.__dict__,
+            "home_context": asdict(home_ctx),
+            "away_context": asdict(away_ctx),
             "league_baseline": baseline,
-            "poisson": poisson.__dict__,
-            "value_assessment": value.__dict__,
+            "poisson": asdict(poisson),
+            "value_assessment": asdict(value),
             "legal_notice": "Este sistema é apenas uma ferramenta estatística de apoio. Não garante lucro. Aposte com responsabilidade.",
         }
         return MatchPrediction(
@@ -168,4 +169,3 @@ def _first_float(values: list[Any]) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
-

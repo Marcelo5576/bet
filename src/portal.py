@@ -134,14 +134,6 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "priority": 41,
     },
     {
-        "skill_id": "public_fantasy",
-        "title": "Fantasy Campeão",
-        "intent": "Explicar leitura de sala e montagem de escalação para Fantasy Campeão.",
-        "keywords": ["fantasy", "campeao", "campeão", "escalação", "escalacao", "lobby", "jogadores", "scout"],
-        "answer": "No Fantasy, a IA cruza preço, pool, histórico e projeção para sugerir escalação racional.",
-        "priority": 50,
-    },
-    {
         "skill_id": "public_risk_notice",
         "title": "Gestão de risco",
         "intent": "Reforçar responsabilidade e limites das sugestões.",
@@ -290,7 +282,7 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "title": "Diferenciais ApexGol",
         "intent": "Explicar diferenciais do produto frente a scanners, tips e bots simples.",
         "keywords": ["diferencial", "concorrente", "comparar", "scanner", "tip", "bot", "mercado", "vantagem"],
-        "answer": "Diferencial: scanner, Telegram, simulação, saída dinâmica, Fantasy e memória Supabase juntos.",
+        "answer": "Diferencial: scanner quantitativo, Cérebro IA, Telegram, backtesting, gestão de risco e memória Supabase juntos.",
         "priority": 181,
     },
     {
@@ -317,7 +309,6 @@ _DEFAULT_SKILL_METADATA: dict[str, dict[str, Any]] = {
     "public_scanner_live": {"topic": "scanner", "section": "live"},
     "public_plans_trial": {"topic": "billing", "section": "plans"},
     "plans_ai_agent_scope": {"topic": "product", "section": "agent"},
-    "public_fantasy": {"topic": "fantasy", "section": "lineup"},
     "public_risk_notice": {"topic": "risk", "section": "responsibility"},
     "risk_bankroll_units": {"topic": "risk", "section": "bankroll"},
     "client_bankroll_panel": {"topic": "bankroll", "section": "client"},
@@ -438,6 +429,11 @@ class PortalStore:
                   monthly_price_brl real not null,
                   updated_at text not null
                 );
+                create table if not exists system_settings (
+                  key text primary key,
+                  value text not null,
+                  updated_at text not null
+                );
                 create table if not exists ai_skills (
                   skill_id text primary key,
                   title text not null,
@@ -484,6 +480,67 @@ class PortalStore:
             self._ensure_column(conn, "user_preferences", "scan_enabled", "integer not null default 1")
             self._ensure_column(conn, "bankroll_accounts", "default_stake_percent", "real not null default 2")
             conn.execute("update user_preferences set active_scan_seconds = 120 where active_scan_seconds = 300")
+
+    def get_system_setting(self, key: str, default: str = "") -> str:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            return default
+        with self._connect() as conn:
+            row = conn.execute(
+                "select value from system_settings where key = ?",
+                (clean_key,),
+            ).fetchone()
+        if not row:
+            return default
+        return str(row["value"] or default)
+
+    def set_system_setting(self, key: str, value: str) -> None:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            raise ValueError("Chave de configuracao invalida.")
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into system_settings (key, value, updated_at)
+                values (?, ?, ?)
+                on conflict(key) do update set
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (clean_key, str(value or "").strip(), now),
+            )
+
+    def set_system_settings(self, values: dict[str, Any]) -> None:
+        for key, value in values.items():
+            self.set_system_setting(str(key), str(value if value is not None else ""))
+
+    def approved_signal_telegram_config(self) -> dict[str, Any]:
+        enabled_raw = self.get_system_setting("telegram_approved_signals_enabled", "0")
+        chat_id = self.get_system_setting("telegram_approved_signals_chat_id", "")
+        updated_at = self.get_system_setting("telegram_approved_signals_updated_at", "")
+        enabled = str(enabled_raw).strip().lower() in {"1", "true", "yes", "on"}
+        return {
+            "enabled": enabled,
+            "chat_id": chat_id,
+            "updated_at": updated_at,
+        }
+
+    def approved_signal_telegram_chat_ids(self) -> list[int]:
+        config = self.approved_signal_telegram_config()
+        if not config.get("enabled"):
+            return []
+        raw_items = str(config.get("chat_id") or "").replace(";", ",").split(",")
+        result: list[int] = []
+        for raw in raw_items:
+            clean = raw.strip()
+            if not clean:
+                continue
+            try:
+                result.append(int(clean))
+            except ValueError:
+                continue
+        return sorted(set(result))
 
     def seed_ai_skills(self, skills: list[dict[str, Any]]) -> None:
         now = _now_iso()
@@ -1454,6 +1511,6 @@ def support_agent_reply(message: str, context: dict[str, Any]) -> str:
             "Se nao abrir, valide DNS A para o IP do servidor e execute /checkout."
         )
     return (
-        "Posso ajudar com login, senha, scanner, Telegram, planos, Fantasy Campeão, importação e dashboard. "
+        "Posso ajudar com login, senha, scanner, Telegram, planos, importação, backtesting e dashboard. "
         "Me diga em uma frase o problema e o que você esperava que acontecesse."
     )

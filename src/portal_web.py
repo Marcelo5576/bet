@@ -36,8 +36,8 @@ _RATE_LIMIT: dict[str, list[float]] = {}
 _AI_SKILLS_SYNC_DONE: set[str] = set()
 PLAN_FEATURES = {
     "starter": [
-        "Scanner ao vivo + Telegram",
-        "Histórico Green/Red",
+        "Scanner quantitativo + Telegram",
+        "Histórico de decisões",
         "Dashboard responsiva",
     ],
     "pro": [
@@ -117,6 +117,11 @@ class PlanPricePayload(BaseModel):
     monthly_price_brl: float
 
 
+class AdminTelegramApprovedPayload(BaseModel):
+    enabled: bool | None = None
+    chat_id: str | None = None
+
+
 def _settings() -> Settings:
     return load_settings()
 
@@ -139,6 +144,21 @@ def _safe_plan(plan: str | None) -> str:
     if value not in {"starter", "pro", "team"}:
         return "starter"
     return value
+
+
+def _clean_telegram_chat_ids(value: str | None) -> str:
+    raw = str(value or "").replace(";", ",")
+    if not raw.strip():
+        return ""
+    ids: list[str] = []
+    for item in raw.split(","):
+        clean = item.strip()
+        if not clean:
+            continue
+        if not re.fullmatch(r"-?\d{5,24}", clean):
+            raise HTTPException(status_code=400, detail="Chat ID Telegram invalido.")
+        ids.append(clean)
+    return ",".join(dict.fromkeys(ids))
 
 
 def _pricing_defaults(settings: Settings) -> dict[str, float]:
@@ -683,8 +703,8 @@ def _page_shell(
 ) -> str:
     settings = _settings()
     desc = description or (
-        "ApexGol AI monitora futebol ao vivo, odds, Telegram, Fantasy Campeão e gestão de risco "
-        "para apoiar decisões racionais."
+        "APEXGOL AI é uma central quantitativa de inteligência esportiva com scanner, odds, "
+        "backtesting, risco, Telegram e explicabilidade IA."
     )
     site_url = (settings.website_url or "").rstrip("/")
     canonical_url = f"{site_url}{canonical_path or ''}" if site_url else canonical_path or "/"
@@ -700,6 +720,10 @@ def _page_shell(
   <meta property="og:type" content="website">
   <meta property="og:url" content="{_esc(canonical_url)}">
   <meta property="og:image" content="{_esc(site_url)}/assets/logo-apexgol-mark.svg">
+  <meta name="keywords" content="inteligência esportiva, scanner quantitativo, IA esportiva, odds, análise estatística, backtesting, Telegram">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{_esc(title)}">
+  <meta name="twitter:description" content="{_esc(desc)}">
   <link rel="icon" href="/assets/logo-apexgol-mark.svg" type="image/svg+xml">
   <title>{_esc(title)}</title>
   <style>
@@ -1205,7 +1229,7 @@ def _page_shell(
 <button class="ai-fab" type="button" onclick="toggleAiHelp()">IA</button>
 <section id="ai-float" class="ai-panel" aria-live="polite">
   <h3 class="title" style="margin-top:0">Assistente ApexGol</h3>
-  <p class="muted">Dúvidas rápidas sobre scanner, plano, login, Fantasy e Telegram.</p>
+  <p class="muted">Dúvidas rápidas sobre scanner, plano, login, Telegram e configuração.</p>
   <textarea id="ai-float-input" placeholder="Ex: como conecto meu Telegram?"></textarea>
   <button class="btn primary" type="button" onclick="askAiFloat()">Perguntar</button>
   <div id="ai-float-note" class="notice muted"></div>
@@ -1297,50 +1321,51 @@ def landing() -> str:
     body = f"""
 <header class='top'>
   <div class='topin'>
-    <div class='brand'>{_esc(settings.product_name)}</div>
+    <div class='brand'>APEXGOL AI</div>
     <nav class='nav nav-scroll'>
-      <a class='btn desktop-only' href='#plataforma'>Plataforma</a>
-      <a class='btn desktop-only' href='#research'>Research Skill</a>
+      <a class='btn desktop-only' href='#top'>Início</a>
+      <a class='btn desktop-only' href='#plataforma'>Como funciona</a>
+      <a class='btn desktop-only' href='#scanner-ia'>Scanner IA</a>
+      <a class='btn desktop-only' href='#cerebro-ia'>Cérebro IA</a>
+      <a class='btn desktop-only' href='#telegram-analyst'>Telegram Analyst</a>
       <a class='btn desktop-only' href='#planos'>Planos</a>
-      <a class='btn' href='/login'>Login</a>
-      <a class='btn primary' href='/signup'>Teste 7 dias</a>
-      <a class='btn desktop-only' href='/app/jogosdodia'>Live Center</a>
+      <a class='btn' href='/login'>Entrar</a>
     </nav>
   </div>
 </header>
-<section class='hero'>
+<section class='hero' id='top'>
   <div class='wrap hero-grid'>
     <div class='hero-copy'>
-      <div class='status-pill'><span class='status-dot'></span>Live center + research skill + aprendizado contínuo</div>
-      <h1>Operação ao vivo, <span class='hero-word'>pesquisa quantitativa</span> e memória IA na mesma mesa.</h1>
-      <p>O ApexGol agora junta scanner ao vivo, Football Research Skill, backtesting, Monte Carlo, agentes internos e governança em uma plataforma feita para apoiar decisão fria, repetível e rastreável.</p>
+      <div class='status-pill'><span class='status-dot'></span>Scanner ao vivo + research skill + aprendizado contínuo</div>
+      <h1>APEXGOL AI</h1>
+      <h2 class='title'>Central Quantitativa de Inteligência Esportiva</h2>
+      <p>Scanner, IA, odds, backtesting, risco e Telegram em uma plataforma feita para apoiar decisões esportivas com método, dados reais e rastreabilidade.</p>
       <div class='hero-stack'>
-        <span class='stack-pill'>Jogos do Dia</span>
-        <span class='stack-pill'>Football Analysis</span>
-        <span class='stack-pill'>Backtesting Lab</span>
-        <span class='stack-pill'>Monte Carlo</span>
-        <span class='stack-pill'>Agent Arena</span>
-        <span class='stack-pill'>RAG Memory</span>
+        <span class='stack-pill'>Scanner ao Vivo</span>
+        <span class='stack-pill'>Cérebro IA</span>
+        <span class='stack-pill'>Odds e risco</span>
+        <span class='stack-pill'>Backtesting</span>
+        <span class='stack-pill'>Telegram Analyst</span>
       </div>
       <div class='hero-actions'>
-        <a class='btn primary' href='/signup'>Acessar sistema</a>
-        <a class='btn' href='/app/global-ai-control-center'>Ver control center</a>
+        <a class='btn primary' href='/signup'>Testar grátis por 7 dias</a>
+        <a class='btn' href='#scanner-ia'>Ver Scanner em ação</a>
       </div>
     </div>
     <aside class='hud' aria-label='Painel de indicadores ApexGol'>
       <div class='hud-head'>
         <div>
-          <div class='hud-label'>GLOBAL AI CONTROL</div>
+          <div class='hud-label'>APEXGOL QUANT</div>
           <strong>Operação viva + pesquisa auditável</strong>
         </div>
-        <div class='status-pill'><span class='status-dot'></span>Research mode</div>
+        <div class='status-pill'><span class='status-dot'></span>modo análise</div>
       </div>
       <div class='market-card'>
-        <div class='market-line'><span class='muted'>Live candidates</span><strong>08</strong></div>
+        <div class='market-line'><span class='muted'>Jogos em leitura</span><strong>08</strong></div>
         <div class='metric-bar'><span style='width:87%'></span></div>
       </div>
       <div class='market-card'>
-        <div class='market-line'><span class='muted'>Football Research Skill</span><strong class='good'>Ativo</strong></div>
+        <div class='market-line'><span class='muted'>Research Skill</span><strong class='good'>Ativo</strong></div>
         <div class='metric-bar'><span style='width:74%'></span></div>
       </div>
       <div class='market-card'>
@@ -1348,12 +1373,12 @@ def landing() -> str:
         <div class='metric-bar'><span style='width:32%'></span></div>
       </div>
       <div class='signal-grid'>
-        <div class='signal-mini'><span class='muted'>Backtests</span><strong>∞</strong></div>
-        <div class='signal-mini'><span class='muted'>Agentes</span><strong>10</strong></div>
-        <div class='signal-mini'><span class='muted'>RAG</span><strong>Memória longa</strong></div>
+        <div class='signal-mini'><span class='muted'>Backtests</span><strong>Avançados</strong></div>
+        <div class='signal-mini'><span class='muted'>IA</span><strong>Explicável</strong></div>
+        <div class='signal-mini'><span class='muted'>Memória</span><strong>Histórica</strong></div>
       </div>
       <div class='hud-actions'>
-        <div class='signal-mini'><span class='muted'>Decision class</span><strong>ENTRA_FORTE</strong></div>
+        <div class='signal-mini'><span class='muted'>Decisão clara</span><strong>Entrar / Aguardar / Monitorar</strong></div>
         <div class='signal-mini'><span class='muted'>Risk engine</span><strong>Kelly fracionado</strong></div>
       </div>
       <div class='callout'>Toda hipótese passa por score estatístico, odd justa, EV, risco e revisão posterior. Nada de aposta real automatizada.</div>
@@ -1362,8 +1387,8 @@ def landing() -> str:
 </section>
 <section class='ticker' aria-label='Indicadores do sistema'>
   <div class='ticker-track'>
-    <span>Jogos do Dia</span><span>Football Research Skill</span><span>Backtesting Lab</span><span>Monte Carlo</span><span>Agent Arena</span><span>Governance Center</span><span>Fantasy IA</span><span>Telegram</span>
-    <span>Jogos do Dia</span><span>Football Research Skill</span><span>Backtesting Lab</span><span>Monte Carlo</span><span>Agent Arena</span><span>Governance Center</span><span>Fantasy IA</span><span>Telegram</span>
+    <span>Scanner ao Vivo</span><span>Cérebro IA</span><span>Odds e risco</span><span>Backtesting</span><span>Telegram Analyst</span><span>APIs reais</span>
+    <span>Scanner ao Vivo</span><span>Cérebro IA</span><span>Odds e risco</span><span>Backtesting</span><span>Telegram Analyst</span><span>APIs reais</span>
   </div>
 </section>
 <main class='wrap'>
@@ -1373,21 +1398,21 @@ def landing() -> str:
       <h3>Da leitura ao vivo ao laboratório quantitativo, sem trocar de sistema.</h3>
       <p class='muted'>Em vez de um painel isolado, o ApexGol agora reúne operação live, memória IA, análise histórica, simulação e aprovação humana em um fluxo só. O operador ganha clareza. O gestor ganha rastreabilidade. A IA ganha contexto real para evoluir.</p>
       <div class='hero-actions'>
-        <a class='btn primary' href='/app/jogosdodia'>Abrir live center</a>
+        <a class='btn primary' href='/signup'>Testar grátis por 7 dias</a>
         <a class='btn' href='/app/football-analysis'>Explorar analysis</a>
       </div>
     </div>
     <div class='module-shell' aria-label='Preview do ecossistema ApexGol'>
       <div class='module-shell-top'>
-        <strong>ApexGol live + quant workspace</strong>
+        <strong>APEXGOL AI · Quant workspace</strong>
         <div class='status-pill'><span class='status-dot'></span>camadas integradas</div>
       </div>
       <div class='module-shell-grid'>
         <div class='shell-list'>
-          <div class='shell-line'><strong>Jogos do Dia</strong><span class='feature-tag'>Ao vivo</span><span class='good'>Odds + leitura</span></div>
-          <div class='shell-line'><strong>Football Analysis</strong><span class='feature-tag'>Pré-jogo</span><span class='warn'>Poisson + EV</span></div>
-          <div class='shell-line'><strong>Backtesting Lab</strong><span class='feature-tag'>Histórico</span><span class='good'>ROI / drawdown</span></div>
-          <div class='shell-line'><strong>Agent Arena</strong><span class='feature-tag'>Consenso</span><span>trust score</span></div>
+          <div class='shell-line'><strong>Scanner ao Vivo</strong><span class='feature-tag'>Ao vivo</span><span class='good'>Odds + leitura</span></div>
+          <div class='shell-line'><strong>Análise estatística</strong><span class='feature-tag'>Pré-jogo</span><span class='warn'>Poisson + EV</span></div>
+          <div class='shell-line'><strong>Backtesting</strong><span class='feature-tag'>Histórico</span><span class='good'>ROI / drawdown</span></div>
+          <div class='shell-line'><strong>Cérebro IA</strong><span class='feature-tag'>Memória</span><span>qualidade de dados</span></div>
         </div>
         <div class='shell-metrics'>
           <div class='shell-metric'><span class='muted'>Mercados vivos</span><strong>Gols · Escanteios · Handicap</strong></div>
@@ -1399,17 +1424,18 @@ def landing() -> str:
   <section id='indicadores' class='section big opportunity'>
     <div>
       <div class='feature-tag'>Simulador de oportunidade</div>
-      <h2 class='display-title' style='text-align:left'>Quanto custa entrar sem leitura?</h2>
+      <h2 class='display-title' style='text-align:left'>Simule o impacto de operar sem critério</h2>
       <p class='muted'>A página fala direto com quem opera: o problema não é só acertar, é saber quando não entrar, quando proteger e quando deixar a IA aprender com o histórico.</p>
     </div>
     <div class='op-panel'>
+      <div class='feature-tag'>Exemplo simulado</div>
       <div class='op-row'><span class='muted'>Banca operacional</span><div class='price-row'><strong>R$ 1.000</strong></div></div>
       <div class='op-row'><span class='muted'>Entradas ruins evitadas/mês</span><div class='price-row'><strong>12</strong><span class='muted'>alertas</span></div></div>
       <div class='op-row'><span class='muted'>Exposição reduzida</span><div class='price-row'><strong class='accent-gold'>R$ 240</strong></div></div>
       <div class='op-row'><span class='muted'>Impacto da disciplina IA</span><strong class='good'>menos tilt, mais processo</strong></div>
     </div>
   </section>
-  <section class='section big'>
+  <section id='planos' class='section big'>
     <h2 class='display-title'>Seu método não foi feito para depender de <span class='accent-red'>achismo</span>.</h2>
     <p class='muted' style='text-align:center;max-width:760px;margin:0 auto'>A IA organiza sinais, contexto, risco e saída. Você decide com mais clareza e registra tudo para a próxima leitura ficar melhor.</p>
   </section>
@@ -1423,7 +1449,7 @@ def landing() -> str:
       <article class='story-step'>
         <div class='step-index'>Etapa 02</div>
         <h3>Quando entra ao vivo, a leitura fica operacional.</h3>
-        <p class='muted'>Pressão, escanteios, gols, cartões, momentum, odds e consenso de agentes aparecem em uma mesa pronta para decidir com calma.</p>
+        <p class='muted'>Pressão, escanteios, gols, cartões, momentum, odds e explicação aparecem em uma mesa pronta para decidir com calma.</p>
       </article>
       <article class='story-step'>
         <div class='step-index'>Etapa 03</div>
@@ -1432,8 +1458,8 @@ def landing() -> str:
       </article>
     </div>
   </section>
-  <section id='poderes' class='section big grid g3'>
-    <div class='card feature-card'>
+  <section id='scanner-ia' class='section big grid g3'>
+    <div class='card feature-card' id='cerebro-ia'>
       <div class='feature-tag'>IA integrada</div>
       <h3>Scanner que prioriza jogo vivo</h3>
       <p class='muted'>Acompanha placar, minuto, pressão, mercado, confiança e risco para destacar onde existe leitura operacional.</p>
@@ -1444,18 +1470,18 @@ def landing() -> str:
       <p class='muted'>Simula dinâmica do jogo, sugere saída por green, perda de edge ou preservação da banca e grava tudo no Supabase.</p>
     </div>
     <div class='card feature-card'>
-      <div class='feature-tag'>Fantasy Campeão</div>
-      <h3>Time montado por projeção</h3>
-      <p class='muted'>Cruza preço, posição, estatísticas e oportunidades disponíveis para entregar uma escalação pronta para revisar.</p>
+      <div class='feature-tag'>Cérebro IA</div>
+      <h3>Aprendizado visível e auditável</h3>
+      <p class='muted'>Mostra maturidade, fontes ativas, sinais, backtests, bloqueios de risco e recomendações sem inventar métrica.</p>
     </div>
     <div class='card feature-card'>
       <div class='feature-tag'>Telegram</div>
-      <h3>Alerta onde você acompanha</h3>
-      <p class='muted'>Receba avisos e resumos sem ficar preso ao painel, mantendo o histórico de sinais e decisões.</p>
+      <h3>Analista no canal do operador</h3>
+      <p class='muted'>Receba avisos e resumos sem ficar preso ao painel, mantendo o histórico de sinais e decisões rastreável.</p>
     </div>
     <div class='card feature-card'>
       <div class='feature-tag'>Memória IA</div>
-      <h3>Aprendizado com Green/Red</h3>
+      <h3>Aprendizado por resultado</h3>
       <p class='muted'>Cada resultado alimenta leitura futura por mercado, score, risco, confiança e comportamento da banca.</p>
     </div>
     <div class='card feature-card'>
@@ -1465,14 +1491,14 @@ def landing() -> str:
     </div>
   </section>
   <section id='research' class='section big'>
-    <h2 class='display-title'>Football Research Skill e plataforma global de inteligência.</h2>
-    <p class='muted' style='text-align:center;max-width:820px;margin:0 auto 18px'>A camada nova não substitui o que já funciona. Ela amplia: histórico, simulações, governança, agentes, RAG e explicabilidade ficam plugados sobre o ApexGol atual.</p>
+    <h2 class='display-title'>Research Skill e inteligência quantitativa esportiva.</h2>
+    <p class='muted' style='text-align:center;max-width:820px;margin:0 auto 18px'>A camada nova não substitui o que já funciona. Ela amplia histórico, simulações, governança, memória e explicabilidade sobre o ApexGol atual.</p>
     <div class='module-grid'>
       <article class='module-card'>
         <div class='module-head'>
           <div>
             <div class='feature-tag'>Pesquisa</div>
-            <h3>Football Analysis</h3>
+            <h3>Análise estatística</h3>
           </div>
           <span class='status-pill'><span class='status-dot'></span>pré-jogo</span>
         </div>
@@ -1487,7 +1513,7 @@ def landing() -> str:
         <div class='module-head'>
           <div>
             <div class='feature-tag'>Simulação</div>
-            <h3>Backtesting + Monte Carlo</h3>
+            <h3>Backtesting avançado</h3>
           </div>
           <span class='status-pill'><span class='status-dot'></span>risk first</span>
         </div>
@@ -1502,11 +1528,11 @@ def landing() -> str:
         <div class='module-head'>
           <div>
             <div class='feature-tag'>Orquestração</div>
-            <h3>Agent Arena + Governance</h3>
+            <h3>Governança + explicabilidade</h3>
           </div>
           <span class='status-pill'><span class='status-dot'></span>supervisão humana</span>
         </div>
-        <p class='muted'>Agentes especializados debatem contexto, risco, valor e qualidade de dados. Mudanças importantes ficam em rascunho até aprovação.</p>
+        <p class='muted'>Camadas especializadas avaliam contexto, risco, valor e qualidade de dados. Mudanças importantes ficam em rascunho até aprovação.</p>
         <ul class='module-list'>
           <li>Consensus engine com trust score</li>
           <li>Detecção de drift e anomalia</li>
@@ -1516,12 +1542,14 @@ def landing() -> str:
     </div>
   </section>
   <section class='section big'>
+    <h2 class='display-title'>Veja o ApexGol AI em operação</h2>
+    <p class='muted' style='text-align:center;max-width:760px;margin:0 auto 18px'>Cards visuais baseados nos módulos reais do sistema: Scanner ao Vivo, Cérebro IA, Backtesting e Telegram Analyst.</p>
     <div class='proof-wall'>
       <article class='preview-card'>
         <div class='preview-top'>
           <div style='display:flex;align-items:center;gap:10px'>
             <div class='window-dots'><span></span><span></span><span></span></div>
-            <strong>Live Center · Jogos do Dia</strong>
+            <strong>Scanner ao Vivo</strong>
           </div>
           <div class='status-pill'><span class='status-dot'></span>scanner vivo</div>
         </div>
@@ -1578,21 +1606,22 @@ def landing() -> str:
       </article>
       <div class='mini-proof-grid'>
         <article class='mini-proof'>
-          <div class='feature-tag'>Backtesting Lab</div>
+          <div class='feature-tag'>Backtesting</div>
           <h4>ROI, drawdown e curva de banca</h4>
           <p class='muted'>Antes de confiar numa regra, o sistema mede desempenho histórico, estabilidade e risco por mercado.</p>
+          <p class='muted'>Exemplo simulado no modo paper.</p>
           <div class='bar-rail'><span style='width:74%'></span></div>
         </article>
-        <article class='mini-proof'>
-          <div class='feature-tag'>Agent Arena</div>
-          <h4>Agentes com trust score</h4>
-          <p class='muted'>Stats, odds, risco, valor e explicabilidade debatem entre si antes de gerar uma decisão final.</p>
+        <article class='mini-proof' id='telegram-analyst'>
+          <div class='feature-tag'>Cérebro IA</div>
+          <h4>Maturidade e qualidade dos dados</h4>
+          <p class='muted'>A tela mostra fontes ativas, sinais, backtests, bloqueios e recomendações sem inventar métricas.</p>
           <div class='bar-rail'><span style='width:61%'></span></div>
         </article>
         <article class='mini-proof'>
-          <div class='feature-tag'>Monte Carlo</div>
-          <h4>Simulação de cenários extremos</h4>
-          <p class='muted'>A plataforma testa caminho de banca, risco de ruína e estabilidade antes de você confiar na série.</p>
+          <div class='feature-tag'>Telegram Analyst</div>
+          <h4>Resumo operacional direto</h4>
+          <p class='muted'>O operador recebe decisão, motivo, risco e checklist sem expor chaves ou automatizar apostas.</p>
           <div class='bar-rail'><span style='width:53%'></span></div>
         </article>
         <article class='mini-proof'>
@@ -1607,12 +1636,13 @@ def landing() -> str:
   <section class='section big'>
     <h2 class='display-title'>Escolha seu plano de operação</h2>
     <p class='muted' style='text-align:center;margin:0 auto 18px;max-width:680px'>Comece testando. Evolua quando precisar de mais memória, prioridade e estrutura comercial.</p>
+    <p class='muted' style='text-align:center;margin:-8px auto 18px;max-width:760px'><strong>O ApexGol AI é uma ferramenta estatística de apoio. Não garante lucro e não realiza apostas automáticas.</strong></p>
     <div class='plan-intel'>
       <div>
         <div class='feature-tag'>O que o cliente compra</div>
         <h3>IA por contexto, plano e histórico de operação.</h3>
-        <p class='muted'>Cada cliente recebe uma experiência própria dentro do mesmo motor: login, Telegram, preferências, banca, histórico Green/Red e simulações ficam ligados à conta dele. Assim a IA responde com base no que aquele operador usa e registra.</p>
-        <div class='plan-note'>No Pro, o cliente tem um agente lógico próprio. Não é preciso criar um servidor separado por pessoa: o isolamento acontece por usuário, memória e regras do plano.</div>
+        <p class='muted'>Cada cliente recebe uma experiência própria dentro do mesmo motor: login, Telegram, preferências, banca, histórico de decisões e simulações ficam ligados à conta dele. Assim a IA responde com base no que aquele operador usa e registra.</p>
+        <div class='plan-note'>No Pro, o cliente tem uma camada lógica própria. Não é preciso criar um servidor separado por pessoa: o isolamento acontece por usuário, memória e regras do plano.</div>
       </div>
       <div class='plan-scope-grid' aria-label='Resumo dos planos e inteligência artificial'>
         <div class='plan-scope'>
@@ -1622,7 +1652,7 @@ def landing() -> str:
         </div>
         <div class='plan-scope'>
           <div class='feature-tag'>Pro</div>
-          <strong>Agente com memória</strong>
+          <strong>IA com memória</strong>
           <p class='muted'>Contexto do cliente, simulações no Supabase, preferências de banca e aprendizado por resultado.</p>
         </div>
         <div class='plan-scope'>
@@ -1634,33 +1664,34 @@ def landing() -> str:
     </div>
     <div class='grid g3'>{''.join(plan_html)}</div>
   </section>
-  <section id='planos' class='section big cta-panel'>
+  <section class='section big cta-panel'>
     <div>
       <div class='feature-tag'>Pronto para crescer</div>
-      <h3>Comece no live center e evolua até um laboratório próprio de decisão.</h3>
-      <p class='muted'>Você não precisa esperar a estrutura perfeita para começar. O ApexGol já nasce com scanner, memória, Telegram, Fantasy e painéis operacionais. Quando quiser subir o nível, a camada de research, backtesting, agentes e governança já está na mesma base.</p>
+      <h3>Comece no scanner e evolua até um laboratório próprio de decisão.</h3>
+      <p class='muted'>Você não precisa esperar a estrutura perfeita para começar. O ApexGol já nasce com scanner, memória, Telegram, backtesting e painéis operacionais. Quando quiser subir o nível, a camada de research e governança já está na mesma base.</p>
+      <p class='muted'><strong>O ApexGol AI é uma ferramenta estatística de apoio. Não garante lucro e não realiza apostas automáticas.</strong></p>
       <div class='hero-actions'>
-        <a class='btn primary' href='/signup'>Criar conta</a>
+        <a class='btn primary' href='/signup'>Testar grátis por 7 dias</a>
         <a class='btn' href='/login'>Entrar no sistema</a>
       </div>
     </div>
     <div class='cta-proof'>
-      <div class='mini'><span class='muted'>Ao vivo</span><strong>Jogos do Dia</strong><div class='muted'>watchlist, odds, filtros e leitura por mercado</div></div>
-      <div class='mini'><span class='muted'>Pesquisa</span><strong>Football Research Skill</strong><div class='muted'>Poisson, EV, Kelly, histórico e revisão</div></div>
-      <div class='mini'><span class='muted'>Simulação</span><strong>Backtesting + Monte Carlo</strong><div class='muted'>curva de banca, drawdown e cenários</div></div>
+      <div class='mini'><span class='muted'>Ao vivo</span><strong>Scanner</strong><div class='muted'>watchlist, odds, filtros e leitura por mercado</div></div>
+      <div class='mini'><span class='muted'>Pesquisa</span><strong>Research Skill</strong><div class='muted'>Poisson, EV, Kelly, histórico e revisão</div></div>
+      <div class='mini'><span class='muted'>Simulação</span><strong>Backtesting avançado</strong><div class='muted'>curva de banca, drawdown e cenários</div></div>
       <div class='mini'><span class='muted'>Controle</span><strong>Governança</strong><div class='muted'>aprovação humana, logs e rollback</div></div>
     </div>
   </section>
   <section class='section big card'>
     <h3 class='title'>Aviso importante</h3>
-    <p class='muted'>{_esc(settings.product_name)} é uma plataforma de apoio estatístico e educacional. As sugestões de entrada são parâmetros de análise e não promessa de lucro. A decisão final é sempre do usuário, que assume integralmente a responsabilidade pelas operações realizadas.</p>
+    <p class='muted'>O {_esc(settings.product_name)} é uma ferramenta estatística de apoio. Não garante lucro e não realiza apostas automáticas. As sugestões de entrada são parâmetros de análise e não promessa de resultado. A decisão final é sempre do usuário, que assume integralmente a responsabilidade pelas operações realizadas.</p>
   </section>
 </main>
 """
     return _page_shell(
-        f"{settings.product_name} | Plataforma",
+        "APEXGOL AI | Central Quantitativa de Inteligência Esportiva",
         body,
-        description="ApexGol AI monitora futebol ao vivo, odds, Telegram e Fantasy Campeão para apoiar decisões racionais com gestão de risco.",
+        description="APEXGOL AI une scanner quantitativo, IA esportiva, odds, análise estatística, backtesting, risco e Telegram para apoiar decisões esportivas.",
         canonical_path="/",
     )
 
@@ -1814,15 +1845,17 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
         if avatar_url
         else f"<span id='profile-avatar-fallback'>{_esc(avatar_label)}</span>"
     )
+    # Product focus: legacy auxiliary routes remain available internally,
+    # but they are hidden from primary navigation to keep SaaS UX focused.
     body = f"""
-<header class='top'><div class='topin'><div class='brand'>Area do Cliente</div><nav class='nav nav-scroll'><a class='btn' href='/app/jogosdodia'>Jogos do Dia</a><a class='btn' href='/fantasy-ia'>Fantasy IA</a><a class='btn' href='/dashboard'>Dashboard Trade</a>{admin_link}<button class='btn red' onclick='logoutNow()'>Sair</button></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Area do Cliente</div><nav class='nav nav-scroll'><a class='btn' href='/dashboard'>Dashboard</a><a class='btn' href='/dashboard#scanner'>Scanner</a><a class='btn' href='/cerebro-ia'>Cérebro IA</a><a class='btn' href='/app/backtesting-lab'>Backtesting</a><a class='btn' href='#telegram'>Telegram</a><a class='btn' href='#perfil'>Configurações</a>{admin_link}<button class='btn red' onclick='logoutNow()'>Sair</button></nav></div></header>
 <main class='wrap'>
   <section class='grid g3'>
     <div class='card'><div class='muted'>Conta</div><div class='kpi'>{_esc(user.get('name'))}</div><div class='muted'>{_esc(user.get('email'))}</div></div>
     <div class='card'><div class='muted'>Plano atual</div><div class='kpi'>{_esc(str(user.get('plan', '-')).upper())}</div><div class='muted'>Status: {_esc(user.get('status'))}</div></div>
     <div class='card'><div class='muted'>Teste gratis restante</div><div class='kpi'>{trial_days} dias</div><div class='muted'>Proxima cobranca: {_esc(user.get('next_due_at') or '-')}</div></div>
   </section>
-  <section class='section card'>
+  <section class='section card' id='perfil'>
     <h3 class='title'>Meu perfil</h3>
     <div class='profile-row'>
       <div class='avatar' id='profile-avatar'>{avatar_block}</div>
@@ -1836,7 +1869,7 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
       </div>
     </div>
   </section>
-  <section class='section grid g2'>
+  <section class='section grid g2' id='telegram'>
     <div class='card'>
       <h3 class='title'>Pagamento e assinatura</h3>
       <label>Trocar plano</label>
@@ -1994,273 +2027,16 @@ function renderAiMemoryStatus(status) {
     return _page_shell("Portal do Cliente", body, script)
 
 
-@router.get("/fantasy-ia", response_class=HTMLResponse)
-def fantasy_ia_page(user: dict[str, Any] = Depends(_require_user)) -> str:
-    settings = _settings()
-    sample = """Flamengo x Palmeiras, clássico equilibrado, mando do Flamengo, jogo de muita finalização.
-Rossi, GOL, Flamengo, preço 8.5, proj 6.2, risco 35
-Léo Pereira, ZAG, Flamengo, preço 8.0, proj 5.8, risco 38
-Murilo, ZAG, Palmeiras, preço 7.2, proj 5.4, risco 42
-Ayrton Lucas, LAT, Flamengo, preço 9.0, proj 6.4, risco 45
-Piquerez, LAT, Palmeiras, preço 8.1, proj 5.9, risco 44
-Arrascaeta, MEI, Flamengo, preço 10.5, proj 7.4, risco 40
-Gerson, MEI, Flamengo, preço 9.8, proj 6.9, risco 42
-Raphael Veiga, MEI, Palmeiras, preço 8.6, proj 6.0, risco 48
-Pedro, ATA, Flamengo, preço 12.5, proj 8.2, risco 46
-Bruno Henrique, ATA, Flamengo, preço 10.8, proj 7.1, risco 50
-Rony, ATA, Palmeiras, preço 9.4, proj 6.5, risco 55"""
-    body = f"""
-<header class='top'><div class='topin'><div class='brand'>Fantasy IA</div><nav class='nav nav-scroll'><a class='btn' href='/app'>Area do Cliente</a><a class='btn' href='/app/jogosdodia'>Jogos do Dia</a><a class='btn' href='/dashboard'>Dashboard Trade</a></nav></div></header>
-<main class='wrap'>
-  <section class='section fantasy-board'>
-    <aside class='card'>
-      <h2 class='title'>Montador de escalação</h2>
-      <p class='muted'>Cole a descrição da sala, jogo e jogadores. Use linhas com nome, posição, time, preço, projeção e risco quando tiver.</p>
-      <a class='btn' href='https://fantasy.reidopitaco.com.br/fantasy?tab=dfs' target='_blank' rel='noopener'>Abrir Rei do Pitaco</a>
-      <label>URL da sala do Rei do Pitaco</label>
-      <input id='fantasy-room-url' type='text' placeholder='https://fantasy.reidopitaco.com.br/fantasy/dfs/lineup?roomId=...' />
-      <label>Orçamento</label>
-      <input id='fantasy-budget' type='number' min='40' max='300' value='100' />
-      <label>Descrição do jogo e pool</label>
-      <textarea id='fantasy-description' style='min-height:360px'>{_esc(sample)}</textarea>
-      <div style='display:flex;gap:10px;flex-wrap:wrap'>
-        <button class='btn primary' type='button' onclick='importFantasyRoomLineup()'>Ler sala e montar time</button>
-        <button class='btn primary' type='button' onclick='buildFantasyLineup()'>Montar melhor time</button>
-        <button class='btn' type='button' onclick='loadFantasyOpportunities(true)'>Atualizar oportunidades</button>
-      </div>
-      <div id='fantasy-note' class='notice muted'></div>
-    </aside>
-    <section>
-      <div class='grid g3'>
-        <div class='card'><div class='muted'>Formação</div><div id='fantasy-formation' class='kpi'>1-2-2-3-3</div></div>
-        <div class='card'><div class='muted'>Projeção</div><div id='fantasy-projection' class='kpi'>-</div></div>
-        <div class='card'><div class='muted'>Custo</div><div id='fantasy-cost' class='kpi'>-</div></div>
-      </div>
-      <div class='section card'>
-        <div style='display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap'>
-          <h3 class='title' style='margin:0'>Oportunidades ao vivo</h3>
-          <span id='fantasy-live-status' class='muted'>Sincronizando scanner...</span>
-        </div>
-        <div id='fantasy-live-opportunities' class='fantasy-opportunities'><div class='muted'>Carregando oportunidades...</div></div>
-      </div>
-      <div class='section card'>
-        <h3 class='title'>Time recomendado</h3>
-        <div id='fantasy-lineup' class='fantasy-list'><div class='muted'>Clique em montar para gerar a escalação.</div></div>
-      </div>
-      <div class='section card'>
-        <h3 class='title'>Time para finalizar no Rei do Pitaco</h3>
-        <div id='fantasy-pitaco-transfer' class='fantasy-list'><div class='muted'>Cole a URL da sala e clique em ler sala para gerar a lista de atletas.</div></div>
-      </div>
-      <div class='section card'>
-        <h3 class='title'>Leitura da IA</h3>
-        <ul id='fantasy-tips' class='muted'><li>A IA prioriza valor por preço, projeção e risco.</li></ul>
-      </div>
-    </section>
-  </section>
-</main>
-"""
-    extra = """
-<script>
-let lastAutoFantasyDescription = '';
-let userEditedFantasyDescription = false;
-function escapeHtml(value) {
-  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function fantasyPlayerRow(player) {
-  return `<div class="fantasy-player">
-    <div class="pos-pill">${player.position}</div>
-    <div><div class="player-name">${escapeHtml(player.name)}</div><div class="player-meta">${escapeHtml(player.team || '-')} · preço ${Number(player.price).toFixed(1)} · risco ${Number(player.risk || 0).toFixed(0)}</div></div>
-    <div class="score-box"><strong>${Number(player.projection).toFixed(1)}</strong><div class="player-meta">proj</div></div>
-  </div>`;
-}
-function fantasyImportedPlayerRow(player) {
-  return fantasyPlayerRow({
-    position: player.pos || player.position || '-',
-    name: player.name || '-',
-    team: player.team || '-',
-    price: Number(player.price || 0),
-    projection: Number(player.proj || player.projection || 0),
-    risk: Number(player.risk || 0)
-  });
-}
-function pitacoPlayersToDescription(playersText, roomUrl) {
-  const header = roomUrl ? `Sala Rei do Pitaco: ${roomUrl}` : 'Sala Rei do Pitaco importada.';
-  return `${header}\n${String(playersText || '').split('\\n').filter(Boolean).map(line => {
-    const parts = line.split(';').map(part => part.trim());
-    if (parts.length < 4) return line;
-    return `${parts[0]}, ${parts[1]}, ${parts[2] || '-'}, preço ${parts[3] || 0}, proj ${parts[4] || 0}, risco 35`;
-  }).join('\\n')}`;
-}
-function pitacoRoomId(value) {
-  const text = String(value || '');
-  const direct = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-  if (direct) return direct[0];
-  try {
-    const parsed = new URL(text);
-    return parsed.searchParams.get('roomId') || parsed.searchParams.get('roomid') || '';
-  } catch (error) {
-    return '';
-  }
-}
-function renderPitacoTransfer(players, roomUrl) {
-  const target = document.getElementById('fantasy-pitaco-transfer');
-  if (!target) return;
-  if (!players || !players.length) {
-    target.innerHTML = '<div class="muted">Nenhum atleta real da sala foi lido ainda.</div>';
-    return;
-  }
-  const ordered = players.map((player, index) => {
-    const pos = escapeHtml(player.pos || player.position || '-');
-    const name = escapeHtml(player.name || '-');
-    const team = escapeHtml(player.team || '-');
-    return `<div class="fantasy-player">
-      <div class="pos-pill">${pos}</div>
-      <div><div class="player-name">${index + 1}. ${name}</div><div class="player-meta">${team}</div></div>
-      <div class="score-box"><strong>${Number(player.proj || player.projection || 0).toFixed(1)}</strong><div class="player-meta">proj</div></div>
-    </div>`;
-  }).join('');
-  const copyText = players.map(player => `${player.pos || player.position || '-'} - ${player.name || '-'} (${player.team || '-'})`).join('\\n');
-  target.dataset.copyText = copyText;
-  target.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap">
-    <button class="btn primary" type="button" onclick="copyChampionTeam()">Copiar time campeão</button>
-    ${roomUrl ? `<a class="btn" href="${escapeHtml(roomUrl)}" target="_blank" rel="noopener">Abrir sala para finalizar</a>` : ''}
-  </div>${ordered}`;
-}
-async function copyChampionTeam() {
-  const target = document.getElementById('fantasy-pitaco-transfer');
-  const text = target?.dataset.copyText || '';
-  const note = document.getElementById('fantasy-note');
-  if (!text) {
-    if (note) note.textContent = 'Monte o time primeiro para copiar.';
-    return;
-  }
-  await navigator.clipboard.writeText(text);
-  if (note) note.textContent = 'Time copiado. Abra a sala e confira os atletas antes de finalizar.';
-}
-async function buildFantasyLineup() {
-  const note = document.getElementById('fantasy-note');
-  const lineup = document.getElementById('fantasy-lineup');
-  note.textContent = 'Analisando sala...';
-  const payload = {
-    budget: Number(document.getElementById('fantasy-budget').value || 100),
-    description: document.getElementById('fantasy-description').value
-  };
-  try {
-    const res = await fetch('/api/fantasy/lineup', {
-      method:'POST',
-      headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
-      body:JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (!res.ok) { note.textContent = data.detail || 'Falha ao montar escalação.'; return; }
-    document.getElementById('fantasy-formation').textContent = data.formation;
-    document.getElementById('fantasy-projection').textContent = Number(data.projection).toFixed(1);
-    document.getElementById('fantasy-cost').textContent = `${Number(data.total_price).toFixed(1)} / ${Number(data.budget).toFixed(1)}`;
-    lineup.innerHTML = data.lineup.map(fantasyPlayerRow).join('');
-    renderPitacoTransfer([], '');
-    document.getElementById('fantasy-tips').innerHTML = data.tips.map(t => `<li>${escapeHtml(t)}</li>`).join('');
-    note.textContent = data.note;
-  } catch (error) {
-    note.textContent = 'Não consegui conectar ao montador agora.';
-  }
-}
-async function importFantasyRoomLineup() {
-  const note = document.getElementById('fantasy-note');
-  const lineup = document.getElementById('fantasy-lineup');
-  const roomUrl = document.getElementById('fantasy-room-url').value.trim();
-  if (!roomUrl) {
-    note.textContent = 'Cole a URL da sala do Rei do Pitaco.';
-    return;
-  }
-  if (!pitacoRoomId(roomUrl)) {
-    note.textContent = 'Essa URL é a vitrine do Fantasy. Abra uma sala específica no Rei do Pitaco e cole a URL com roomId.';
-    return;
-  }
-  note.textContent = 'Lendo sala e montando time...';
-  lineup.innerHTML = '<div class="muted">Buscando pool da sala...</div>';
-  try {
-    const res = await fetch('/api/fantasy-room-import', {
-      method:'POST',
-      headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
-      body:JSON.stringify({
-        room_url: roomUrl,
-        formation: '4-3-3',
-        budget: Number(document.getElementById('fantasy-budget').value || 100),
-        players_text: '',
-        stats_text: ''
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Falha ao ler sala.');
-    if (data.players_text) {
-      document.getElementById('fantasy-description').value = pitacoPlayersToDescription(data.players_text, roomUrl);
-      lastAutoFantasyDescription = document.getElementById('fantasy-description').value;
-      userEditedFantasyDescription = false;
-    }
-    if (data.budget) document.getElementById('fantasy-budget').value = Number(data.budget).toFixed(1);
-    if (data.lineup && data.lineup.ok && Array.isArray(data.lineup.players)) {
-      document.getElementById('fantasy-formation').textContent = data.lineup.formation || '4-3-3';
-      document.getElementById('fantasy-projection').textContent = Number(data.lineup.projected_points || 0).toFixed(1);
-      document.getElementById('fantasy-cost').textContent = `${Number(data.lineup.used_budget || 0).toFixed(1)} / ${Number(data.lineup.budget || 0).toFixed(1)}`;
-      lineup.innerHTML = data.lineup.players.map(fantasyImportedPlayerRow).join('');
-      renderPitacoTransfer(data.lineup.players, roomUrl);
-      document.getElementById('fantasy-tips').innerHTML = '<li>Time montado com o pool real retornado pela sala.</li><li>Confira titulares e fechamento da rodada antes de finalizar.</li>';
-      note.textContent = data.lineup_message || 'Time montado no site. Agora você só decide se vai jogar.';
-      return;
-    }
-    if (data.players_text) {
-      note.textContent = 'Pool lido. Vou montar com o motor de descrição.';
-      await buildFantasyLineup();
-      return;
-    }
-    note.textContent = data.message || 'A sala abriu, mas não liberou o pool público. Abra logado e cole a grade de jogadores no campo.';
-    renderPitacoTransfer([], roomUrl);
-    lineup.innerHTML = data.html || '<div class="muted">Pool não disponível publicamente.</div>';
-  } catch (error) {
-    note.textContent = error.message;
-    lineup.innerHTML = '';
-  }
-}
-async function loadFantasyOpportunities(forceApply) {
-  const status = document.getElementById('fantasy-live-status');
-  const panel = document.getElementById('fantasy-live-opportunities');
-  const description = document.getElementById('fantasy-description');
-  if (status) status.textContent = 'Atualizando oportunidades...';
-  try {
-    const res = await fetch('/api/fantasy-live-opportunities', {cache:'no-store'});
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Falha ao atualizar oportunidades.');
-    if (panel) panel.innerHTML = data.html || '<div class="muted">Sem oportunidades ao vivo agora.</div>';
-    if (status) status.textContent = `${Number(data.count || 0)} oportunidades · ${data.updated_at || '-'}`;
-    const canApply = Boolean(data.description) && (forceApply || !userEditedFantasyDescription || description.value.trim() === lastAutoFantasyDescription.trim());
-    if (canApply) {
-      description.value = data.description;
-      lastAutoFantasyDescription = data.description;
-      userEditedFantasyDescription = false;
-      await buildFantasyLineup();
-    }
-  } catch (error) {
-    if (status) status.textContent = `Falha: ${error.message}`;
-  }
-}
-document.addEventListener('DOMContentLoaded', () => {
-  const description = document.getElementById('fantasy-description');
-  description.addEventListener('input', () => { userEditedFantasyDescription = description.value.trim() !== lastAutoFantasyDescription.trim(); });
-  loadFantasyOpportunities(true).then(() => {
-    if (!lastAutoFantasyDescription) buildFantasyLineup();
-  });
-  setInterval(() => loadFantasyOpportunities(false), 60000);
-});
-</script>
-"""
-    return _page_shell(f"Fantasy IA | {settings.product_name}", body, extra, canonical_path="/fantasy-ia")
-
+@router.get("/fantasy-ia", include_in_schema=False)
+def fantasy_ia_page(user: dict[str, Any] = Depends(_require_user)) -> RedirectResponse:
+    # Legacy visual module hidden to keep the ApexGol AI SaaS identity focused.
+    return RedirectResponse("/dashboard", status_code=303)
 
 @router.get("/admin/users", response_class=HTMLResponse)
 def admin_users(_: dict[str, Any] = Depends(_require_admin)) -> str:
     settings = _settings()
     body = """
-<header class='top'><div class='topin'><div class='brand'>Admin SaaS</div><nav class='nav'><a class='btn' href='/app'>Area cliente</a><a class='btn' href='/dashboard'>Dashboard Trade</a></nav></div></header>
+<header class='top'><div class='topin'><div class='brand'>Admin APEXGOL AI</div><nav class='nav'><a class='btn' href='/app'>Area cliente</a><a class='btn' href='/dashboard'>Dashboard</a></nav></div></header>
 <main class='wrap'>
   <section class='card'>
     <h2 class='title'>Clientes, cobranca e cancelamento</h2>
@@ -2286,6 +2062,28 @@ def admin_users(_: dict[str, Any] = Depends(_require_admin)) -> str:
       <label>Novo preco (R$)</label>
       <input id='price-value' type='number' step='0.01' min='1' value='97' />
       <button class='btn primary' onclick='savePlanPrice()'>Salvar preco global do plano</button>
+    </div>
+  </section>
+  <section class='section card'>
+    <h2 class='title'>Telegram de entradas aprovadas</h2>
+    <p class='muted'>Canal administrativo para receber somente sinais com decisão final aprovada. Aguardar, monitorar, sem dados e não entrar ficam bloqueados.</p>
+    <div id='approved-telegram-note' class='notice muted'></div>
+    <div class='grid g2'>
+      <div>
+        <label>Chat ID ou grupo Telegram</label>
+        <input id='approved-telegram-chat-id' type='text' placeholder='Ex: -1001234567890 ou 123456789' />
+      </div>
+      <div>
+        <label>Status</label>
+        <label style='display:inline-flex;gap:8px;align-items:center;min-height:42px;'>
+          <input id='approved-telegram-enabled' type='checkbox' />
+          Enviar apenas entradas aprovadas
+        </label>
+      </div>
+    </div>
+    <div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;'>
+      <button class='btn primary' onclick='saveApprovedTelegramConfig()'>Salvar Telegram de sinais</button>
+      <a class='btn' href='/app#telegram'>Ver configuração do cliente</a>
     </div>
   </section>
   <section class='section card'>
@@ -2411,6 +2209,41 @@ async function loadSystemConfig() {
   const current = (((data.pricing || {})[plan] || {}).price) || 97;
   document.getElementById('price-value').value = Number(current).toFixed(2);
 }
+async function loadApprovedTelegramConfig() {
+  const note = document.getElementById('approved-telegram-note');
+  const res = await fetch('/api/admin/telegram-approved-signals', {cache:'no-store'});
+  const data = await res.json();
+  if (!res.ok) {
+    note.textContent = data.detail || 'Falha ao carregar Telegram de entradas aprovadas.';
+    return;
+  }
+  document.getElementById('approved-telegram-chat-id').value = data.chat_id || '';
+  document.getElementById('approved-telegram-enabled').checked = Boolean(data.enabled);
+  note.textContent = data.enabled
+    ? 'Ativo: o bot enviará somente sinais com Entrada aprovada para este chat.'
+    : 'Inativo: nenhum envio administrativo de entradas aprovadas.';
+}
+async function saveApprovedTelegramConfig() {
+  const note = document.getElementById('approved-telegram-note');
+  note.textContent = 'Salvando configuração...';
+  const payload = {
+    chat_id: document.getElementById('approved-telegram-chat-id').value.trim(),
+    enabled: document.getElementById('approved-telegram-enabled').checked
+  };
+  const res = await fetch('/api/admin/telegram-approved-signals', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body:JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    note.textContent = data.detail || 'Falha ao salvar Telegram de entradas aprovadas.';
+    return;
+  }
+  note.textContent = data.message || 'Configuração salva.';
+  await loadApprovedTelegramConfig();
+  await loadSystemHealth();
+}
 async function savePlanPrice() {
   const note = document.getElementById('sys-note');
   note.textContent = 'Salvando preco...';
@@ -2466,6 +2299,7 @@ async function loadSystemHealth() {
   const integrations = data.integrations || {};
   const rows = [
     tokenRow('Telegram Bot', integrations.telegram_bot, `chat ids: ${state.chat_ids || 0}`),
+    tokenRow('Telegram entradas aprovadas', integrations.telegram_approved_signals, integrations.telegram_approved_signals && integrations.telegram_approved_signals.enabled ? 'somente Entrada aprovada' : 'inativo'),
     tokenRow('Gemini', integrations.gemini_key, integrations.gemini_model || '-'),
     tokenRow('Odds-API.io', integrations.odds_api_io_key, integrations.odds_api_io_bookmakers || 'bookmaker nao configurado'),
     tokenRow('Supabase', integrations.supabase_key, integrations.supabase_url || 'URL nao configurada'),
@@ -2508,6 +2342,7 @@ if (showCanceled) {
   showCanceled.addEventListener('change', loadUsers);
 }
 loadSystemConfig();
+loadApprovedTelegramConfig();
 loadUsers();
 loadSystemHealth();
 window.setInterval(loadSystemHealth, 60 * 1000);
@@ -2775,6 +2610,57 @@ def api_admin_system_config(_: dict[str, Any] = Depends(_require_admin)) -> JSON
     )
 
 
+@router.get("/api/admin/telegram-approved-signals")
+def api_admin_telegram_approved_signals(_: dict[str, Any] = Depends(_require_admin)) -> JSONResponse:
+    settings = _settings()
+    store = _portal_store(settings)
+    config = store.approved_signal_telegram_config()
+    return JSONResponse(
+        {
+            "ok": True,
+            "enabled": bool(config.get("enabled")),
+            "chat_id": config.get("chat_id") or "",
+            "updated_at": config.get("updated_at") or "",
+            "telegram_bot_configured": bool(settings.telegram_bot_token),
+            "policy": "Somente sinais com decisão final Entrada aprovada são enviados.",
+        }
+    )
+
+
+@router.post("/api/admin/telegram-approved-signals")
+def api_admin_telegram_approved_signals_update(
+    request: Request,
+    payload: AdminTelegramApprovedPayload,
+    _: dict[str, Any] = Depends(_require_admin),
+) -> JSONResponse:
+    settings = _settings()
+    _assert_same_origin(request, settings)
+    store = _portal_store(settings)
+    chat_id = _clean_telegram_chat_ids(payload.chat_id)
+    enabled = bool(payload.enabled)
+    if enabled and not chat_id:
+        raise HTTPException(status_code=400, detail="Informe o Chat ID antes de ativar.")
+    store.set_system_settings(
+        {
+            "telegram_approved_signals_enabled": "1" if enabled else "0",
+            "telegram_approved_signals_chat_id": chat_id,
+            "telegram_approved_signals_updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "enabled": enabled,
+            "chat_id": chat_id,
+            "message": (
+                "Telegram de entradas aprovadas ativado."
+                if enabled
+                else "Telegram de entradas aprovadas desativado."
+            ),
+        }
+    )
+
+
 @router.get("/api/admin/system-health")
 def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSONResponse:
     settings = _settings()
@@ -2794,6 +2680,11 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
     integrations = {
         "payment_gateway": settings.payment_gateway,
         "telegram_bot": _mask_secret(settings.telegram_bot_token),
+        "telegram_approved_signals": {
+            "configured": bool(store.approved_signal_telegram_chat_ids()),
+            "preview": store.approved_signal_telegram_config().get("chat_id") or "nao configurado",
+            "enabled": bool(store.approved_signal_telegram_config().get("enabled")),
+        },
         "gemini_key": _mask_secret(settings.gemini_api_key),
         "gemini_model": settings.gemini_model,
         "odds_api_io_key": _mask_secret(settings.odds_api_io_key),

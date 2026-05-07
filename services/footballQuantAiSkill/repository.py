@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -17,7 +17,13 @@ def _now_iso() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=_json_default)
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -201,7 +207,11 @@ class FootballResearchRepository:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     external_id TEXT NOT NULL,
+                    external_fixture_id TEXT,
+                    source_provider TEXT,
+                    league_id TEXT,
                     league TEXT NOT NULL,
+                    league_name TEXT,
                     country TEXT,
                     season INTEGER,
                     match_date TEXT NOT NULL,
@@ -212,6 +222,13 @@ class FootballResearchRepository:
                     away_goals INTEGER,
                     source TEXT NOT NULL,
                     raw_json TEXT,
+                    normalized_payload TEXT,
+                    data_quality_score INTEGER NOT NULL DEFAULT 0,
+                    usable_for_training INTEGER NOT NULL DEFAULT 0,
+                    duplicate_key TEXT,
+                    temporal_split TEXT,
+                    import_batch_id TEXT,
+                    imported_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(external_id, source)
@@ -230,6 +247,10 @@ class FootballResearchRepository:
                     under_odd REAL,
                     bookmaker TEXT,
                     source TEXT NOT NULL,
+                    odds_phase TEXT NOT NULL DEFAULT 'pregame',
+                    is_real INTEGER NOT NULL DEFAULT 1,
+                    raw_json TEXT,
+                    imported_at TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS historical_stats (
@@ -254,9 +275,64 @@ class FootballResearchRepository:
                     attacks_away INTEGER,
                     xg_home REAL,
                     xg_away REAL,
+                    raw_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(historical_match_id)
+                );
+                CREATE TABLE IF NOT EXISTS historical_features (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    match_id INTEGER NOT NULL,
+                    feature_set_version TEXT NOT NULL,
+                    temporal_split TEXT,
+                    home_recent_form_5 REAL,
+                    away_recent_form_5 REAL,
+                    home_goals_avg_5 REAL,
+                    away_goals_avg_5 REAL,
+                    home_conceded_avg_5 REAL,
+                    away_conceded_avg_5 REAL,
+                    home_xg_avg_5 REAL,
+                    away_xg_avg_5 REAL,
+                    home_strength REAL,
+                    away_strength REAL,
+                    market_implied_probability REAL,
+                    closing_line_value REAL,
+                    data_quality_score INTEGER NOT NULL DEFAULT 0,
+                    usable_for_training INTEGER NOT NULL DEFAULT 0,
+                    context_match_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(match_id, feature_set_version)
+                );
+                CREATE TABLE IF NOT EXISTS league_reliability_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    league TEXT NOT NULL,
+                    season INTEGER,
+                    match_count INTEGER NOT NULL DEFAULT 0,
+                    trainable_count INTEGER NOT NULL DEFAULT 0,
+                    odds_count INTEGER NOT NULL DEFAULT 0,
+                    stats_count INTEGER NOT NULL DEFAULT 0,
+                    avg_data_quality REAL NOT NULL DEFAULT 0,
+                    roi_simulated REAL NOT NULL DEFAULT 0,
+                    drawdown REAL NOT NULL DEFAULT 0,
+                    stability_score REAL NOT NULL DEFAULT 0,
+                    league_reliability_score REAL NOT NULL DEFAULT 0,
+                    classification TEXT NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    calculated_at TEXT NOT NULL,
+                    UNIQUE(league, season)
+                );
+                CREATE TABLE IF NOT EXISTS historical_import_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_key TEXT NOT NULL UNIQUE,
+                    source_provider TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    imported_matches INTEGER NOT NULL DEFAULT 0,
+                    duplicates_blocked INTEGER NOT NULL DEFAULT 0,
+                    errors_count INTEGER NOT NULL DEFAULT 0,
+                    payload_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS simulation_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -374,19 +450,180 @@ class FootballResearchRepository:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS historical_corners (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    historical_match_id INTEGER,
+                    external_fixture_id TEXT,
+                    source_provider TEXT NOT NULL,
+                    period TEXT NOT NULL DEFAULT 'FT',
+                    corners_home INTEGER,
+                    corners_away INTEGER,
+                    corners_total INTEGER,
+                    line TEXT,
+                    over_odd REAL,
+                    under_odd REAL,
+                    bookmaker TEXT,
+                    is_real INTEGER NOT NULL DEFAULT 1,
+                    raw_json TEXT,
+                    imported_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS historical_cards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    historical_match_id INTEGER,
+                    external_fixture_id TEXT,
+                    source_provider TEXT NOT NULL,
+                    period TEXT NOT NULL DEFAULT 'FT',
+                    yellow_home INTEGER,
+                    yellow_away INTEGER,
+                    red_home INTEGER,
+                    red_away INTEGER,
+                    cards_total REAL,
+                    line TEXT,
+                    over_odd REAL,
+                    under_odd REAL,
+                    bookmaker TEXT,
+                    referee_name TEXT,
+                    is_real INTEGER NOT NULL DEFAULT 1,
+                    raw_json TEXT,
+                    imported_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS historical_asian_lines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    historical_match_id INTEGER,
+                    external_fixture_id TEXT,
+                    source_provider TEXT NOT NULL,
+                    market_type TEXT NOT NULL,
+                    period TEXT NOT NULL DEFAULT 'FT',
+                    line TEXT,
+                    home_odd REAL,
+                    away_odd REAL,
+                    over_odd REAL,
+                    under_odd REAL,
+                    bookmaker TEXT,
+                    is_real INTEGER NOT NULL DEFAULT 1,
+                    raw_json TEXT,
+                    imported_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS market_pressure_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    match_id TEXT NOT NULL,
+                    source_provider TEXT,
+                    captured_at TEXT NOT NULL,
+                    minute INTEGER,
+                    pressure_home REAL,
+                    pressure_away REAL,
+                    momentum_score REAL,
+                    territorial_dominance TEXT,
+                    shots_on_home INTEGER,
+                    shots_on_away INTEGER,
+                    dangerous_attacks_home INTEGER,
+                    dangerous_attacks_away INTEGER,
+                    corners_home INTEGER,
+                    corners_away INTEGER,
+                    raw_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS referee_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    referee_name TEXT NOT NULL,
+                    league TEXT,
+                    country TEXT,
+                    matches_count INTEGER NOT NULL DEFAULT 0,
+                    cards_avg REAL,
+                    yellow_avg REAL,
+                    red_avg REAL,
+                    fouls_avg REAL,
+                    cards_ht_avg REAL,
+                    cards_st_avg REAL,
+                    aggression_index REAL,
+                    source_provider TEXT,
+                    raw_json TEXT,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(referee_name, league, country)
+                );
+                CREATE TABLE IF NOT EXISTS live_market_movements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    match_id TEXT NOT NULL,
+                    source_provider TEXT NOT NULL,
+                    market_type TEXT NOT NULL,
+                    selection TEXT,
+                    line TEXT,
+                    period TEXT NOT NULL DEFAULT 'FT',
+                    odd REAL,
+                    previous_odd REAL,
+                    movement REAL,
+                    steam_detected INTEGER NOT NULL DEFAULT 0,
+                    liquidity_status TEXT,
+                    raw_json TEXT,
+                    captured_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
 
                 CREATE INDEX IF NOT EXISTS idx_matches_league_season_date ON matches(league, season, match_date);
                 CREATE INDEX IF NOT EXISTS idx_odds_market_created ON odds(market, created_at);
                 CREATE INDEX IF NOT EXISTS idx_predictions_created ON predictions(created_at);
                 CREATE INDEX IF NOT EXISTS idx_hist_matches_league_season_date ON historical_matches(league, season, match_date);
                 CREATE INDEX IF NOT EXISTS idx_hist_odds_market ON historical_odds(market, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_hist_features_match_version ON historical_features(match_id, feature_set_version);
+                CREATE INDEX IF NOT EXISTS idx_league_reliability_score ON league_reliability_scores(league_reliability_score, classification);
                 CREATE INDEX IF NOT EXISTS idx_simulation_results_run ON simulation_results(simulation_run_id);
                 CREATE INDEX IF NOT EXISTS idx_model_performance_version ON model_performance(model_version_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_strategy_suggestions_status ON strategy_suggestions(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc ON rag_chunks(document_id, chunk_index);
                 CREATE INDEX IF NOT EXISTS idx_research_logs_component ON football_research_logs(component, created_at);
+                CREATE INDEX IF NOT EXISTS idx_historical_corners_match ON historical_corners(historical_match_id, period);
+                CREATE INDEX IF NOT EXISTS idx_historical_cards_match ON historical_cards(historical_match_id, period);
+                CREATE INDEX IF NOT EXISTS idx_historical_asian_match ON historical_asian_lines(historical_match_id, market_type, period);
+                CREATE INDEX IF NOT EXISTS idx_market_pressure_match_time ON market_pressure_snapshots(match_id, captured_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_referee_profiles_league ON referee_profiles(league, referee_name);
+                CREATE INDEX IF NOT EXISTS idx_live_market_movements_match ON live_market_movements(match_id, market_type, captured_at DESC);
                 """
             )
+            self._ensure_column(conn, "historical_matches", "external_fixture_id", "TEXT")
+            self._ensure_column(conn, "historical_matches", "source_provider", "TEXT")
+            self._ensure_column(conn, "historical_matches", "league_id", "TEXT")
+            self._ensure_column(conn, "historical_matches", "league_name", "TEXT")
+            self._ensure_column(conn, "historical_matches", "normalized_payload", "TEXT")
+            self._ensure_column(conn, "historical_matches", "data_quality_score", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "historical_matches", "usable_for_training", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "historical_matches", "duplicate_key", "TEXT")
+            self._ensure_column(conn, "historical_matches", "temporal_split", "TEXT")
+            self._ensure_column(conn, "historical_matches", "import_batch_id", "TEXT")
+            self._ensure_column(conn, "historical_matches", "imported_at", "TEXT")
+            self._ensure_column(conn, "historical_odds", "odds_phase", "TEXT NOT NULL DEFAULT 'pregame'")
+            self._ensure_column(conn, "historical_odds", "is_real", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(conn, "historical_odds", "raw_json", "TEXT")
+            self._ensure_column(conn, "historical_odds", "imported_at", "TEXT")
+            self._ensure_column(conn, "historical_stats", "raw_json", "TEXT")
+            conn.executescript(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_hist_matches_source_fixture
+                    ON historical_matches(source_provider, external_fixture_id)
+                    WHERE source_provider IS NOT NULL AND external_fixture_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_hist_matches_duplicate_key
+                    ON historical_matches(duplicate_key)
+                    WHERE duplicate_key IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_hist_matches_quality
+                    ON historical_matches(data_quality_score, usable_for_training);
+                CREATE INDEX IF NOT EXISTS idx_hist_matches_split
+                    ON historical_matches(temporal_split, match_date);
+                """
+            )
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def log(self, component: str, message: str, *, level: str = "info", payload: dict[str, Any] | None = None, user_id: int | None = None) -> None:
         with self.connect() as conn:
@@ -461,6 +698,17 @@ class FootballResearchRepository:
         with self.connect() as conn:
             for item in matches:
                 payload = asdict(item) if is_dataclass(item) else dict(item)
+                normalized_payload = _json(payload)
+                data_quality_score = _historical_data_quality(payload)
+                duplicate_key = _historical_duplicate_key(
+                    source=str(item.source or source_name),
+                    external_id=str(item.external_id or ""),
+                    league=str(item.league or ""),
+                    season=item.season,
+                    match_date=item.match_date.isoformat(),
+                    home_team=str(item.home_team or ""),
+                    away_team=str(item.away_team or ""),
+                )
                 conn.execute(
                     """
                     INSERT INTO raw_football_imports (user_id, source_name, external_ref, payload_json, imported_at)
@@ -478,11 +726,17 @@ class FootballResearchRepository:
                 conn.execute(
                     """
                     INSERT INTO historical_matches (
-                        user_id, external_id, league, country, season, match_date, home_team, away_team, status,
-                        home_goals, away_goals, source, raw_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        user_id, external_id, external_fixture_id, source_provider, league_id, league, league_name,
+                        country, season, match_date, home_team, away_team, status, home_goals, away_goals,
+                        source, raw_json, normalized_payload, data_quality_score, usable_for_training,
+                        duplicate_key, imported_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(external_id, source) DO UPDATE SET
+                        external_fixture_id=excluded.external_fixture_id,
+                        source_provider=excluded.source_provider,
+                        league_id=excluded.league_id,
                         league=excluded.league,
+                        league_name=excluded.league_name,
                         country=excluded.country,
                         season=excluded.season,
                         match_date=excluded.match_date,
@@ -492,11 +746,19 @@ class FootballResearchRepository:
                         home_goals=excluded.home_goals,
                         away_goals=excluded.away_goals,
                         raw_json=excluded.raw_json,
+                        normalized_payload=excluded.normalized_payload,
+                        data_quality_score=excluded.data_quality_score,
+                        usable_for_training=excluded.usable_for_training,
+                        duplicate_key=excluded.duplicate_key,
                         updated_at=excluded.updated_at
                     """,
                     (
                         user_id,
                         item.external_id,
+                        item.external_id,
+                        item.source or source_name,
+                        str((item.raw_payload or {}).get("league", {}).get("id") or "") or None,
+                        item.league,
                         item.league,
                         item.country,
                         item.season,
@@ -508,6 +770,11 @@ class FootballResearchRepository:
                         item.away_goals,
                         item.source,
                         _json(item.raw_payload or payload),
+                        normalized_payload,
+                        data_quality_score,
+                        1 if data_quality_score >= 70 else 0,
+                        duplicate_key,
+                        now,
                         now,
                         now,
                     ),
@@ -525,8 +792,8 @@ class FootballResearchRepository:
                             user_id, historical_match_id, possession_home, possession_away, shots_home, shots_away,
                             shots_on_home, shots_on_away, corners_home, corners_away, yellow_home, yellow_away,
                             red_home, red_away, dangerous_attacks_home, dangerous_attacks_away, attacks_home, attacks_away,
-                            xg_home, xg_away, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            xg_home, xg_away, raw_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(historical_match_id) DO UPDATE SET
                             possession_home=excluded.possession_home,
                             possession_away=excluded.possession_away,
@@ -546,6 +813,7 @@ class FootballResearchRepository:
                             attacks_away=excluded.attacks_away,
                             xg_home=excluded.xg_home,
                             xg_away=excluded.xg_away,
+                            raw_json=excluded.raw_json,
                             updated_at=excluded.updated_at
                         """,
                         (
@@ -569,6 +837,7 @@ class FootballResearchRepository:
                             stats.get("attacks_away"),
                             stats.get("xg_home"),
                             stats.get("xg_away"),
+                            _json(stats),
                             now,
                             now,
                         ),
@@ -914,12 +1183,21 @@ class FootballResearchRepository:
             "historical_matches",
             "historical_stats",
             "historical_odds",
+            "historical_features",
+            "league_reliability_scores",
+            "historical_import_batches",
             "predictions",
             "simulation_runs",
             "simulation_results",
             "strategy_suggestions",
             "rag_documents",
             "rag_chunks",
+            "historical_corners",
+            "historical_cards",
+            "historical_asian_lines",
+            "market_pressure_snapshots",
+            "referee_profiles",
+            "live_market_movements",
             "football_research_logs",
         ]
         counts: dict[str, int] = {}
@@ -1018,3 +1296,40 @@ def _ev_band(ev: float) -> str:
         return "moderado"
     return "alto"
 
+
+def _historical_data_quality(payload: dict[str, Any]) -> int:
+    score = 0
+    status = str(payload.get("status") or "").upper()
+    if status in {"FT", "AET", "PEN", "FINISHED"} and payload.get("home_goals") is not None and payload.get("away_goals") is not None:
+        score += 25
+    odds = payload.get("odds") or []
+    if isinstance(odds, list) and any(str(item.get("source") or "").lower().find("mock") < 0 for item in odds if isinstance(item, dict)):
+        score += 25
+    stats = payload.get("stats") or {}
+    if isinstance(stats, dict) and any(value not in (None, "") for value in stats.values()):
+        score += 20
+    if payload.get("league") and payload.get("home_team") and payload.get("away_team"):
+        score += 15
+    if payload.get("external_id") or (payload.get("league") and payload.get("match_date") and payload.get("home_team") and payload.get("away_team")):
+        score += 15
+    return min(100, score)
+
+
+def _historical_duplicate_key(
+    *,
+    source: str,
+    external_id: str,
+    league: str,
+    season: int | None,
+    match_date: str,
+    home_team: str,
+    away_team: str,
+) -> str:
+    if external_id:
+        return f"{source}:{external_id}".lower()
+    parts = [source, league, str(season or ""), match_date[:19], home_team, away_team]
+    return ":".join(_normalize_key_part(part) for part in parts)
+
+
+def _normalize_key_part(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())

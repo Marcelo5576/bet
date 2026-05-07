@@ -28,9 +28,12 @@ from services.footballQuantAiSkill.data_sources.api_football_provider import (
     get_shared_api_football_provider,
 )
 from src.config import Settings, load_settings
+from src.ai_brain_router import router as ai_brain_router
+from src.cache import get_runtime_cache
 from src.decision_log import DecisionLogStore
 from src.football_quant_router import router as football_quant_router
 from src.global_ai_router import router as global_ai_router
+from src.markets_router import router as markets_router
 from src.integrations.supabase import SupabaseSink
 from src.intelligence.football_brain import get_football_brain
 from src.intelligence.learning import filtered_backtest, summarize_history_with_simulation
@@ -50,6 +53,8 @@ from src.main import (
 from src.portal import PortalStore, read_session_token
 from src.providers.base import provider_label
 from src.portal_web import router as portal_router
+from src.rate_limiter import get_provider_limiter
+from src.request_queue_service import get_request_queue_service
 from src.storage import StateStore
 from src.usage_metrics import UsageTracker
 
@@ -57,6 +62,8 @@ app = FastAPI(title="BetSignal Cloud Dashboard")
 app.include_router(portal_router)
 app.include_router(football_quant_router)
 app.include_router(global_ai_router)
+app.include_router(ai_brain_router)
+app.include_router(markets_router)
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -776,6 +783,7 @@ def dashboard(request: Request) -> str:
       justify-content: center;
       min-height: 40px;
       padding: 0 12px;
+      text-decoration: none;
       transition: transform .16s ease, border-color .16s ease;
       white-space: nowrap;
     }}
@@ -1061,6 +1069,20 @@ def dashboard(request: Request) -> str:
     .decision-check.neutral {{
       border-color: rgba(148,163,184,.42);
       color: #d9e2ec;
+    }}
+    .mini-badge {{
+      border: 1px solid rgba(148,163,184,.35);
+      border-radius: 999px;
+      display: inline-flex;
+      font-size: 10px;
+      font-weight: 800;
+      margin-top: 5px;
+      padding: 3px 7px;
+      text-transform: uppercase;
+    }}
+    .mini-badge.blocked {{
+      border-color: rgba(246,70,93,.45);
+      color: #ffd5dc;
     }}
     .decision-highlight {{
       background: linear-gradient(180deg, rgba(17,23,31,.98), rgba(11,15,21,.98));
@@ -1457,6 +1479,8 @@ def dashboard(request: Request) -> str:
     .menu-card-icon.fantasy::after {{ content: "★"; color: #ffd46e; }}
     .menu-card-icon.wallet {{ background: rgba(59, 130, 246, .14); }}
     .menu-card-icon.wallet::after {{ content: "◉"; color: #94c4ff; }}
+    .menu-card-icon.brain {{ background: rgba(34, 211, 238, .14); }}
+    .menu-card-icon.brain::after {{ content: "∞"; color: #67e8f9; }}
     .menu-card-icon.history {{ background: rgba(239, 68, 68, .14); }}
     .menu-card-icon.history::after {{ content: "↺"; color: #ffb0b0; }}
     .menu-card-copy {{
@@ -1547,6 +1571,30 @@ def dashboard(request: Request) -> str:
       flex: 0 0 190px;
     }}
     .mini {{ background: var(--mini-bg); border: 1px solid var(--line); border-radius: 4px; padding: 9px; }}
+    .odds-debug-panel {{
+      background: rgba(8,13,19,.82);
+      border: 1px solid #2d4154;
+      border-radius: 10px;
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+      padding: 12px;
+    }}
+    .odds-debug-grid {{
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }}
+    .odds-debug-card {{
+      background: rgba(255,255,255,.03);
+      border: 1px solid #30465c;
+      border-radius: 8px;
+      padding: 10px;
+    }}
+    .odds-debug-card strong {{
+      display: block;
+      margin-bottom: 5px;
+    }}
     .table-wrap {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }}
     table {{ width: 100%; border-collapse: collapse; background: var(--panel); overflow: hidden; }}
     th, td {{ padding: 7px 8px; border-bottom: 1px solid #242a33; text-align: left; font-size: 12px; vertical-align: top; font-variant-numeric: tabular-nums; }}
@@ -1693,6 +1741,37 @@ def dashboard(request: Request) -> str:
       padding: 0 12px;
       white-space: nowrap;
     }}
+    .decision-legend {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      margin-top: 12px;
+    }}
+    .decision-legend-item {{
+      background: rgba(255,255,255,.025);
+      border: 1px solid #2e4357;
+      border-radius: 12px;
+      display: grid;
+      gap: 5px;
+      min-height: 84px;
+      padding: 11px;
+    }}
+    .decision-legend-item strong {{
+      color: #f3f8fb;
+      font-size: 12px;
+      letter-spacing: .3px;
+      text-transform: uppercase;
+    }}
+    .decision-legend-item span {{
+      color: #b9c9d7;
+      font-size: 11px;
+      line-height: 1.35;
+    }}
+    .decision-legend-item.enter {{ border-color: rgba(14,203,129,.38); }}
+    .decision-legend-item.wait {{ border-color: rgba(252,213,53,.38); }}
+    .decision-legend-item.monitor {{ border-color: rgba(91,140,255,.38); }}
+    .decision-legend-item.exit {{ border-color: rgba(246,70,93,.38); }}
+    .decision-legend-item.hold {{ border-color: rgba(148,163,184,.34); }}
     .scan-toolbar {{
       align-items: center;
       border-top: 1px solid var(--scan-toolbar-border);
@@ -1813,6 +1892,44 @@ def dashboard(request: Request) -> str:
       color: #d6e3ed;
       font-size: 12px;
       line-height: 1.4;
+    }}
+    .decision-expander {{
+      background: rgba(255,255,255,.025);
+      border: 1px solid #30465c;
+      border-radius: 14px;
+      margin-bottom: 14px;
+      overflow: hidden;
+    }}
+    .decision-expander summary {{
+      color: #f3f8fb;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 800;
+      list-style: none;
+      padding: 12px 14px;
+    }}
+    .decision-expander summary::-webkit-details-marker {{ display: none; }}
+    .decision-expander summary::after {{
+      color: #9fb2c3;
+      content: "abrir";
+      float: right;
+      font-size: 10px;
+      letter-spacing: .7px;
+      text-transform: uppercase;
+    }}
+    .decision-expander[open] summary::after {{ content: "fechar"; }}
+    .decision-expander-body {{
+      border-top: 1px solid #30465c;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      padding: 12px 14px 14px;
+    }}
+    .decision-expander-body .mini {{
+      min-width: 0;
+    }}
+    .decision-expander-full {{
+      grid-column: 1 / -1;
     }}
     .market-tape {{
       align-items: center;
@@ -2410,12 +2527,21 @@ def dashboard(request: Request) -> str:
       .scanner-grid > .table-wrap {{ max-height: none; overflow: auto; }}
       .stats-panel {{ max-height: none; min-height: 360px; position: static; }}
       .scanner-summary-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+      .decision-legend {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .decision-highlight-grid,
       .decision-detail-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .decision-detail-columns {{ grid-template-columns: 1fr; }}
     }}
     @media (max-width: 980px) {{
-      .app-shell {{ grid-template-columns: 1fr; }}
+      .app-shell {{
+        grid-template-columns: minmax(0, 1fr);
+        max-width: 100vw;
+        overflow: hidden;
+      }}
+      .app-shell > main {{
+        min-width: 0;
+        width: 100%;
+      }}
       .sidebar {{ display: none; }}
       .mobile-nav {{ display: flex; }}
       .topbar-actions,
@@ -2439,6 +2565,8 @@ def dashboard(request: Request) -> str:
       .dashboard-feed-metrics,
       .decision-highlight-grid,
       .decision-detail-grid,
+      .decision-expander-body,
+      .decision-legend,
       .scanner-summary-grid {{
         grid-template-columns: 1fr;
       }}
@@ -2460,7 +2588,16 @@ def dashboard(request: Request) -> str:
       .history-table th, .history-table td {{ width: auto; min-width: 0; }}
       .grid {{ grid-template-columns: 1fr 1fr; }}
       .live-metrics {{ grid-template-columns: 1fr; }}
-      .active-line {{ gap: 8px; }}
+      .active-line {{
+        display: grid;
+        gap: 8px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        overflow: visible;
+      }}
+      .active-line .mini {{
+        flex: none;
+        min-width: 0;
+      }}
       .table-wrap {{ border: 0; background: transparent; overflow: visible; }}
       table.responsive {{ display: block; background: transparent; border: 0; }}
       table.responsive thead {{ display: none; }}
@@ -2505,6 +2642,14 @@ def dashboard(request: Request) -> str:
         font-size: 11px;
         padding: 7px 9px;
       }}
+      .fab-main {{
+        height: 46px;
+        min-width: 46px;
+        width: 46px;
+      }}
+      .fab-main-text {{
+        display: none;
+      }}
       .menu-utility-row,
       .menu-learning-grid {{
         grid-template-columns: 1fr;
@@ -2514,15 +2659,63 @@ def dashboard(request: Request) -> str:
       .grid {{
         display: grid;
         gap: 8px;
-        grid-auto-columns: minmax(168px, 1fr);
-        grid-auto-flow: column;
-        grid-template-columns: none;
-        overflow-x: auto;
+        grid-auto-columns: auto;
+        grid-auto-flow: row;
+        grid-template-columns: 1fr;
+        overflow-x: visible;
         padding-bottom: 4px;
       }}
       .ticker {{ padding: 8px 12px; }}
       .topbar {{ align-items: flex-start; flex-direction: column; gap: 10px; }}
+      .topbar-left,
+      .brand-line {{
+        width: 100%;
+      }}
+      .brand-line h1 {{
+        font-size: 18px;
+        overflow-wrap: anywhere;
+      }}
+      .topbar-pill {{
+        min-width: 0;
+        width: 100%;
+      }}
+      .dashboard-live-shell,
+      .dashboard-live-toolbar,
+      .dashboard-live-stage,
+      .dashboard-feed-panel,
+      .dashboard-feature-panel {{
+        min-width: 0;
+        width: 100%;
+      }}
+      .dashboard-live-toolbar {{
+        gap: 10px;
+        padding: 12px;
+      }}
+      .dashboard-tabset,
+      .dashboard-toolbar-actions {{
+        display: grid;
+        grid-template-columns: 1fr;
+      }}
+      .dashboard-view-btn,
+      .dashboard-action-btn {{
+        justify-content: center;
+        min-width: 0;
+        width: 100%;
+        white-space: normal;
+      }}
+      .dashboard-search {{
+        border-radius: 12px;
+        width: 100%;
+      }}
+      .dashboard-search input {{
+        min-width: 0;
+        width: 100%;
+      }}
       .dashboard-counter-strip {{ grid-template-columns: 1fr; }}
+      .dashboard-counter {{
+        min-width: 0;
+        width: 100%;
+      }}
       .dashboard-feed-scoreboard {{ grid-template-columns: 1fr; }}
       .dashboard-feed-team.away,
       .dashboard-feed-team {{ justify-items: start; text-align: left; }}
@@ -2541,7 +2734,51 @@ def dashboard(request: Request) -> str:
       .bankroll-grid, .bankroll-form {{ grid-template-columns: 1fr; }}
       .bankroll-form .wide {{ grid-column: auto; }}
       .mobile-nav {{ top: 116px; padding-inline: 12px; }}
-      table.responsive td {{ grid-template-columns: 78px minmax(0, 1fr); }}
+      .active-line {{
+        grid-template-columns: 1fr;
+      }}
+      .criteria-bar {{
+        display: grid;
+        grid-template-columns: 1fr;
+      }}
+      .criteria-chip,
+      .decision-legend-item,
+      .decision-count-card {{
+        min-width: 0;
+        width: 100%;
+      }}
+      .scan-mode {{
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr;
+      }}
+      table.responsive td {{ grid-template-columns: 1fr; }}
+      table.responsive td::before {{
+        margin-bottom: -2px;
+      }}
+      #simulador table.responsive tr {{
+        padding: 12px;
+      }}
+      #simulador table.responsive td[data-label='Selecao'],
+      #simulador table.responsive td[data-label='Linha'] {{
+        display: none;
+      }}
+      .scanner-row-lead,
+      .scanner-row-reading,
+      .decision-checklist.compact {{
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }}
+      .decision-checklist.compact {{
+        display: grid;
+        grid-template-columns: 1fr;
+      }}
+      .odds-debug-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .fab-shell {{
+        display: none;
+      }}
       textarea {{ min-height: 132px; }}
       button {{ width: 100%; }}
       .scan-toolbar {{ align-items: stretch; flex-direction: column; }}
@@ -2568,8 +2805,10 @@ def dashboard(request: Request) -> str:
       </div>
       <div class="topbar-actions">
         <div class="topbar-quick">
-          <button class="btn ghost" type="button" onclick="jumpDashboardTo('live-center')">Live center</button>
           <button class="btn ghost" type="button" onclick="jumpDashboardTo('scanner')">Scanner</button>
+          <a class="btn ghost" href="/cerebro-ia">Cérebro IA</a>
+          <a class="btn ghost" href="/app/backtesting-lab">Backtesting</a>
+          <a class="btn ghost" href="/app#telegram">Telegram</a>
           <button class="btn primary" type="button" onclick="requestScanNow()">Atualizar agora</button>
         </div>
       </div>
@@ -2594,11 +2833,11 @@ def dashboard(request: Request) -> str:
   {account_panel}
   <div class="app-shell">
   <main>
-    <section class="dashboard-live-shell" id="live-center">
+    <section class="dashboard-live-shell" id="scanner-live">
       <div class="dashboard-live-toolbar">
         <div class="dashboard-tabset">
           <button class="dashboard-view-btn active" type="button" onclick="setDashboardModeFilter('focus')">Radar principal</button>
-          <button class="dashboard-view-btn" type="button" onclick="setDashboardModeFilter('enter')">Entrar agora</button>
+          <button class="dashboard-view-btn" type="button" onclick="setDashboardModeFilter('enter')">Entrada aprovada</button>
           <button class="dashboard-view-btn" type="button" onclick="jumpDashboardTo('scanner')">Scanner</button>
         </div>
         <label class="dashboard-search">
@@ -2606,6 +2845,8 @@ def dashboard(request: Request) -> str:
           <input id="dashboard-live-search" type="text" placeholder="Pesquisar jogo, liga ou mercado..." oninput="applyDashboardFeedFilters()" />
         </label>
         <div class="dashboard-toolbar-actions">
+          <a class="dashboard-action-btn" href="/cerebro-ia">Cérebro IA</a>
+          <a class="dashboard-action-btn" href="/app/backtesting-lab">Backtesting</a>
           <button class="dashboard-action-btn" type="button" onclick="requestScanNow()">Atualizar agora</button>
           <button class="dashboard-action-btn" type="button" onclick="jumpDashboardTo('scanner')">Critérios do scanner</button>
         </div>
@@ -2621,7 +2862,7 @@ def dashboard(request: Request) -> str:
         </button>
         <button class="dashboard-counter" type="button" data-center-mode="enter" onclick="setDashboardModeFilter('enter')">
           <span class="dashboard-counter-value">{strong_count}</span>
-          <span class="dashboard-counter-label">Entrar agora</span>
+          <span class="dashboard-counter-label">Entrada aprovada</span>
         </button>
         <button class="dashboard-counter" type="button" data-center-mode="wait" onclick="setDashboardModeFilter('wait')">
           <span class="dashboard-counter-value">{monitor_count}</span>
@@ -2639,7 +2880,7 @@ def dashboard(request: Request) -> str:
           </div>
           <div class="dashboard-filter-bar">
             <button class="dashboard-filter-chip active" type="button" data-center-mode="focus" onclick="setDashboardModeFilter('focus')">Liberadas + aguardar</button>
-            <button class="dashboard-filter-chip" type="button" data-center-mode="enter" onclick="setDashboardModeFilter('enter')">Entrar agora</button>
+            <button class="dashboard-filter-chip" type="button" data-center-mode="enter" onclick="setDashboardModeFilter('enter')">Entrada aprovada</button>
             <button class="dashboard-filter-chip" type="button" data-center-mode="wait" onclick="setDashboardModeFilter('wait')">Aguardar</button>
             <button class="dashboard-filter-chip" type="button" data-center-mode="monitor" onclick="setDashboardModeFilter('monitor')">Monitorar</button>
             <button class="dashboard-filter-chip" type="button" data-center-mode="all" onclick="setDashboardModeFilter('all')">Mostrar tudo</button>
@@ -2698,7 +2939,7 @@ def dashboard(request: Request) -> str:
         <span class="muted" id="risk-profile-note">Perfil atual: {scanner["risk_profile_label"]}</span>
       </div>
       <div class="scanner-summary-grid" id="scanner-decision-summary">
-        <div class="decision-count-card enter"><span>🟢 Entrar agora</span><strong id="scanner-count-enter">{decision_counts.get("ENTER_NOW", 0)}</strong></div>
+        <div class="decision-count-card enter"><span>🟢 Entrada aprovada</span><strong id="scanner-count-enter">{decision_counts.get("ENTER_NOW", 0)}</strong></div>
         <div class="decision-count-card wait"><span>🟡 Aguardar</span><strong id="scanner-count-wait">{decision_counts.get("WAIT_CONFIRMATION", 0)}</strong></div>
         <div class="decision-count-card monitor"><span>🔵 Monitorar</span><strong id="scanner-count-monitor">{decision_counts.get("MONITOR_ONLY", 0)}</strong></div>
         <div class="decision-count-card exit"><span>🔴 Não entrar</span><strong id="scanner-count-exit">{decision_counts.get("DO_NOT_ENTER", 0)}</strong></div>
@@ -2712,18 +2953,41 @@ def dashboard(request: Request) -> str:
         <span class="criteria-chip" id="criteria-profile">Perfil: Moderado</span>
       </div>
       <p class="muted" id="scanner-criteria-note">Padrao visual: mostrar liberadas, aguardar confirmacao e monitorar. “Nao entrar” fica oculto por padrao para reduzir ruido.</p>
+      <div class="decision-legend" aria-label="Legenda das decisoes do scanner">
+        <div class="decision-legend-item enter"><strong>🟢 Entrada aprovada</strong><span>Todos os criterios minimos foram atendidos.</span></div>
+        <div class="decision-legend-item wait"><strong>🟡 Aguardar</strong><span>Sinal promissor, mas ainda falta confirmacao.</span></div>
+        <div class="decision-legend-item monitor"><strong>🔵 Monitorar</strong><span>Ha dados uteis, mas nao ha entrada clara.</span></div>
+        <div class="decision-legend-item exit"><strong>🔴 Nao entrar</strong><span>Risco ou criterios insuficientes.</span></div>
+        <div class="decision-legend-item hold"><strong>⚪ Sem dados</strong><span>Aguardando dados confiaveis da API.</span></div>
+      </div>
       <div class="active-line" id="football-provider-strip">
         <div class="mini"><div class="muted">Fonte ao vivo</div><strong id="football-provider-active">carregando...</strong></div>
         <div class="mini"><div class="muted">Ultima atualizacao</div><strong id="football-provider-updated">-</strong></div>
         <div class="mini"><div class="muted">Requests hoje</div><strong id="football-provider-requests">-</strong></div>
+        <div class="mini"><div class="muted">Odds confirmadas</div><strong id="football-provider-odds">calculando...</strong></div>
+        <div class="mini"><div class="muted">Jogos importados</div><strong id="football-provider-games">{len(live_games)}</strong></div>
         <div class="mini"><div class="muted">Fallback</div><strong id="football-provider-fallback">-</strong></div>
         <div class="mini"><div class="muted">Erro recente</div><strong id="football-provider-error">sem erro</strong></div>
       </div>
       <p class="muted" id="football-provider-note">API-Football no backend com fallback local/mock se a fonte falhar.</p>
+      <div class="criteria-bar" id="quant-markets-criteria">
+        <span class="criteria-chip">Mercados: Goals</span>
+        <span class="criteria-chip">Corners</span>
+        <span class="criteria-chip">Cards</span>
+        <span class="criteria-chip">Asian Handicap</span>
+        <span class="criteria-chip">HT/ST</span>
+        <span class="criteria-chip">Pressao + momentum</span>
+      </div>
+      <p class="muted">Camada quantitativa ativa: esses mercados so liberam entrada com odd real confirmada, linha normalizada e filtros de risco aprovados.</p>
+      <div class="scan-toolbar">
+        <button class="ghost" type="button" onclick="diagnoseOdds()">Diagnosticar Odds</button>
+        <span class="muted" id="football-odds-diagnosis-note">Mostra se o problema vem da API, plano, fixture, mercado ou normalizacao.</span>
+      </div>
+      <div class="odds-debug-panel" id="football-odds-debug" style="display:none"></div>
     </section>
     <section class="grid primary-metrics-grid" id="decision-kpis">
       <div class="card"><div class="metric">{len(opportunities)}</div><div class="muted">Jogos analisados agora</div></div>
-      <div class="card"><div class="metric green">{strong_count}</div><div class="muted">Entradas liberadas</div></div>
+      <div class="card"><div class="metric green">{strong_count}</div><div class="muted">Entradas aprovadas</div></div>
       <div class="card"><div class="metric amber">{monitor_count}</div><div class="muted">Aguardando / monitorando</div></div>
       <div class="card"><div class="metric red">{blocked_count}</div><div class="muted">Bloqueadas / sem dados</div></div>
       <div class="card"><div class="metric">{stats["hit_rate"]}%</div><div class="muted">Hit rate</div></div>
@@ -2819,7 +3083,7 @@ def dashboard(request: Request) -> str:
             <span>Mostrar</span>
             <select id="scanner-filter-mode" onchange="applyScannerTableFilters()">
               <option value="focus" selected>Liberadas + aguardar + monitorar</option>
-              <option value="enter">So entrar agora</option>
+              <option value="enter">So entrada aprovada</option>
               <option value="enter_wait">Entrar + aguardar</option>
               <option value="monitor">So monitorar</option>
               <option value="all">Mostrar tudo</option>
@@ -2957,34 +3221,6 @@ def dashboard(request: Request) -> str:
           <h2>Rankings IA</h2>
           {rankings}
         </section>
-        <section class="card section" id="fantasy">
-          <h2>Fantasy Campeao</h2>
-          <p class="muted">Cole a URL da sala do Rei do Pitaco, tente ler o pool automaticamente e, se a pagina estiver protegida, cole o texto exportado da sala ou estatisticas dos jogadores. O motor aceita <code>Nome;Posicao;Time;Preco;Projecao</code> e tambem linhas com colunas extras como <code>xG</code>, <code>xA</code>, gols, assists, finalizacoes e minutos.</p>
-          <label>URL da sala / roomId</label>
-          <input id="fantasy-room-url" type="text" placeholder="https://fantasy.reidopitaco.com.br/fantasy/dfs/lineup?roomId=..." />
-          <label>Formacao</label>
-          <select id="fantasy-formation">
-            <option value="4-4-2">4-4-2</option>
-            <option value="4-3-3">4-3-3</option>
-            <option value="5-3-2">5-3-2</option>
-            <option value="3-5-2">3-5-2</option>
-            <option value="3-4-3">3-4-3</option>
-            <option value="4-5-1">4-5-1</option>
-            <option value="5-4-1">5-4-1</option>
-          </select>
-          <label>Orcamento</label>
-          <input id="fantasy-budget" type="number" step="0.1" min="20" value="120" />
-          <label>Texto bruto da sala / pool de jogadores</label>
-          <textarea id="fantasy-players" placeholder="Nome;Posicao;Time;Preco;Projecao&#10;Cacá;ZAG;Corinthians;9.8;5.1&#10;Hugo;LAT;Corinthians;11.3;5.9"></textarea>
-          <label>Estatisticas extras (opcional)</label>
-          <textarea id="fantasy-stats" placeholder="Nome;Time;xG;xA;Gols;Assistencias;Finalizacoes;Minutos&#10;Yuri Alberto;Corinthians;0.48;0.11;8;2;31;1620"></textarea>
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button type="button" class="ghost" onclick="importFantasyRoom()">Ler sala do Pitaco</button>
-            <button type="button" class="ghost" onclick="buildFantasyLineup()">Montar escalação campea</button>
-          </div>
-          <div id="fantasy-note" class="notice muted"></div>
-          <div id="fantasy-result">{fantasy_help}</div>
-        </section>
         <section class="card section">
           <h2>Aprendizado Rapido</h2>
           {fast_panel}
@@ -3025,10 +3261,11 @@ def dashboard(request: Request) -> str:
   <div class="fab-shell" id="fab-menu">
     <div class="fab-links">
       <a class="fab-link" href="#scanner">Scanner</a>
-      <a class="fab-link" href="/app/jogosdodia">Jogos do Dia</a>
+      <a class="fab-link" href="/cerebro-ia">Cérebro IA</a>
+      <a class="fab-link" href="/app/backtesting-lab">Backtesting</a>
       <a class="fab-link" href="#mercado">Mercado</a>
-    <a class="fab-link" href="#simulador">Ao vivo</a>
-      <a class="fab-link" href="/fantasy-ia">Fantasy IA</a>
+      <a class="fab-link" href="/app#telegram">Telegram</a>
+      <a class="fab-link" href="#simulador">Ao vivo</a>
       <a class="fab-link" href="#ativo">Jogo ativo</a>
       <a class="fab-link" href="#entradas">Entradas</a>
       <a class="fab-link" href="#historico">Historico</a>
@@ -3428,6 +3665,117 @@ def dashboard(request: Request) -> str:
       if (el && value !== undefined && value !== null) el.textContent = String(value);
     }});
     updateDecisionCriteria(scanner);
+    refreshProviderDerivedMetrics(scanner);
+  }}
+
+  function refreshProviderDerivedMetrics(scanner = {{}}) {{
+    const rows = Array.from(document.querySelectorAll('#simulator-rows tr[data-decision]'));
+    const games = new Set();
+    let oddsConfirmed = 0;
+    rows.forEach((row) => {{
+      const odd = Number(row.getAttribute('data-odd') || '0');
+      if (odd > 0) oddsConfirmed += 1;
+      const matchLabel = row.getAttribute('data-game-id') || row.querySelector('.scanner-row-lead strong')?.textContent?.trim();
+      if (matchLabel) games.add(matchLabel);
+    }});
+    const oddsEl = document.getElementById('football-provider-odds');
+    const gamesEl = document.getElementById('football-provider-games');
+    const note = document.getElementById('football-provider-note');
+    const status = window.lastFootballProviderStatus || {{}};
+    const totalGames = games.size || Number(scanner.today_games || scanner.candidates || 0) || 0;
+    let oddsText = '🔴 Nao disponiveis';
+    let reason = 'Sem odds reais confirmadas. Entrada bloqueada.';
+    const lastError = String(status.last_error || '');
+    if (Number(status.last_http_status) === 403) {{
+      oddsText = '⚪ Plano/API sem odds';
+      reason = 'API retornou 403 para odds: plano/permissao pode nao incluir esse endpoint.';
+    }} else if (Number(status.last_http_status) === 429) {{
+      oddsText = '🔴 Limite API';
+      reason = 'API retornou 429: aguardando cooldown/cache antes de confirmar novas odds.';
+    }} else if (/request limit|limite|odds|permissao|permissão|plano/i.test(lastError)) {{
+      oddsText = /request limit|limite/i.test(lastError) ? '🔴 Limite diario' : '⚪ Plano/API sem odds';
+      reason = lastError;
+    }} else if (oddsConfirmed > 0 && totalGames > 0 && oddsConfirmed < totalGames) {{
+      oddsText = `🟡 Parcial: ${{oddsConfirmed}}/${{totalGames}}`;
+      reason = 'Alguns jogos têm odds reais; os demais seguem bloqueados para entrada.';
+    }} else if (oddsConfirmed > 0) {{
+      oddsText = `🟢 Confirmadas: ${{oddsConfirmed}}`;
+      reason = 'Odds reais confirmadas em mercados do scanner.';
+    }} else if (window.lastOddsDiagnosis) {{
+      reason = window.lastOddsDiagnosis;
+    }}
+    if (oddsEl) {{
+      oddsEl.textContent = oddsText;
+    }}
+    if (gamesEl) {{
+      const imported = totalGames;
+      if (imported > 0) gamesEl.textContent = String(imported);
+      else if (!gamesEl.textContent || gamesEl.textContent === 'calculando...') gamesEl.textContent = '-';
+    }}
+    if (note && reason) note.textContent = reason;
+  }}
+
+  function liveFixtureIdsForDebug() {{
+    const ids = new Set();
+    document.querySelectorAll('#simulator-rows tr[data-game-id]').forEach((row) => {{
+      const id = (row.getAttribute('data-game-id') || '').trim();
+      if (/^\\d+$/.test(id)) ids.add(id);
+    }});
+    return Array.from(ids).slice(0, 3);
+  }}
+
+  function renderOddsDebugCard(title, payload) {{
+    const markets = Array.isArray(payload.markets_found) ? payload.markets_found : [];
+    const bookmakers = Array.isArray(payload.bookmakers_found) ? payload.bookmakers_found : (Array.isArray(payload.bookmakers) ? payload.bookmakers : []);
+    const unsupported = Array.isArray(payload.unsupported_markets) ? payload.unsupported_markets : [];
+    const errors = Array.isArray(payload.errors) ? payload.errors : [];
+    return `<article class="odds-debug-card">
+      <strong>${{escapeHtml(title)}}</strong>
+      <div class="muted">Status: ${{escapeHtml(payload.last_status_code ?? payload.status ?? '-')}}</div>
+      <div>Raw: <b>${{escapeHtml(payload.raw_response_count ?? payload.raw_count ?? 0)}}</b> · Normalizadas: <b>${{escapeHtml(payload.normalized_count ?? 0)}}</b></div>
+      <div class="muted">Mercados: ${{escapeHtml(markets.slice(0, 5).join(', ') || '-')}}</div>
+      <div class="muted">Bookmakers: ${{escapeHtml(bookmakers.slice(0, 5).join(', ') || '-')}}</div>
+      <div class="muted">Nao suportados: ${{escapeHtml(String(unsupported.length || 0))}}</div>
+      <div class="muted">Erros: ${{escapeHtml(errors.slice(0, 2).join(' | ') || 'sem erro')}}</div>
+      <p>${{escapeHtml(payload.diagnosis || 'Sem diagnostico.')}}</p>
+    </article>`;
+  }}
+
+  async function diagnoseOdds() {{
+    const panel = document.getElementById('football-odds-debug');
+    const note = document.getElementById('football-odds-diagnosis-note');
+    if (panel) {{
+      panel.style.display = 'grid';
+      panel.innerHTML = '<div class="muted">Diagnosticando odds na API-Football...</div>';
+    }}
+    if (note) note.textContent = 'Consultando debug sem expor API key...';
+    try {{
+      const globalResponse = await fetch('/api/football/odds/debug', {{cache: 'no-store'}});
+      const globalPayload = await globalResponse.json();
+      window.lastOddsDiagnosis = globalPayload.diagnosis || '';
+      const fixtureIds = liveFixtureIdsForDebug();
+      const fixturePayloads = await Promise.all(
+        fixtureIds.map(async (fixtureId) => {{
+          const response = await fetch(`/api/football/fixtures/${{encodeURIComponent(fixtureId)}}/odds/debug`, {{cache: 'no-store'}});
+          return response.json();
+        }})
+      );
+      if (panel) {{
+        const cards = [
+          renderOddsDebugCard('Odds ao vivo (/odds/live)', globalPayload),
+          ...fixturePayloads.map((payload) => renderOddsDebugCard(`Fixture ${{payload.fixture_id || '-'}}`, payload)),
+        ];
+        if (!fixturePayloads.length) {{
+          cards.push(`<article class="odds-debug-card"><strong>Fixtures</strong><p>Nenhum fixture numerico da API-Football apareceu no scanner atual para testar individualmente.</p></article>`);
+        }}
+        panel.innerHTML = `<div class="odds-debug-grid">${{cards.join('')}}</div>`;
+      }}
+      refreshProviderDerivedMetrics();
+      if (note) note.textContent = globalPayload.diagnosis || 'Diagnostico concluido.';
+    }} catch (error) {{
+      if (panel) panel.innerHTML = `<div class="odds-debug-card"><strong>Falha no diagnostico</strong><p>${{escapeHtml(error.message || 'Erro desconhecido')}}</p></div>`;
+      if (note) note.textContent = 'Falha ao diagnosticar odds.';
+    }}
   }}
 
   async function loadFootballProviderStatus() {{
@@ -3436,10 +3784,12 @@ def dashboard(request: Request) -> str:
       const response = await fetch('/api/football/provider/status', {{cache: 'no-store'}});
       const data = await response.json();
       const status = data.status || {{}};
+      window.lastFootballProviderStatus = status;
       const mappings = [
         ['football-provider-active', data.ok ? 'API-Football ativa' : 'API-Football inativa'],
         ['football-provider-updated', data.last_update_at || status.last_success_at || '-'],
         ['football-provider-requests', status.requests_used_today ?? status.requests_total ?? '-'],
+        ['football-provider-games', status.last_payload_items ?? '-'],
         ['football-provider-fallback', status.fallback_active ? 'ativo' : 'inativo'],
         ['football-provider-error', status.last_error || 'sem erro'],
       ];
@@ -3447,12 +3797,13 @@ def dashboard(request: Request) -> str:
         const el = document.getElementById(id);
         if (el) el.textContent = String(value ?? '-');
       }});
-      if (note) {{
+      if (note && !window.lastOddsDiagnosis) {{
         note.textContent = data.message
           || (status.fallback_active
             ? 'Fonte API indisponível, usando fallback.'
             : 'API-Football ativa no backend, sem chave no frontend.');
       }}
+      refreshProviderDerivedMetrics();
     }} catch (error) {{
       if (note) note.textContent = error.message || 'Falha ao carregar status da API-Football.';
     }}
@@ -3553,7 +3904,6 @@ def dashboard(request: Request) -> str:
       no_data: 0,
     }};
     rows.forEach((row) => {{
-      if (row.style.display === 'none') return;
       const status = String(row.getAttribute('data-status') || 'monitor_only').toLowerCase();
       if (counts[status] !== undefined) counts[status] += 1;
     }});
@@ -3568,6 +3918,7 @@ def dashboard(request: Request) -> str:
       const el = document.getElementById(id);
       if (el) el.textContent = String(value);
     }});
+    refreshProviderDerivedMetrics();
   }}
 
   async function requestScanNow(options = {{}}) {{
@@ -3633,117 +3984,6 @@ def dashboard(request: Request) -> str:
       }}
     }} catch (error) {{
       panel.innerHTML = `<p class="muted">${{error.message}}</p>`;
-    }}
-  }}
-
-  async function buildFantasyLineup() {{
-    const note = document.getElementById('fantasy-note');
-    const result = document.getElementById('fantasy-result');
-    const rawRoomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
-    const rawPlayersText = (document.getElementById('fantasy-players')?.value || '').trim();
-    const statsText = (document.getElementById('fantasy-stats')?.value || '').trim();
-    const formation = document.getElementById('fantasy-formation')?.value || '4-4-2';
-    const budget = Number(document.getElementById('fantasy-budget')?.value || '120');
-    const looksLikeRoom = (value) => /roomid=|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(value || '');
-    const roomUrl = rawRoomUrl || (looksLikeRoom(rawPlayersText) ? rawPlayersText : '');
-    const playersText = roomUrl && rawPlayersText === roomUrl ? '' : rawPlayersText;
-    if (roomUrl && !rawRoomUrl) {{
-      const roomInput = document.getElementById('fantasy-room-url');
-      if (roomInput) roomInput.value = roomUrl;
-      const playersBox = document.getElementById('fantasy-players');
-      if (playersBox && rawPlayersText === roomUrl) playersBox.value = '';
-    }}
-    if (!playersText && roomUrl) {{
-      await importFantasyRoom();
-      return;
-    }}
-    if (!playersText) {{
-      if (note) note.textContent = 'Cole os jogadores ou use o campo da sala do Pitaco para gerar a escalação.';
-      return;
-    }}
-    if (note) note.textContent = 'Calculando melhor escalação...';
-    if (result) result.innerHTML = '<p class=\"muted\">Processando lista de jogadores...</p>';
-    try {{
-      const response = await fetch('/api/fantasy-lineup', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
-        body: JSON.stringify({{
-          players_text: playersText,
-          room_url: roomUrl,
-          stats_text: statsText,
-          formation,
-          budget
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Falha ao montar escalação.');
-      if (result) result.innerHTML = data.html || '<p class=\"muted\">Sem resultado.</p>';
-      if (note) note.textContent = data.message || 'Escalação gerada.';
-    }} catch (error) {{
-      if (result) result.innerHTML = '';
-      if (note) note.textContent = error.message;
-    }}
-  }}
-
-  async function importFantasyRoom() {{
-    const note = document.getElementById('fantasy-note');
-    const result = document.getElementById('fantasy-result');
-    const rawRoomUrl = (document.getElementById('fantasy-room-url')?.value || '').trim();
-    const rawPlayersText = (document.getElementById('fantasy-players')?.value || '').trim();
-    const statsText = (document.getElementById('fantasy-stats')?.value || '').trim();
-    const formation = document.getElementById('fantasy-formation')?.value || '4-4-2';
-    const budget = Number(document.getElementById('fantasy-budget')?.value || '120');
-    const looksLikeRoom = (value) => /roomid=|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(value || '');
-    const roomUrl = rawRoomUrl || (looksLikeRoom(rawPlayersText) ? rawPlayersText : '');
-    const playersText = roomUrl && rawPlayersText === roomUrl ? '' : rawPlayersText;
-    if (!roomUrl) {{
-      if (note) note.textContent = 'Cole a URL da sala ou ao menos o roomId.';
-      return;
-    }}
-    if (!rawRoomUrl) {{
-      const roomInput = document.getElementById('fantasy-room-url');
-      if (roomInput) roomInput.value = roomUrl;
-      const playersBox = document.getElementById('fantasy-players');
-      if (playersBox && rawPlayersText === roomUrl) playersBox.value = '';
-    }}
-    if (note) note.textContent = 'Lendo sala do Rei do Pitaco...';
-    if (result) result.innerHTML = '<p class=\"muted\">Tentando localizar a sala e o pool de jogadores...</p>';
-    try {{
-      const response = await fetch('/api/fantasy-room-import', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}},
-        body: JSON.stringify({{
-          room_url: roomUrl,
-          players_text: playersText,
-          formation,
-          budget,
-          stats_text: statsText
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Falha ao ler sala.');
-      if (data.players_text) {{
-        const box = document.getElementById('fantasy-players');
-        if (box) box.value = data.players_text;
-      }}
-      if (data.budget) {{
-        const budgetInput = document.getElementById('fantasy-budget');
-        if (budgetInput) budgetInput.value = String(data.budget);
-      }}
-      if (result) {{
-        if (data.lineup_html) {{
-          result.innerHTML = data.lineup_html;
-        }} else if (data.html) {{
-          result.innerHTML = data.html;
-        }}
-      }}
-      if (note) note.textContent = data.lineup_message || data.message || 'Sala analisada.';
-      if (data.auto_ready && !data.lineup_html) {{
-        await buildFantasyLineup();
-      }}
-    }} catch (error) {{
-      if (note) note.textContent = error.message;
-      if (result) result.innerHTML = '';
     }}
   }}
 
@@ -4054,6 +4294,7 @@ def dashboard(request: Request) -> str:
 </html>"""
 
 
+# Legacy route kept for direct access/backward compatibility; hidden from primary menus.
 @app.get("/jogosdodia", response_class=HTMLResponse)
 @app.get("/app/jogosdodia", response_class=HTMLResponse)
 def jogos_do_dia_page(request: Request) -> str:
@@ -4067,7 +4308,7 @@ def jogos_do_dia_page(request: Request) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>__TITLE__ | Jogos do Dia</title>
+  <title>__TITLE__ | Scanner ao Vivo</title>
   <style>
     :root {
       color-scheme: dark;
@@ -4422,8 +4663,8 @@ def jogos_do_dia_page(request: Request) -> str:
   <header class="top">
     <div class="topin">
       <div class="brand-wrap">
-        <div class="eyebrow">ApexGol live center</div>
-        <div class="brand">__TITLE__ · Jogos do Dia</div>
+        <div class="eyebrow">ApexGol scanner</div>
+        <div class="brand">__TITLE__ · Scanner ao Vivo</div>
       </div>
       <div class="top-actions">
         <div class="status-strip">
@@ -4434,7 +4675,8 @@ def jogos_do_dia_page(request: Request) -> str:
         <nav class="nav">
           <a class="btn ghost" href="/app">Area do Cliente</a>
           <a class="btn ghost" href="/dashboard">Dashboard Trade</a>
-          <a class="btn ghost" href="/fantasy-ia">Fantasy IA</a>
+          <a class="btn ghost" href="/cerebro-ia">Cérebro IA</a>
+          <a class="btn ghost" href="/app/backtesting-lab">Backtesting</a>
           <button class="btn primary" type="button" id="refreshBoardBtn">Atualizar agora</button>
         </nav>
       </div>
@@ -5427,6 +5669,48 @@ def api_healthz() -> JSONResponse:
     )
 
 
+@app.get("/api/system/rate-limit-protection")
+def api_rate_limit_protection(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    cache = get_runtime_cache()
+    limiter = get_provider_limiter()
+    queue = get_request_queue_service()
+    gemini_status = limiter.status("gemini", settings.gemini_max_rpm)
+    odds_status = limiter.status("odds_api_io", settings.odds_max_rpm)
+    return JSONResponse(
+        {
+            "ok": True,
+            "cache": {
+                "global": cache.stats(),
+                "gemini": cache.stats("gemini:"),
+                "gemini_refine": cache.stats("refine_signal:"),
+                "odds_api_io": cache.stats("odds_api_io:"),
+            },
+            "cache_hit_ratio": cache.stats().get("cache_hit_ratio", 0.0),
+            "queue": queue.stats(),
+            "rate_limit_protection": {
+                "gemini": {
+                    "allowed": gemini_status.allowed,
+                    "cooling_down": gemini_status.cooling_down,
+                    "wait_seconds": gemini_status.wait_seconds,
+                    "reason": gemini_status.reason,
+                    "max_rpm": settings.gemini_max_rpm,
+                    "cache_ttl_seconds": 900,
+                },
+                "odds_api_io": {
+                    "allowed": odds_status.allowed,
+                    "cooling_down": odds_status.cooling_down,
+                    "wait_seconds": odds_status.wait_seconds,
+                    "reason": odds_status.reason,
+                    "max_rpm": settings.odds_max_rpm,
+                    "events_live_ttl_seconds": settings.events_live_ttl,
+                    "odds_event_ttl_seconds": settings.odds_event_ttl,
+                },
+            },
+        }
+    )
+
+
 async def _football_live_fallback_payload(settings: Settings) -> dict[str, Any]:
     provider = build_provider(settings)
     games = await provider.get_live_games()
@@ -5548,6 +5832,33 @@ async def api_football_live(_: None = Depends(_auth)) -> JSONResponse:
         return JSONResponse(payload)
 
 
+@app.get("/api/football/odds/debug")
+async def api_football_odds_debug(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        debug = await provider.odds_debug()
+        debug["status"] = provider.status_snapshot()
+        return JSONResponse(debug)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "api_key_configured": bool(settings.api_football_key),
+                "provider": "api-football",
+                "last_request_url": None,
+                "last_status_code": provider.status_snapshot().get("last_http_status"),
+                "raw_response_count": 0,
+                "normalized_count": 0,
+                "sample_raw": {},
+                "sample_normalized": {},
+                "errors": [str(type(exc).__name__)],
+                "diagnosis": "Falha ao diagnosticar odds no backend.",
+                "status": provider.status_snapshot(),
+            },
+            status_code=200,
+        )
+
+
 @app.get("/api/football/fixtures")
 async def api_football_fixtures(date: str, _: None = Depends(_auth)) -> JSONResponse:
     settings = load_settings()
@@ -5666,20 +5977,70 @@ async def api_football_fixture_lineups(fixture_id: str, _: None = Depends(_auth)
         )
 
 
+@app.get("/api/football/fixtures/{fixture_id}/odds/debug")
+async def api_football_fixture_odds_debug(
+    fixture_id: str,
+    league_id: str | None = None,
+    season: str | None = None,
+    date: str | None = None,
+    _: None = Depends(_auth),
+) -> JSONResponse:
+    settings = load_settings()
+    provider = _football_api_provider(settings)
+    try:
+        debug = await provider.fixture_odds_debug(
+            fixture_id,
+            league_id=league_id,
+            season=season,
+            fixture_date=date,
+        )
+        debug["status_payload"] = provider.status_snapshot()
+        return JSONResponse(debug)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "fixture_id": fixture_id,
+                "provider": "api-football",
+                "api_key_configured": bool(settings.api_football_key),
+                "request_url": None,
+                "fallback_request_url": None,
+                "status": provider.status_snapshot().get("last_http_status"),
+                "raw_count": 0,
+                "normalized_count": 0,
+                "markets_found": [],
+                "bookmakers_found": [],
+                "unsupported_markets": [],
+                "sample_raw": {},
+                "sample_normalized": {},
+                "errors": [str(type(exc).__name__)],
+                "diagnosis": "Falha ao diagnosticar odds deste fixture no backend.",
+                "status_payload": provider.status_snapshot(),
+            },
+            status_code=200,
+        )
+
+
 @app.get("/api/football/fixtures/{fixture_id}/odds")
 async def api_football_fixture_odds(fixture_id: str, _: None = Depends(_auth)) -> JSONResponse:
     settings = load_settings()
     provider = _football_api_provider(settings)
     try:
-        odds = await provider.get_fixture_odds(fixture_id)
+        odds_result = await provider.get_odds_by_fixture_or_fallback(fixture_id)
         return JSONResponse(
             {
-                "ok": True,
+                "ok": not bool(odds_result.get("odds_unavailable")),
                 "provider": "api-football",
                 "fallback_active": bool(provider.status_snapshot().get("fallback_active")),
                 "last_update_at": provider.status_snapshot().get("last_success_at"),
                 "fixture_id": fixture_id,
-                "odds": odds,
+                "odds": odds_result.get("odds") or {},
+                "raw_count": odds_result.get("raw_count") or 0,
+                "normalized_count": odds_result.get("normalized_count") or 0,
+                "unsupported_markets": odds_result.get("unsupported_markets") or [],
+                "markets_found": odds_result.get("markets_found") or [],
+                "bookmakers": odds_result.get("bookmakers") or [],
+                "odds_unavailable": bool(odds_result.get("odds_unavailable")),
+                "message": odds_result.get("reason") or "Odds consultadas.",
             }
         )
     except Exception as exc:
@@ -6732,6 +7093,53 @@ def _decision_metric_tile(label: str, value: Any) -> str:
     )
 
 
+def _decision_explanation_details(decision: dict[str, Any]) -> str:
+    missing = []
+    if not decision.get("has_fixture"):
+        missing.append("Fixture valida")
+    if not decision.get("odds_confirmed"):
+        missing.append("Odds confirmadas")
+    if not decision.get("stats_confirmed"):
+        missing.append("Estatisticas ao vivo")
+    if _safe_int(decision.get("data_quality")) < 45:
+        missing.append("Qualidade minima de dados")
+    positive_html = "".join(
+        f"<span>{_esc(text)}</span>"
+        for text in (decision.get("positive_reasons") or ["Nenhum fator positivo forte ainda."])
+    )
+    blocking_html = "".join(
+        f"<span>{_esc(text)}</span>"
+        for text in (decision.get("blocking_reasons") or ["Sem bloqueio forte."])
+    )
+    missing_html = "".join(
+        f"<span>{_esc(text)}</span>"
+        for text in (missing or ["Nada critico ausente."])
+    )
+    return (
+        "<details class='decision-expander' open>"
+        "<summary>Por que essa decisao?</summary>"
+        "<div class='decision-expander-body'>"
+        f"{_decision_metric_tile('Probabilidade estimada', _edge(decision.get('estimated_probability')))}"
+        f"{_decision_metric_tile('Probabilidade implicita', _edge(decision.get('implied_probability')))}"
+        f"{_decision_metric_tile('EV', decision.get('ev_label'))}"
+        f"{_decision_metric_tile('Fonte', decision.get('source_label'))}"
+        "<div class='decision-reason-group decision-expander-full'>"
+        "<strong>Fatores positivos</strong>"
+        f"{positive_html}"
+        "</div>"
+        "<div class='decision-reason-group decision-expander-full'>"
+        "<strong>Fatores bloqueantes</strong>"
+        f"{blocking_html}"
+        "</div>"
+        "<div class='decision-reason-group decision-expander-full'>"
+        "<strong>Dados ausentes</strong>"
+        f"{missing_html}"
+        "</div>"
+        "</div>"
+        "</details>"
+    )
+
+
 def _decision_status_counts(items: list[dict[str, Any]]) -> Counter:
     counts: Counter = Counter()
     for item in items:
@@ -6768,22 +7176,25 @@ def _sort_decision_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _simulation_row(item: dict[str, Any]) -> str:
     game_id = _js_string(item.get("game_id") or "")
     decision = build_scanner_decision(item)
+    odd_value = _safe_float(decision.get("odd_value"), None)
+    odds_confirmed = odd_value is not None and odd_value > 0
+    odds_note = "" if odds_confirmed else "<br><span class='mini-badge blocked'>Sem odds reais - entrada bloqueada</span>"
     checklist_html = "".join(
         f"<span class='decision-check compact {decision_item.get('state') or 'neutral'}'>{_esc(decision_item.get('text'))}</span>"
         for decision_item in decision.get("checklist", [])[:4]
     )
     return (
-        f"<tr class='clickable-row' data-league='{_esc(item.get('league') or '')}' data-market='{_esc(item.get('market_category') or item.get('market') or '')}' "
+        f"<tr class='clickable-row' data-game-id='{_esc(item.get('game_id') or '')}' data-league='{_esc(item.get('league') or '')}' data-market='{_esc(item.get('market_category') or item.get('market') or '')}' "
         f"data-recommendation='{_esc(item.get('recommendation') or '')}' data-entry-allowed='{str(bool(item.get('entry_allowed'))).lower()}' "
         f"data-status='{_esc(decision.get('decision_code') or 'monitor_only')}' data-decision='{_esc(decision.get('decision_status') or 'MONITOR_ONLY')}' "
         f"data-ev='{_esc(item.get('expected_value') or 0)}' data-confidence='{_esc(item.get('confidence_score') or 0)}' "
-        f"data-score='{_esc(decision.get('score_value') or 0)}' data-odd='{_esc(decision.get('odd_value') or 0)}' "
+        f"data-score='{_esc(decision.get('score_value') or 0)}' data-odd='{_esc(decision.get('odd_value') or 0)}' data-odds-confirmed='{str(odds_confirmed).lower()}' "
         f"onclick=\"selectScannedGame('{game_id}')\">"
         f"<td data-label='Jogo'><div class='scanner-row-lead'>{_recommendation_badge(decision.get('decision_label'))}<strong>{_esc(item.get('match'))}</strong><span class='muted'>{_esc(item.get('league'))} | { _esc(item.get('minute'))}' | { _esc(item.get('scoreline'))}</span></div></td>"
         f"<td data-label='Mercado'><strong>{_esc(decision.get('market_label'))}</strong><br><span class='muted'>{_esc(item.get('selection'))}</span></td>"
         f"<td data-label='Selecao'>{_esc(item.get('selection'))}</td>"
         f"<td data-label='Linha'>{_esc(item.get('line'))}</td>"
-        f"<td data-label='Odd'><strong>{_esc(item.get('odds') or '-')}</strong><br><span class='muted'>{_esc(decision.get('odd_label'))}</span></td>"
+        f"<td data-label='Odd'><strong>{_esc(item.get('odds') or '-')}</strong><br><span class='muted'>{_esc(decision.get('odd_label'))}</span>{odds_note}</td>"
         f"<td data-label='EV' class='{_value_class(item.get('expected_value'), multiplier=100)}'><strong>{_esc(decision.get('ev_label'))}</strong></td>"
         f"<td data-label='Confianca'><strong>{_esc(decision.get('confidence_label'))}</strong></td>"
         f"<td data-label='Recomendacao'>{_recommendation_badge(decision.get('decision_label'))}<br><span class='muted'>{_esc(decision.get('action_label'))}</span></td>"
@@ -7056,6 +7467,7 @@ def _match_stats_panel(signal: dict[str, Any] | None, history: list[dict[str, An
         f"{_decision_metric_tile('Fonte', decision.get('source_label'))}"
         f"{_decision_metric_tile('Ultima atualizacao', decision.get('updated_at'))}"
         "</div>"
+        f"{_decision_explanation_details(decision)}"
         "<div class='decision-detail-columns'>"
         "<section class='decision-explain-card'>"
         "<h3>Checklist</h3>"
@@ -7491,18 +7903,27 @@ def _possession_share(left: int, right: int) -> int:
     return max(0, min(100, int((left / total) * 100)))
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
+def _safe_int(value: Any, default: int | None = 0) -> int | None:
     try:
         base = value if value is not None else default
+        if base is None:
+            return None
         return int(float(base))
     except (TypeError, ValueError):
+        if default is None:
+            return None
         return int(default)
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
+def _safe_float(value: Any, default: float | None = 0.0) -> float | None:
     try:
-        return float(value)
+        base = value if value is not None else default
+        if base is None:
+            return None
+        return float(base)
     except (TypeError, ValueError):
+        if default is None:
+            return None
         return float(default)
 
 
@@ -7559,7 +7980,7 @@ def _action_badge(action: Any) -> str:
 def _recommendation_badge(recommendation: Any) -> str:
     text = str(recommendation or "Monitorar").strip()
     clean = text.lower()
-    if "entrar agora" in clean or "liberada" in clean or "forte" in clean:
+    if "entrada aprovada" in clean or "liberada" in clean or "forte" in clean:
         cls = "enter"
     elif "aguardar" in clean:
         cls = "wait"
@@ -8646,13 +9067,16 @@ def _dashboard_menu_panel(
     learning: dict[str, Any],
     brain_status: dict[str, Any] | None = None,
 ) -> str:
+    # Legacy auxiliary tools remain routed internally, but the primary dashboard
+    # menu is focused on scanner, AI, research and config.
     items = [
-        ("Scanner Mundial", "Radar principal, modos de leitura e ciclo automatico", "#scanner", "radar"),
-        ("Jogos do Dia", "Mesa ao vivo com watchlist, odds e filtros rapidos", "/app/jogosdodia", "live"),
-        ("Mercado Ao Vivo", "Campeonatos, liderancas e termometro do jogo", "#simulador", "pulse"),
-        ("Fantasy IA", "Montagem, leitura e importacao da sala do fantasy", "/fantasy-ia", "fantasy"),
-        ("Conta e Banca", "Stake, saldo disponivel e entradas abertas", "#conta-banca", "wallet"),
-        ("Resultados", "Importar, revisar historico e acompanhar curva", "#importar", "history"),
+        ("Dashboard", "Visao operacional, ROI, banca e historico", "#top", "radar"),
+        ("Scanner", "Radar principal, filtros e ciclo automatico", "#scanner", "pulse"),
+        ("Cérebro IA", "Aprendizado, fontes, memória e maturidade real", "/cerebro-ia", "brain"),
+        ("Backtesting", "Validacao historica, ROI, drawdown e modelos", "/app/backtesting-lab", "history"),
+        ("Research Skill", "Poisson, EV, Kelly e features historicas", "/app/skill-futebol", "live"),
+        ("Telegram", "Alertas, preferencias e notificacoes", "/app#telegram", "wallet"),
+        ("Configurações", "Conta, acesso e preferencias do usuario", "/app#perfil", "history"),
     ]
     cards: list[str] = []
     for title, subtitle, href, icon in items:
@@ -8878,6 +9302,7 @@ def _learning_menu_panel(learning: dict[str, Any], brain_status: dict[str, Any])
     brain_enabled = bool(brain_status.get("enabled"))
     brain_snapshots = _safe_int(brain_status.get("live_snapshots"))
     brain_skills = _safe_int(brain_status.get("skill_rows"))
+    brain_learning_events = _safe_int(brain_status.get("learning_events"))
     skills = _learning_accelerator_skills(learning)
     skill_cards = "".join(
         "<article class='menu-skill-card'>"
@@ -8901,6 +9326,7 @@ def _learning_menu_panel(learning: dict[str, Any], brain_status: dict[str, Any])
         f"<div class='mini'><div class='muted'>Brain</div><strong>{'ativo' if brain_enabled else 'off'}</strong></div>"
         f"<div class='mini'><div class='muted'>Snapshots</div><strong>{brain_snapshots}</strong></div>"
         f"<div class='mini'><div class='muted'>Skills logadas</div><strong>{brain_skills}</strong></div>"
+        f"<div class='mini'><div class='muted'>Eventos reais</div><strong>{brain_learning_events}</strong></div>"
         "</div>"
         f"<p class='muted'>Modo atual: {_esc(mode)}. Hoje a IA ainda esta {'sem memoria fechada suficiente' if sample == 0 else 'em consolidacao'}. Quanto mais greens e reds reais fechados por mercado, mais rapido ela sai do neutro.</p>"
         "<div class='menu-skill-list'>"
@@ -9057,7 +9483,7 @@ def _simulation_session_panel(session: dict[str, Any]) -> str:
             "<div class='sim-lab-grid'>"
             f"<div class='sim-lab-kpi'><div class='muted'>Jogos ao vivo</div><div class='metric'>{_esc(session.get('source_games', 0))}</div></div>"
             f"<div class='sim-lab-kpi'><div class='muted'>Mercados lidos</div><div class='metric'>{_esc(session.get('total_games', 0))}</div></div>"
-            f"<div class='sim-lab-kpi'><div class='muted'>Entrar agora</div><div class='metric green'>{_esc(session.get('actionable', 0))}</div></div>"
+            f"<div class='sim-lab-kpi'><div class='muted'>Entrada aprovada</div><div class='metric green'>{_esc(session.get('actionable', 0))}</div></div>"
             f"<div class='sim-lab-kpi'><div class='muted'>Radar</div><div class='metric'>{_esc(session.get('watchlist', 0))}</div></div>"
             f"<div class='sim-lab-kpi'><div class='muted'>Score medio</div><div class='metric'>{_esc(session.get('avg_score', 0))}/100</div></div>"
             f"<div class='sim-lab-kpi'><div class='muted'>Risco medio</div><div class='metric'>{_esc(session.get('avg_risk', 0))}/100</div></div>"
