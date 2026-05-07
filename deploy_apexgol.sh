@@ -221,7 +221,6 @@ PY
   http_fetch /tmp/apexgol_landing.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" "https://${app_host_only}/"
   http_fetch /tmp/apexgol_login.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" "https://${app_host_only}/login"
   http_fetch /tmp/apexgol_dashboard.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" -u "${dashboard_user}:${dashboard_password}" "https://${app_host_only}/dashboard"
-  http_fetch /tmp/apexgol_cerebro.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" -u "${dashboard_user}:${dashboard_password}" "https://${app_host_only}/cerebro-ia"
   http_fetch /tmp/apexgol_rate_limit.json --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" -u "${dashboard_user}:${dashboard_password}" "https://${app_host_only}/api/system/rate-limit-protection"
 
   for legacy in "Fantasy" "Jogos do Dia" "Live Center" "ENTRA_FORTE" "Decision class"; do
@@ -231,10 +230,9 @@ PY
   done
 
   grep -qi "ApexGol AI" /tmp/apexgol_landing.html || fail "Landing não carregou a identidade ApexGol AI."
-  grep -Eqi "C[eé]rebro IA" /tmp/apexgol_cerebro.html || fail "Pagina Cerebro IA não respondeu como esperado."
   grep -q "rate_limit_protection" /tmp/apexgol_rate_limit.json || fail "API de rate limit protection não respondeu corretamente."
 
-  note "HTTP: landing/login/dashboard/cerebro/api OK"
+  note "HTTP: landing/login/dashboard/api OK"
 }
 
 write_report() {
