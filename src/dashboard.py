@@ -95,6 +95,31 @@ def _football_api_provider(settings: Settings):
     )
 
 
+def _football_provider_is_operational(status_payload: dict[str, Any]) -> bool:
+    if not isinstance(status_payload, dict):
+        return False
+    if bool(status_payload.get("active")):
+        return True
+    if not bool(status_payload.get("configured")):
+        return False
+    if bool(status_payload.get("fallback_active")):
+        return False
+    if status_payload.get("last_http_status") == 200:
+        return True
+    if status_payload.get("last_success_at"):
+        return True
+    requests_used = int(status_payload.get("requests_used_today") or status_payload.get("requests_total") or 0)
+    return requests_used > 0
+
+
+def _football_provider_status_label(status_payload: dict[str, Any]) -> str:
+    if _football_provider_is_operational(status_payload):
+        return "API-Football ativa"
+    if bool((status_payload or {}).get("configured")):
+        return "API-Football pronta"
+    return "API-Football inativa"
+
+
 class ImportPayload(BaseModel):
     text: str
 
@@ -319,6 +344,22 @@ def dashboard(request: Request) -> str:
     visible_history = _green_red(history)
     scanner = _scanner_status(state, settings)
     stats = _stats(state, visible_history)
+    football_provider = _football_api_provider(settings)
+    football_provider_status = football_provider.status_snapshot()
+    initial_provider_active = _football_provider_status_label(football_provider_status)
+    initial_provider_updated = str(
+        football_provider_status.get("last_live_update_at") or football_provider_status.get("last_success_at") or "-"
+    )
+    initial_provider_requests = str(
+        football_provider_status.get("requests_used_today") or football_provider_status.get("requests_total") or "-"
+    )
+    initial_provider_fallback = "ativo" if football_provider_status.get("fallback_active") else "inativo"
+    initial_provider_error = str(football_provider_status.get("last_error") or "sem erro")
+    initial_provider_note = (
+        "API-Football pronta para leitura no backend. Odds e jogos confirmados aparecem assim que o scanner fechar o ciclo."
+        if settings.api_football_key
+        else "API-Football no backend com fallback local/mock se a fonte falhar."
+    )
     rows = "\n".join(_row(item) for item in visible_history[:120])
     active_entries = _active_entries(history, state.active_signal)
     active_entry_rows = "\n".join(_active_entry_row(item) for item in active_entries)
@@ -2961,15 +3002,15 @@ def dashboard(request: Request) -> str:
         <div class="decision-legend-item hold"><strong>⚪ Sem dados</strong><span>Aguardando dados confiaveis da API.</span></div>
       </div>
       <div class="active-line" id="football-provider-strip">
-        <div class="mini"><div class="muted">Fonte ao vivo</div><strong id="football-provider-active">carregando...</strong></div>
-        <div class="mini"><div class="muted">Ultima atualizacao</div><strong id="football-provider-updated">-</strong></div>
-        <div class="mini"><div class="muted">Requests hoje</div><strong id="football-provider-requests">-</strong></div>
+        <div class="mini"><div class="muted">Fonte ao vivo</div><strong id="football-provider-active">{_esc(initial_provider_active)}</strong></div>
+        <div class="mini"><div class="muted">Ultima atualizacao</div><strong id="football-provider-updated">{_esc(initial_provider_updated)}</strong></div>
+        <div class="mini"><div class="muted">Requests hoje</div><strong id="football-provider-requests">{_esc(initial_provider_requests)}</strong></div>
         <div class="mini"><div class="muted">Odds confirmadas</div><strong id="football-provider-odds">calculando...</strong></div>
         <div class="mini"><div class="muted">Jogos importados</div><strong id="football-provider-games">{len(live_games)}</strong></div>
-        <div class="mini"><div class="muted">Fallback</div><strong id="football-provider-fallback">-</strong></div>
-        <div class="mini"><div class="muted">Erro recente</div><strong id="football-provider-error">sem erro</strong></div>
+        <div class="mini"><div class="muted">Fallback</div><strong id="football-provider-fallback">{_esc(initial_provider_fallback)}</strong></div>
+        <div class="mini"><div class="muted">Erro recente</div><strong id="football-provider-error">{_esc(initial_provider_error)}</strong></div>
       </div>
-      <p class="muted" id="football-provider-note">API-Football no backend com fallback local/mock se a fonte falhar.</p>
+      <p class="muted" id="football-provider-note">{_esc(initial_provider_note)}</p>
       <div class="criteria-bar" id="quant-markets-criteria">
         <span class="criteria-chip">Mercados: Goals</span>
         <span class="criteria-chip">Corners</span>
@@ -3785,8 +3826,14 @@ def dashboard(request: Request) -> str:
       const data = await response.json();
       const status = data.status || {{}};
       window.lastFootballProviderStatus = status;
+      const providerActiveLabel = data.active_label
+        || (status.active
+          ? 'API-Football ativa'
+          : ((status.configured && (status.last_success_at || status.last_http_status === 200 || Number(status.requests_used_today || status.requests_total || 0) > 0) && !status.fallback_active)
+            ? 'API-Football ativa'
+            : (status.configured ? 'API-Football pronta' : 'API-Football inativa')));
       const mappings = [
-        ['football-provider-active', data.ok ? 'API-Football ativa' : 'API-Football inativa'],
+        ['football-provider-active', providerActiveLabel],
         ['football-provider-updated', data.last_update_at || status.last_success_at || '-'],
         ['football-provider-requests', status.requests_used_today ?? status.requests_total ?? '-'],
         ['football-provider-games', status.last_payload_items ?? '-'],
@@ -4303,6 +4350,22 @@ def jogos_do_dia_page(request: Request) -> str:
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     product_name = _esc(settings.product_name)
     build_stamp = _build_stamp()
+    football_provider = _football_api_provider(settings)
+    football_provider_status = football_provider.status_snapshot()
+    initial_provider_active = _football_provider_status_label(football_provider_status)
+    initial_provider_updated = str(
+        football_provider_status.get("last_live_update_at") or football_provider_status.get("last_success_at") or "-"
+    )
+    initial_provider_requests = str(
+        football_provider_status.get("requests_used_today") or football_provider_status.get("requests_total") or "-"
+    )
+    initial_provider_fallback = "ativo" if football_provider_status.get("fallback_active") else "inativo"
+    initial_provider_error = str(football_provider_status.get("last_error") or "sem erro")
+    initial_provider_note = (
+        "API-Football pronta para leitura no backend. Odds e jogos confirmados aparecem assim que o scanner fechar o ciclo."
+        if settings.api_football_key
+        else "API-Football no backend com fallback local/mock se a fonte falhar."
+    )
     page = """<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -5801,9 +5864,11 @@ async def api_football_provider_status(_: None = Depends(_auth)) -> JSONResponse
     provider = _football_api_provider(settings)
     health = await provider.health_check()
     status_payload = provider.status_snapshot()
+    active_label = _football_provider_status_label(status_payload)
     return JSONResponse(
         {
-            "ok": bool(health.get("ok")),
+            "ok": _football_provider_is_operational(status_payload),
+            "active_label": active_label,
             "provider": "api-football",
             "message": health.get("message"),
             "status": status_payload,
