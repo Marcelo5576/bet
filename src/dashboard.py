@@ -120,6 +120,128 @@ def _football_provider_status_label(status_payload: dict[str, Any]) -> str:
     return "API-Football inativa"
 
 
+def _provider_live_metrics(live_games: list[dict[str, Any]] | None) -> dict[str, Any]:
+    live_games = live_games or []
+    live_fixture_ids: set[str] = set()
+    confirmed_fixture_ids: set[str] = set()
+
+    for game in live_games:
+        if not isinstance(game, dict):
+            continue
+        fixture_id = str(game.get("game_id") or game.get("fixture_id") or "").strip()
+        if not fixture_id:
+            continue
+        live_fixture_ids.add(fixture_id)
+        odds_confirmed = bool(game.get("odds_confirmed"))
+        if not odds_confirmed:
+            for key in ("odds_home", "odds_draw", "odds_away"):
+                try:
+                    value = float(game.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    odds_confirmed = True
+                    break
+        if odds_confirmed:
+            confirmed_fixture_ids.add(fixture_id)
+
+    live_fixture_count = len(live_fixture_ids)
+    confirmed_count = len(confirmed_fixture_ids)
+    coverage_ratio = round(confirmed_count / live_fixture_count, 4) if live_fixture_count else 0.0
+    return {
+        "live_fixture_count": live_fixture_count,
+        "live_fixtures_with_confirmed_odds": confirmed_count,
+        "odds_coverage_ratio": coverage_ratio,
+    }
+
+
+def _provider_status_with_live(status_payload: dict[str, Any], live_games: list[dict[str, Any]] | None) -> dict[str, Any]:
+    merged = dict(status_payload or {})
+    metrics = _provider_live_metrics(live_games)
+    merged.update(metrics)
+    merged["games_imported"] = metrics["live_fixture_count"]
+    merged["raw_payload_items"] = int(status_payload.get("last_payload_items") or 0)
+    return merged
+
+
+def _provider_dashboard_strings(status_payload: dict[str, Any]) -> dict[str, str]:
+    payload = dict(status_payload or {})
+    configured = bool(payload.get("configured"))
+    provider_operational = _football_provider_is_operational(payload)
+    fallback_active = bool(payload.get("fallback_active"))
+    last_error = str(payload.get("last_error") or "").strip()
+    try:
+        status_code = int(payload.get("last_http_status")) if payload.get("last_http_status") is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    try:
+        total_games = int(payload.get("live_fixture_count") or payload.get("games_imported") or 0)
+    except (TypeError, ValueError):
+        total_games = 0
+    try:
+        confirmed_games = int(payload.get("live_fixtures_with_confirmed_odds") or 0)
+    except (TypeError, ValueError):
+        confirmed_games = 0
+    coverage_ratio = float(payload.get("odds_coverage_ratio") or 0.0)
+
+    api_health = "API: inativa"
+    if provider_operational:
+        api_health = "API: fallback ativo" if fallback_active else "API: ativa e respondendo"
+    elif configured:
+        api_health = "API: configurada, sem resposta recente"
+    else:
+        api_health = "API: nao configurada"
+
+    odds_text = "🔴 Nao disponiveis"
+    note = "Sem odds reais confirmadas. Entrada bloqueada."
+    if status_code == 403:
+        odds_text = "⚪ Plano/API sem odds"
+        note = "API retornou 403 para odds: plano/permissao pode nao incluir esse endpoint."
+    elif status_code == 429:
+        odds_text = "🔴 Limite API"
+        note = "API retornou 429: aguardando cooldown/cache antes de confirmar novas odds."
+    elif re.search(r"request limit|limite|odds|permissao|permissão|plano", last_error, re.IGNORECASE):
+        odds_text = "🔴 Limite diario" if re.search(r"request limit|limite", last_error, re.IGNORECASE) else "⚪ Plano/API sem odds"
+        note = last_error
+    elif confirmed_games > 0 and total_games > 0:
+        if confirmed_games < total_games:
+            odds_text = f"🟡 Parcial: {confirmed_games}/{total_games}"
+            note = "Alguns jogos têm odds reais; os demais seguem bloqueados para entrada."
+        else:
+            odds_text = f"🟢 Confirmadas: {confirmed_games}/{total_games}"
+            note = "Odds reais confirmadas nos jogos ao vivo atuais."
+
+    if total_games <= 0:
+        coverage = "Cobertura: sem fixtures ao vivo"
+    elif confirmed_games <= 0:
+        coverage = f"Cobertura: 0/{total_games} fixtures com odd operacional"
+    elif confirmed_games < total_games:
+        coverage = f"Cobertura: parcial {confirmed_games}/{total_games} fixtures"
+    else:
+        coverage = f"Cobertura: ampla {confirmed_games}/{total_games} fixtures"
+
+    recommendation = "Provider complementar: avaliar depois"
+    if not configured:
+        recommendation = "Provider complementar: nao, primeiro configurar a API"
+    elif status_code == 403:
+        recommendation = "Provider complementar: sim, o plano atual parece limitar odds"
+    elif status_code == 429:
+        recommendation = "Provider complementar: nao obrigatorio, mas ajuda a reduzir pressao"
+    elif provider_operational and total_games > 0 and coverage_ratio < 0.4:
+        recommendation = "Provider complementar: sim, para reforcar corners/cartoes/asiaticos"
+    elif provider_operational:
+        recommendation = "Provider complementar: opcional, API atual esta funcional"
+
+    return {
+        "odds_text": odds_text,
+        "note": note,
+        "api_health": api_health,
+        "coverage": coverage,
+        "recommendation": recommendation,
+        "games_text": str(total_games or "-"),
+    }
+
+
 class ImportPayload(BaseModel):
     text: str
 
@@ -345,7 +467,7 @@ def dashboard(request: Request) -> str:
     scanner = _scanner_status(state, settings)
     stats = _stats(state, visible_history)
     football_provider = _football_api_provider(settings)
-    football_provider_status = football_provider.status_snapshot()
+    football_provider_status = _provider_status_with_live(football_provider.status_snapshot(), live_games)
     initial_provider_active = _football_provider_status_label(football_provider_status)
     initial_provider_updated = str(
         football_provider_status.get("last_live_update_at") or football_provider_status.get("last_success_at") or "-"
@@ -355,11 +477,8 @@ def dashboard(request: Request) -> str:
     )
     initial_provider_fallback = "ativo" if football_provider_status.get("fallback_active") else "inativo"
     initial_provider_error = str(football_provider_status.get("last_error") or "sem erro")
-    initial_provider_note = (
-        "API-Football pronta para leitura no backend. Odds e jogos confirmados aparecem assim que o scanner fechar o ciclo."
-        if settings.api_football_key
-        else "API-Football no backend com fallback local/mock se a fonte falhar."
-    )
+    initial_provider_ui = _provider_dashboard_strings(football_provider_status)
+    initial_provider_note = initial_provider_ui["note"]
     rows = "\n".join(_row(item) for item in visible_history[:120])
     active_entries = _active_entries(history, state.active_signal)
     active_entry_rows = "\n".join(_active_entry_row(item) for item in active_entries)
@@ -3005,10 +3124,15 @@ def dashboard(request: Request) -> str:
         <div class="mini"><div class="muted">Fonte ao vivo</div><strong id="football-provider-active">{_esc(initial_provider_active)}</strong></div>
         <div class="mini"><div class="muted">Ultima atualizacao</div><strong id="football-provider-updated">{_esc(initial_provider_updated)}</strong></div>
         <div class="mini"><div class="muted">Requests hoje</div><strong id="football-provider-requests">{_esc(initial_provider_requests)}</strong></div>
-        <div class="mini"><div class="muted">Odds confirmadas</div><strong id="football-provider-odds">calculando...</strong></div>
-        <div class="mini"><div class="muted">Jogos importados</div><strong id="football-provider-games">{len(live_games)}</strong></div>
+        <div class="mini"><div class="muted">Odds confirmadas</div><strong id="football-provider-odds">{_esc(initial_provider_ui["odds_text"])}</strong></div>
+        <div class="mini"><div class="muted">Fixtures ao vivo</div><strong id="football-provider-games">{_esc(initial_provider_ui["games_text"])}</strong></div>
         <div class="mini"><div class="muted">Fallback</div><strong id="football-provider-fallback">{_esc(initial_provider_fallback)}</strong></div>
         <div class="mini"><div class="muted">Erro recente</div><strong id="football-provider-error">{_esc(initial_provider_error)}</strong></div>
+      </div>
+      <div class="criteria-bar" id="football-provider-health-bar">
+        <span class="criteria-chip" id="football-provider-api-health">{_esc(initial_provider_ui["api_health"])}</span>
+        <span class="criteria-chip" id="football-provider-coverage">{_esc(initial_provider_ui["coverage"])}</span>
+        <span class="criteria-chip" id="football-provider-recommendation">{_esc(initial_provider_ui["recommendation"])}</span>
       </div>
       <p class="muted" id="football-provider-note">{_esc(initial_provider_note)}</p>
       <div class="criteria-bar" id="quant-markets-criteria">
@@ -3712,21 +3836,45 @@ def dashboard(request: Request) -> str:
   function refreshProviderDerivedMetrics(scanner = {{}}) {{
     const rows = Array.from(document.querySelectorAll('#simulator-rows tr[data-decision]'));
     const games = new Set();
-    let oddsConfirmed = 0;
+    const confirmedGames = new Set();
     rows.forEach((row) => {{
       const odd = Number(row.getAttribute('data-odd') || '0');
-      if (odd > 0) oddsConfirmed += 1;
+      const oddsRowConfirmed = row.getAttribute('data-odds-confirmed') === 'true' || odd > 0;
       const matchLabel = row.getAttribute('data-game-id') || row.querySelector('.scanner-row-lead strong')?.textContent?.trim();
       if (matchLabel) games.add(matchLabel);
+      if (matchLabel && oddsRowConfirmed) confirmedGames.add(matchLabel);
     }});
     const oddsEl = document.getElementById('football-provider-odds');
     const gamesEl = document.getElementById('football-provider-games');
     const note = document.getElementById('football-provider-note');
+    const apiHealthEl = document.getElementById('football-provider-api-health');
+    const coverageEl = document.getElementById('football-provider-coverage');
+    const recommendationEl = document.getElementById('football-provider-recommendation');
     const status = window.lastFootballProviderStatus || {{}};
-    const totalGames = games.size || Number(scanner.today_games || scanner.candidates || 0) || 0;
+    const rawPayloadItems = Number(status.raw_payload_items ?? status.last_payload_items ?? 0);
+    const liveFixtureCount = Number(status.live_fixture_count ?? status.games_imported ?? 0);
+    const totalGames = liveFixtureCount || games.size || Number(scanner.today_games || scanner.candidates || 0) || 0;
+    const coveredGames = Math.max(
+      Number(status.live_fixtures_with_confirmed_odds ?? 0),
+      confirmedGames.size,
+    );
+    const providerOperational = Boolean(
+      status.active
+      || (!status.fallback_active && status.configured && (status.last_http_status === 200 || status.last_success_at))
+    );
     let oddsText = '🔴 Nao disponiveis';
     let reason = 'Sem odds reais confirmadas. Entrada bloqueada.';
     const lastError = String(status.last_error || '');
+    let apiHealthText = 'API: inativa';
+    let coverageText = 'Cobertura: sem leitura';
+    let recommendationText = 'Provider complementar: avaliar depois';
+    if (providerOperational) {{
+      apiHealthText = status.fallback_active ? 'API: fallback ativo' : 'API: ativa e respondendo';
+    }} else if (status.configured) {{
+      apiHealthText = 'API: configurada, sem resposta recente';
+    }} else {{
+      apiHealthText = 'API: nao configurada';
+    }}
     if (Number(status.last_http_status) === 403) {{
       oddsText = '⚪ Plano/API sem odds';
       reason = 'API retornou 403 para odds: plano/permissao pode nao incluir esse endpoint.';
@@ -3736,23 +3884,50 @@ def dashboard(request: Request) -> str:
     }} else if (/request limit|limite|odds|permissao|permissão|plano/i.test(lastError)) {{
       oddsText = /request limit|limite/i.test(lastError) ? '🔴 Limite diario' : '⚪ Plano/API sem odds';
       reason = lastError;
-    }} else if (oddsConfirmed > 0 && totalGames > 0 && oddsConfirmed < totalGames) {{
-      oddsText = `🟡 Parcial: ${{oddsConfirmed}}/${{totalGames}}`;
+    }} else if (coveredGames > 0 && totalGames > 0 && coveredGames < totalGames) {{
+      oddsText = `🟡 Parcial: ${{coveredGames}}/${{totalGames}}`;
       reason = 'Alguns jogos têm odds reais; os demais seguem bloqueados para entrada.';
-    }} else if (oddsConfirmed > 0) {{
-      oddsText = `🟢 Confirmadas: ${{oddsConfirmed}}`;
+    }} else if (coveredGames > 0 && totalGames > 0) {{
+      oddsText = `🟢 Confirmadas: ${{coveredGames}}/${{totalGames}}`;
+      reason = 'Odds reais confirmadas nos jogos ao vivo atuais.';
+    }} else if (coveredGames > 0) {{
+      oddsText = `🟢 Confirmadas: ${{coveredGames}}`;
       reason = 'Odds reais confirmadas em mercados do scanner.';
     }} else if (window.lastOddsDiagnosis) {{
       reason = window.lastOddsDiagnosis;
+    }}
+    if (totalGames <= 0) {{
+      coverageText = 'Cobertura: sem fixtures ao vivo';
+    }} else if (coveredGames <= 0) {{
+      coverageText = `Cobertura: 0/${{totalGames}} fixtures com odd operacional`;
+    }} else if (coveredGames < totalGames) {{
+      coverageText = `Cobertura: parcial ${{coveredGames}}/${{totalGames}} fixtures`;
+    }} else {{
+      coverageText = `Cobertura: ampla ${{coveredGames}}/${{totalGames}} fixtures`;
+    }}
+    if (!status.configured) {{
+      recommendationText = 'Provider complementar: nao, primeiro configurar a API';
+    }} else if (Number(status.last_http_status) === 403) {{
+      recommendationText = 'Provider complementar: sim, o plano atual parece limitar odds';
+    }} else if (Number(status.last_http_status) === 429) {{
+      recommendationText = 'Provider complementar: nao obrigatorio, mas ajuda a reduzir pressao';
+    }} else if (providerOperational && totalGames > 0 && coveredGames / Math.max(totalGames, 1) < 0.4) {{
+      recommendationText = 'Provider complementar: sim, para reforcar corners/cartoes/asiaticos';
+    }} else if (providerOperational) {{
+      recommendationText = 'Provider complementar: opcional, API atual esta funcional';
     }}
     if (oddsEl) {{
       oddsEl.textContent = oddsText;
     }}
     if (gamesEl) {{
-      const imported = totalGames;
-      if (imported > 0) gamesEl.textContent = String(imported);
+      const liveTotal = liveFixtureCount || totalGames;
+      if (liveTotal > 0) gamesEl.textContent = String(liveTotal);
+      else if (rawPayloadItems > 0) gamesEl.textContent = String(rawPayloadItems);
       else if (!gamesEl.textContent || gamesEl.textContent === 'calculando...') gamesEl.textContent = '-';
     }}
+    if (apiHealthEl) apiHealthEl.textContent = apiHealthText;
+    if (coverageEl) coverageEl.textContent = coverageText;
+    if (recommendationEl) recommendationEl.textContent = recommendationText;
     if (note && reason) note.textContent = reason;
   }}
 
@@ -3836,7 +4011,7 @@ def dashboard(request: Request) -> str:
         ['football-provider-active', providerActiveLabel],
         ['football-provider-updated', data.last_update_at || status.last_success_at || '-'],
         ['football-provider-requests', status.requests_used_today ?? status.requests_total ?? '-'],
-        ['football-provider-games', status.last_payload_items ?? '-'],
+        ['football-provider-games', status.live_fixture_count ?? status.games_imported ?? status.last_payload_items ?? '-'],
         ['football-provider-fallback', status.fallback_active ? 'ativo' : 'inativo'],
         ['football-provider-error', status.last_error || 'sem erro'],
       ];
@@ -4228,6 +4403,7 @@ def dashboard(request: Request) -> str:
       const dashboardTape = document.getElementById('dashboard-market-tape');
       if (dashboardTape) dashboardTape.innerHTML = data.market_tape_html || '<span class="tape-chip mid">Aguardando feed ao vivo</span>';
       const feed = document.getElementById('dashboard-live-feed');
+      const availableGameIds = Array.isArray(data.game_ids) ? data.game_ids.map(id => String(id)) : [];
       if (feed && data.dashboard_feed_html) {{
         feed.innerHTML = data.dashboard_feed_html;
         applyDashboardFeedFilters();
@@ -4236,12 +4412,16 @@ def dashboard(request: Request) -> str:
       const marketStatus = document.getElementById('market-board-status');
       if (marketStatus) marketStatus.textContent = `Atualizado: ${{data.updated_at}}`;
       const stats = document.getElementById('match-stats');
-      if (stats && window.selectedGameId) {{
+      if (stats && window.selectedGameId && availableGameIds.includes(String(window.selectedGameId))) {{
         await updateSelectedMatchStats(window.selectedGameId, false);
       }} else if (stats && data.match_stats_html) {{
         setMatchStatsHtml(data.match_stats_html);
         window.selectedGameId = data.default_game_id || null;
         highlightDashboardFeed(window.selectedGameId);
+      }} else if (stats) {{
+        window.selectedGameId = null;
+        highlightDashboardFeed('');
+        setMatchStatsHtml('<p class="muted">Sem jogo ao vivo selecionado no momento.</p>');
       }}
       status.textContent = `Atualizado: ${{data.updated_at}} | feed ao vivo real`;
     }} catch (error) {{
@@ -4351,7 +4531,9 @@ def jogos_do_dia_page(request: Request) -> str:
     product_name = _esc(settings.product_name)
     build_stamp = _build_stamp()
     football_provider = _football_api_provider(settings)
-    football_provider_status = football_provider.status_snapshot()
+    state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    live_games = _fresh_live_games(state, settings)
+    football_provider_status = _provider_status_with_live(football_provider.status_snapshot(), live_games)
     initial_provider_active = _football_provider_status_label(football_provider_status)
     initial_provider_updated = str(
         football_provider_status.get("last_live_update_at") or football_provider_status.get("last_success_at") or "-"
@@ -4361,11 +4543,8 @@ def jogos_do_dia_page(request: Request) -> str:
     )
     initial_provider_fallback = "ativo" if football_provider_status.get("fallback_active") else "inativo"
     initial_provider_error = str(football_provider_status.get("last_error") or "sem erro")
-    initial_provider_note = (
-        "API-Football pronta para leitura no backend. Odds e jogos confirmados aparecem assim que o scanner fechar o ciclo."
-        if settings.api_football_key
-        else "API-Football no backend com fallback local/mock se a fonte falhar."
-    )
+    initial_provider_ui = _provider_dashboard_strings(football_provider_status)
+    initial_provider_note = initial_provider_ui["note"]
     page = """<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -5579,6 +5758,7 @@ def jogos_do_dia_page(request: Request) -> str:
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Falha ao carregar painel.');
         boardState.payload = data;
+        if (data.provider_status) window.lastFootballProviderStatus = data.provider_status;
         renderLeagueFilter(data.games || []);
         renderMarketFilter(data);
         renderMetrics(data);
@@ -5861,9 +6041,11 @@ async def _football_live_fallback_payload(settings: Settings) -> dict[str, Any]:
 @app.get("/api/football/provider/status")
 async def api_football_provider_status(_: None = Depends(_auth)) -> JSONResponse:
     settings = load_settings()
+    state = StateStore(os.getenv("STATE_FILE", "data/state.json")).load()
+    live_games = _fresh_live_games(state, settings)
     provider = _football_api_provider(settings)
     health = await provider.health_check()
-    status_payload = provider.status_snapshot()
+    status_payload = _provider_status_with_live(provider.status_snapshot(), live_games)
     active_label = _football_provider_status_label(status_payload)
     return JSONResponse(
         {
@@ -5874,6 +6056,9 @@ async def api_football_provider_status(_: None = Depends(_auth)) -> JSONResponse
             "status": status_payload,
             "fallback_active": bool(status_payload.get("fallback_active")),
             "last_update_at": status_payload.get("last_live_update_at") or status_payload.get("last_success_at"),
+            "live_fixture_count": status_payload.get("live_fixture_count") or 0,
+            "live_fixtures_with_confirmed_odds": status_payload.get("live_fixtures_with_confirmed_odds") or 0,
+            "odds_coverage_ratio": status_payload.get("odds_coverage_ratio") or 0.0,
         }
     )
 
@@ -6187,6 +6372,24 @@ def api_jogosdodia_board(_: None = Depends(_auth)) -> JSONResponse:
                 "pregame_watchlist": [],
                 "games": [],
                 "selected_game_id": None,
+                "provider_status": {
+                    "active_label": "indisponivel no fallback",
+                    "ok": False,
+                    "configured": False,
+                    "active": False,
+                    "fallback_active": True,
+                    "last_success_at": None,
+                    "last_live_update_at": None,
+                    "last_http_status": None,
+                    "last_update_at": None,
+                    "requests_used_today": 0,
+                    "games_imported": 0,
+                    "raw_payload_items": 0,
+                    "live_fixture_count": 0,
+                    "live_fixtures_with_confirmed_odds": 0,
+                    "odds_coverage_ratio": 0.0,
+                    "last_error": str(exc.__class__.__name__),
+                },
                 "notes": {
                     "mode": "fallback",
                     "mock": False,
@@ -6400,6 +6603,11 @@ def api_simulator(_: None = Depends(_auth)) -> JSONResponse:
             "market_tape_html": _market_tape(live_games),
             "match_stats_html": _match_stats_panel(default_signal, _green_red(state.history or [])),
             "default_game_id": default_game_id,
+            "game_ids": [
+                str((item.get("game") or {}).get("game_id"))
+                for item in simulation_signals
+                if str((item.get("game") or {}).get("game_id") or "").strip()
+            ],
             "updated_at": _short_datetime(state.last_scan_at),
         }
     )
@@ -8776,6 +8984,26 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
     live_games = _fresh_live_games(state, settings)
     pregame_games = _fresh_pregame_watchlist(state, settings)
     candidate_signals = _fresh_candidate_signals(state, settings)
+    football_provider = _football_api_provider(settings)
+    provider_status = _provider_status_with_live(football_provider.status_snapshot(), live_games)
+    provider_payload = {
+        "active_label": _football_provider_status_label(provider_status),
+        "ok": _football_provider_is_operational(provider_status),
+        "configured": bool(provider_status.get("configured")),
+        "active": bool(provider_status.get("active")),
+        "fallback_active": bool(provider_status.get("fallback_active")),
+        "last_success_at": provider_status.get("last_success_at"),
+        "last_live_update_at": provider_status.get("last_live_update_at"),
+        "last_http_status": provider_status.get("last_http_status"),
+        "last_update_at": provider_status.get("last_live_update_at") or provider_status.get("last_success_at"),
+        "requests_used_today": provider_status.get("requests_used_today") or provider_status.get("requests_total") or 0,
+        "games_imported": provider_status.get("games_imported") or 0,
+        "raw_payload_items": provider_status.get("raw_payload_items") or 0,
+        "live_fixture_count": provider_status.get("live_fixture_count") or 0,
+        "live_fixtures_with_confirmed_odds": provider_status.get("live_fixtures_with_confirmed_odds") or 0,
+        "odds_coverage_ratio": provider_status.get("odds_coverage_ratio") or 0.0,
+        "last_error": str(provider_status.get("last_error") or "sem erro"),
+    }
     market_counter: Counter[str] = Counter()
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for signal in candidate_signals:
@@ -8927,6 +9155,7 @@ def _jogosdodia_board_payload(state, settings) -> dict[str, Any]:
         "pregame_watchlist": pregame_payload,
         "games": games_payload,
         "selected_game_id": games_payload[0]["game_id"] if games_payload else None,
+        "provider_status": provider_payload,
         "notes": {
             "mode": "pregame_then_real_live",
             "mock": False,
