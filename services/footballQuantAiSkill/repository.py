@@ -899,6 +899,126 @@ class FootballResearchRepository:
         payload["raw"] = _loads(payload.get("raw_json"), {})
         return payload
 
+    def upsert_historical_features(self, features: list[dict[str, Any]], *, user_id: int | None = None) -> int:
+        if not features:
+            return 0
+        imported = 0
+        with self.connect() as conn:
+            for item in features:
+                match_id = int(item.get("match_id") or 0)
+                feature_set_version = str(item.get("feature_set_version") or "supabase")
+                if match_id <= 0 or not feature_set_version:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO historical_features (
+                        user_id, match_id, feature_set_version, temporal_split,
+                        home_recent_form_5, away_recent_form_5,
+                        home_goals_avg_5, away_goals_avg_5,
+                        home_conceded_avg_5, away_conceded_avg_5,
+                        home_xg_avg_5, away_xg_avg_5,
+                        home_strength, away_strength,
+                        market_implied_probability, closing_line_value,
+                        data_quality_score, usable_for_training, context_match_count,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(match_id, feature_set_version) DO UPDATE SET
+                        temporal_split = excluded.temporal_split,
+                        home_recent_form_5 = excluded.home_recent_form_5,
+                        away_recent_form_5 = excluded.away_recent_form_5,
+                        home_goals_avg_5 = excluded.home_goals_avg_5,
+                        away_goals_avg_5 = excluded.away_goals_avg_5,
+                        home_conceded_avg_5 = excluded.home_conceded_avg_5,
+                        away_conceded_avg_5 = excluded.away_conceded_avg_5,
+                        home_xg_avg_5 = excluded.home_xg_avg_5,
+                        away_xg_avg_5 = excluded.away_xg_avg_5,
+                        home_strength = excluded.home_strength,
+                        away_strength = excluded.away_strength,
+                        market_implied_probability = excluded.market_implied_probability,
+                        closing_line_value = excluded.closing_line_value,
+                        data_quality_score = excluded.data_quality_score,
+                        usable_for_training = excluded.usable_for_training,
+                        context_match_count = excluded.context_match_count,
+                        created_at = excluded.created_at
+                    """,
+                    (
+                        user_id,
+                        match_id,
+                        feature_set_version,
+                        item.get("temporal_split"),
+                        item.get("home_recent_form_5"),
+                        item.get("away_recent_form_5"),
+                        item.get("home_goals_avg_5"),
+                        item.get("away_goals_avg_5"),
+                        item.get("home_conceded_avg_5"),
+                        item.get("away_conceded_avg_5"),
+                        item.get("home_xg_avg_5"),
+                        item.get("away_xg_avg_5"),
+                        item.get("home_strength"),
+                        item.get("away_strength"),
+                        item.get("market_implied_probability"),
+                        item.get("closing_line_value"),
+                        int(item.get("data_quality_score") or 0),
+                        1 if item.get("usable_for_training") else 0,
+                        int(item.get("context_match_count") or 0),
+                        str(item.get("created_at") or _now_iso()),
+                    ),
+                )
+                imported += 1
+        return imported
+
+    def upsert_league_reliability_scores(self, rows: list[dict[str, Any]], *, user_id: int | None = None) -> int:
+        if not rows:
+            return 0
+        imported = 0
+        with self.connect() as conn:
+            for item in rows:
+                league = str(item.get("league") or "").strip()
+                season = item.get("season")
+                if not league:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO league_reliability_scores (
+                        user_id, league, season, match_count, trainable_count, odds_count, stats_count,
+                        avg_data_quality, roi_simulated, drawdown, stability_score,
+                        league_reliability_score, classification, reasons_json, calculated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(league, season) DO UPDATE SET
+                        match_count = excluded.match_count,
+                        trainable_count = excluded.trainable_count,
+                        odds_count = excluded.odds_count,
+                        stats_count = excluded.stats_count,
+                        avg_data_quality = excluded.avg_data_quality,
+                        roi_simulated = excluded.roi_simulated,
+                        drawdown = excluded.drawdown,
+                        stability_score = excluded.stability_score,
+                        league_reliability_score = excluded.league_reliability_score,
+                        classification = excluded.classification,
+                        reasons_json = excluded.reasons_json,
+                        calculated_at = excluded.calculated_at
+                    """,
+                    (
+                        user_id,
+                        league,
+                        season,
+                        int(item.get("match_count") or 0),
+                        int(item.get("trainable_count") or 0),
+                        int(item.get("odds_count") or 0),
+                        int(item.get("stats_count") or 0),
+                        float(item.get("avg_data_quality") or 0.0),
+                        float(item.get("roi_simulated") or 0.0),
+                        float(item.get("drawdown") or 0.0),
+                        float(item.get("stability_score") or 0.0),
+                        float(item.get("league_reliability_score") or 0.0),
+                        str(item.get("classification") or "Em observação"),
+                        _json(_loads(item.get("reasons_json"), item.get("reasons") or [])),
+                        str(item.get("calculated_at") or _now_iso()),
+                    ),
+                )
+                imported += 1
+        return imported
+
     def save_prediction(self, prediction: MatchPrediction, *, user_id: int | None = None) -> int:
         with self.connect() as conn:
             conn.execute(

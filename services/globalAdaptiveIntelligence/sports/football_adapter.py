@@ -13,10 +13,20 @@ class FootballAdapter:
     def __init__(self):
         self.skill = get_football_quant_ai_skill()
 
+    def _hydrate_historical_context(self) -> None:
+        try:
+            self.skill.supabase.hydrate_local_cache_if_needed()
+        except Exception:
+            # A camada global continua operacional com o cache local mesmo se o refresh
+            # remoto falhar neste ciclo.
+            return
+
     def getEvents(self, **kwargs) -> list[dict[str, Any]]:
+        self._hydrate_historical_context()
         return self.skill.repository.list_historical_matches(limit=int(kwargs.get("limit", 30)))
 
     def getHistoricalEvents(self, **kwargs) -> list[dict[str, Any]]:
+        self._hydrate_historical_context()
         return self.skill.repository.list_historical_matches(
             league=kwargs.get("league"),
             season=kwargs.get("season"),
@@ -25,6 +35,7 @@ class FootballAdapter:
         )
 
     def getOdds(self, **kwargs) -> list[dict[str, Any]]:
+        self._hydrate_historical_context()
         match_id = kwargs.get("event_id")
         if not match_id:
             return []
@@ -32,6 +43,7 @@ class FootballAdapter:
         return list(match.get("odds") or []) if match else []
 
     def getStats(self, event_id: int) -> dict[str, Any] | None:
+        self._hydrate_historical_context()
         match = self.skill.repository.get_historical_match(int(event_id))
         return dict(match.get("stats") or {}) if match else None
 
@@ -52,6 +64,7 @@ class FootballAdapter:
         }
 
     def runPrediction(self, event_id: int, **kwargs) -> dict[str, Any]:
+        self._hydrate_historical_context()
         market = kwargs.get("market", "match_winner_home")
         offered_odd = kwargs.get("offered_odd")
         bankroll = kwargs.get("bankroll")
@@ -67,6 +80,7 @@ class FootballAdapter:
         return asdict(prediction)
 
     def runBacktest(self, **kwargs) -> dict[str, Any]:
+        self._hydrate_historical_context()
         summary = self.skill.backtesting.runBacktest(
             BacktestRequest(
                 league=kwargs.get("league"),

@@ -88,6 +88,7 @@ class GlobalAIRouterTests(unittest.TestCase):
             def football_analysis_board(self, *, user_id=None):
                 return {
                     "market": "match_winner_home",
+                    "research_health": {"counts": {"historical_matches": 3}, "supabase": {"enabled": True, "last_error": None}},
                     "items": [
                         {
                             "match": {"id": 1, "home_team": "A", "away_team": "B", "match_date": datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)},
@@ -109,6 +110,28 @@ class GlobalAIRouterTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["items"][0]["prediction"]["created_at"], "2026-05-07T12:01:00+00:00")
         self.assertEqual(payload["items"][0]["match"]["match_date"], "2026-05-07T12:00:00+00:00")
+        self.assertEqual(payload["research_health"]["counts"]["historical_matches"], 3)
+
+    def test_monte_carlo_page_keeps_inline_button_action(self) -> None:
+        app.dependency_overrides[_require_user] = lambda: {"id": 1, "email": "test@example.com"}
+        client = TestClient(app)
+
+        response = client.get("/app/monte-carlo-lab")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="mc-run"', response.text)
+        self.assertIn('onclick="runMonteCarlo(this); return false;"', response.text)
+        self.assertIn("withBusy(button, 'Rodando...'", response.text)
+
+    def test_football_analysis_page_surfaces_history_card(self) -> None:
+        app.dependency_overrides[_require_user] = lambda: {"id": 1, "email": "test@example.com"}
+        client = TestClient(app)
+
+        response = client.get("/app/football-analysis")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Base historica usada nesta leitura", response.text)
+        self.assertIn("Historico local", response.text)
 
 
 if __name__ == "__main__":

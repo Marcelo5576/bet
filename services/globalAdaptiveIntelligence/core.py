@@ -89,6 +89,9 @@ class GlobalAdaptiveIntelligencePlatform:
             SupervisorAgent(),
         ]
 
+    def _research_health_snapshot(self) -> dict[str, Any]:
+        return self.football_skill.health()
+
     def audit_report(self) -> dict[str, Any]:
         discovery = self.football_skill.discovery.scan()
         return {
@@ -262,7 +265,7 @@ class GlobalAdaptiveIntelligencePlatform:
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "sources": self.data_sources.list_sources(),
-            "research_health": self.football_skill.health(),
+            "research_health": self._research_health_snapshot(),
             "global_snapshot": self.repository.snapshot(),
             "generated_features": features[:8],
             "learning": learning,
@@ -286,7 +289,11 @@ class GlobalAdaptiveIntelligencePlatform:
                     "meta": analysis["meta"],
                 }
             )
-        return {"market": chosen_market, "items": rows}
+        return {
+            "market": chosen_market,
+            "items": rows,
+            "research_health": self._research_health_snapshot(),
+        }
 
     def run_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
         from services.footballQuantAiSkill.schemas import BacktestRequest

@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - fallback para runtimes enxutos
+    def load_dotenv(*args, **kwargs):
+        return False
+
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
     if value is None:
@@ -32,6 +38,7 @@ class ResearchSkillSettings:
 
 
 def load_research_skill_settings() -> ResearchSkillSettings:
+    load_dotenv()
     return ResearchSkillSettings(
         db_file=os.getenv("FOOTBALL_RESEARCH_DB_FILE", "data/football_quant_research.db"),
         csv_root=os.getenv("FOOTBALL_RESEARCH_CSV_ROOT", "data/processed"),
@@ -51,4 +58,3 @@ def load_research_skill_settings() -> ResearchSkillSettings:
         supabase_service_role_key=(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or None,
         auto_seed_mocks=_as_bool(os.getenv("FOOTBALL_RESEARCH_AUTO_SEED_MOCKS"), True),
     )
-

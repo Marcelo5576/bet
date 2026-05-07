@@ -111,6 +111,7 @@ def _shell(title: str, mode: str) -> str:
     .kpis {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); }}
     .mini {{ background:#0f151d; border:1px solid var(--line); border-radius:14px; padding:14px; }}
     .mini strong {{ display:block; font-size:24px; margin-top:8px; }}
+    .mini.error {{ border-color:rgba(255,107,122,.45); color:#ffd3d8; }}
     .muted {{ color:var(--muted); }}
     h2 {{ margin:0 0 10px; font-size:18px; }}
     h3 {{ margin:0 0 8px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }}
@@ -119,6 +120,7 @@ def _shell(title: str, mode: str) -> str:
       width:100%; border:1px solid var(--line); background:#0f151d; color:var(--text); padding:12px; border-radius:12px; font:inherit;
     }}
     button {{ cursor:pointer; font-weight:800; }}
+    button:disabled {{ cursor:progress; opacity:.72; }}
     button.primary {{ background:linear-gradient(180deg,#1e6fff,#0d4ed9); border-color:#2563eb; }}
     button.good {{ background:linear-gradient(180deg,#169b61,#0d7b4d); border-color:#0f9a5e; }}
     button.warn {{ background:linear-gradient(180deg,#d9a31a,#b6850f); border-color:#d9a31a; color:#101317; }}
@@ -174,6 +176,104 @@ def _shell(title: str, mode: str) -> str:
     function card(title, body) {{
       return `<section class="card">${{title ? `<h2>${{title}}</h2>` : ''}}${{body}}</section>`;
     }}
+    function escapeHtml(value) {{
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }}
+    function parseLocaleNumber(value, fallback) {{
+      const raw = String(value ?? '').trim();
+      if (!raw) return fallback;
+      let normalized = raw.replace(/\\s+/g, '');
+      if (normalized.includes(',') && normalized.includes('.')) {{
+        if (normalized.lastIndexOf(',') > normalized.lastIndexOf('.')) {{
+          normalized = normalized.replace(/\\./g, '').replace(',', '.');
+        }} else {{
+          normalized = normalized.replace(/,/g, '');
+        }}
+      }} else if (normalized.includes(',')) {{
+        normalized = normalized.replace(',', '.');
+      }}
+      const parsed = Number(normalized);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }}
+    function renderJson(targetId, payload) {{
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      target.className = 'mini';
+      target.innerHTML = `<pre>${{escapeHtml(JSON.stringify(payload, null, 2))}}</pre>`;
+    }}
+    function renderMessage(targetId, text, tone='muted') {{
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      target.className = `mini ${{tone}}`;
+      target.textContent = text;
+    }}
+    async function withBusy(button, busyLabel, handler) {{
+      const originalLabel = button?.textContent || '';
+      if (button) {{
+        button.disabled = true;
+        button.textContent = busyLabel;
+      }}
+      try {{
+        await handler();
+      }} finally {{
+        if (button) {{
+          button.disabled = false;
+          button.textContent = originalLabel;
+        }}
+      }}
+    }}
+    function historicalSourceSummary(health) {{
+      const counts = health?.counts || {{}};
+      const supabase = health?.supabase || {{}};
+      const localMatches = Number(counts.historical_matches || 0);
+      const localFeatures = Number(counts.historical_features || 0);
+      const imported = supabase?.last_hydrate_result || {{}};
+      if (supabase.enabled && !supabase.last_error) {{
+        return {{
+          tone: 'green',
+          title: 'Supabase historico ativo',
+          detail: `Cache local com ${{localMatches}} jogos e ${{localFeatures}} features. Ultima hidratacao importou ${{Number(imported.imported_matches || 0)}} jogos.`,
+        }};
+      }}
+      if (supabase.enabled && supabase.last_error) {{
+        return {{
+          tone: 'amber',
+          title: 'Usando cache local',
+          detail: `Supabase configurado, mas o refresh remoto falhou neste ciclo. Seguimos com ${{localMatches}} jogos e ${{localFeatures}} features locais.`,
+        }};
+      }}
+      return {{
+        tone: 'muted',
+        title: 'Sem Supabase remoto',
+        detail: `Os agentes estao operando so com o historico local de ${{localMatches}} jogos e ${{localFeatures}} features.`,
+      }};
+    }}
+    function historicalContextCard(title, health) {{
+      const counts = health?.counts || {{}};
+      const supabase = health?.supabase || {{}};
+      const summary = historicalSourceSummary(health || {{}});
+      const lastHydrate = supabase?.last_hydrate_at ? String(supabase.last_hydrate_at).slice(0, 16).replace('T', ' ') : 'ainda nao executada';
+      const detail = supabase?.last_error ? escapeHtml(String(supabase.last_error)) : 'Sem erro recente no sincronismo.';
+      return card(title, `
+        <div class="kpis">
+          <div class="mini"><div class="muted">Historico local</div><strong>${{Number(counts.historical_matches || 0)}}</strong></div>
+          <div class="mini"><div class="muted">Features locais</div><strong>${{Number(counts.historical_features || 0)}}</strong></div>
+          <div class="mini"><div class="muted">Ligas confiaveis</div><strong>${{Number(counts.league_reliability_scores || 0)}}</strong></div>
+          <div class="mini"><div class="muted">Supabase remoto</div><strong>${{supabase?.enabled ? 'ligado' : 'desligado'}}</strong></div>
+        </div>
+        <div class="mini ${{summary.tone}}" style="margin-top:12px">
+          <strong style="font-size:18px">${{summary.title}}</strong>
+          <div class="muted" style="margin-top:8px">${{summary.detail}}</div>
+          <div class="muted" style="margin-top:8px">Ultima hidratacao: ${{lastHydrate}}</div>
+          <div class="muted" style="margin-top:8px">Diagnostico: ${{detail}}</div>
+        </div>
+      `);
+    }}
     async function loadControlCenter() {{
       const data = await api('/api/global-ai/control-center');
       root.innerHTML = `
@@ -186,6 +286,7 @@ def _shell(title: str, mode: str) -> str:
               <div class="mini"><div class="muted">Drifts recentes</div><strong>${{(data.drift_events || []).length}}</strong></div>
             </div>
           `)}}</div>
+          <div class="span-6">${{historicalContextCard('Historico aplicado pelos agentes', data.research_health || {{}})}}</div>
           <div class="span-6">${{card('Saúde e auditoria', `<pre>${{JSON.stringify({{ research_health:data.research_health, global_snapshot:data.global_snapshot }}, null, 2)}}</pre>`)}}</div>
           <div class="span-6">${{card('Avisos e aprendizado', `<pre>${{JSON.stringify(data.learning, null, 2)}}</pre>`)}}</div>
         </div>`;
@@ -194,6 +295,7 @@ def _shell(title: str, mode: str) -> str:
       const board = await api('/api/global-ai/football-analysis');
       root.innerHTML = `
         <div class="grid">
+          <div class="span-12">${{historicalContextCard('Base historica usada nesta leitura', board.research_health || {{}})}}</div>
           <div class="span-8">${{card('Football Analysis', `
             <div class="list">
               ${board.items.map(item => `
@@ -210,15 +312,26 @@ def _shell(title: str, mode: str) -> str:
               <div><h3>Event ID</h3><input id="fa-event" type="number" placeholder="1"></div>
               <div><h3>Mercado</h3><select id="fa-market"><option value="match_winner_home">Casa vence</option><option value="over_2_5">Over 2.5</option><option value="btts_yes">BTTS</option></select></div>
             </div>
-            <div class="actions" style="margin-top:12px"><button class="good" onclick="runFootballEvent()">Analisar evento</button></div>
+            <div class="actions" style="margin-top:12px"><button id="fa-run" type="button" class="good" onclick="runFootballEvent(this); return false;">Analisar evento</button></div>
             <div id="fa-result" class="mini muted" style="margin-top:12px">Escolha um evento histórico e analise.</div>
           `)}}</div>
         </div>`;
     }}
-    async function runFootballEvent() {{
-      const payload = {{ event_id: Number(document.getElementById('fa-event').value || 0), market: document.getElementById('fa-market').value }};
-      const data = await api('/api/global-ai/football-analysis/event', {{ method:'POST', body: JSON.stringify(payload) }});
-      document.getElementById('fa-result').outerHTML = `<pre id="fa-result">${{JSON.stringify(data, null, 2)}}</pre>`;
+    async function runFootballEvent(button) {{
+      await withBusy(button, 'Consultando...', async () => {{
+        renderMessage('fa-result', 'Consultando evento histórico...');
+        try {{
+          const payload = {{
+            event_id: parseInt(document.getElementById('fa-event').value || '0', 10),
+            market: document.getElementById('fa-market').value
+          }};
+          const data = await api('/api/global-ai/football-analysis/event', {{ method:'POST', body: JSON.stringify(payload) }});
+          renderJson('fa-result', data);
+        }} catch (error) {{
+          renderMessage('fa-result', String(error.message || error), 'error');
+          throw error;
+        }}
+      }});
     }}
     async function loadBacktesting() {{
       root.innerHTML = `
@@ -226,20 +339,28 @@ def _shell(title: str, mode: str) -> str:
           <div class="span-4">${{card('Rodar backtest', `
             <div class="row"><div><h3>Liga</h3><input id="bt-league" placeholder="Ex: Brasil - Serie A"></div><div><h3>Mercado</h3><select id="bt-market"><option value="match_winner_home">Casa vence</option><option value="over_2_5">Over 2.5</option><option value="btts_yes">BTTS</option></select></div></div>
             <div class="row"><div><h3>EV mínimo</h3><input id="bt-ev" type="number" step="0.01" value="0.03"></div><div><h3>Confiança mínima</h3><input id="bt-confidence" type="number" step="1" value="60"></div></div>
-            <div class="actions" style="margin-top:12px"><button class="good" onclick="runBacktest()">Rodar backtest</button></div>
+            <div class="actions" style="margin-top:12px"><button id="bt-run" type="button" class="good" onclick="runBacktest(this); return false;">Rodar backtest</button></div>
           `)}}</div>
           <div class="span-8">${{card('Resultado', `<div id="backtest-result" class="mini muted">Ainda sem backtest nesta tela.</div>`)}}</div>
         </div>`;
     }}
-    async function runBacktest() {{
-      const payload = {{
-        league: document.getElementById('bt-league').value || null,
-        market: document.getElementById('bt-market').value,
-        ev_min: Number(document.getElementById('bt-ev').value || 0.03),
-        confidence_min: Number(document.getElementById('bt-confidence').value || 60),
-      }};
-      const data = await api('/api/global-ai/backtest', {{ method:'POST', body: JSON.stringify(payload) }});
-      document.getElementById('backtest-result').outerHTML = `<pre id="backtest-result">${{JSON.stringify(data, null, 2)}}</pre>`;
+    async function runBacktest(button) {{
+      await withBusy(button, 'Rodando...', async () => {{
+        renderMessage('backtest-result', 'Rodando backtest...');
+        try {{
+          const payload = {{
+            league: document.getElementById('bt-league').value || null,
+            market: document.getElementById('bt-market').value,
+            ev_min: parseLocaleNumber(document.getElementById('bt-ev').value, 0.03),
+            confidence_min: parseLocaleNumber(document.getElementById('bt-confidence').value, 60),
+          }};
+          const data = await api('/api/global-ai/backtest', {{ method:'POST', body: JSON.stringify(payload) }});
+          renderJson('backtest-result', data);
+        }} catch (error) {{
+          renderMessage('backtest-result', String(error.message || error), 'error');
+          throw error;
+        }}
+      }});
     }}
     async function loadMonteCarlo() {{
       root.innerHTML = `
@@ -247,34 +368,58 @@ def _shell(title: str, mode: str) -> str:
           <div class="span-4">${{card('Simular banca', `
             <div class="row"><div><h3>Hit rate</h3><input id="mc-hit" type="number" step="0.01" value="0.55"></div><div><h3>Odd média</h3><input id="mc-odd" type="number" step="0.01" value="1.90"></div></div>
             <div class="row"><div><h3>Banca</h3><input id="mc-bank" type="number" step="10" value="1000"></div><div><h3>Stake %</h3><input id="mc-stake" type="number" step="0.001" value="0.015"></div></div>
-            <div class="actions" style="margin-top:12px"><button class="good" onclick="runMonteCarlo()">Rodar Monte Carlo</button></div>
+            <div class="actions" style="margin-top:12px"><button id="mc-run" type="button" class="good" onclick="runMonteCarlo(this); return false;">Rodar Monte Carlo</button></div>
           `)}}</div>
           <div class="span-8">${{card('Resultado Monte Carlo', `<div id="mc-result" class="mini muted">Ainda não rodamos nenhuma simulação.</div>`)}}</div>
         </div>`;
     }}
-    async function runMonteCarlo() {{
-      const payload = {{
-        hit_rate: Number(document.getElementById('mc-hit').value || 0.55),
-        average_odd: Number(document.getElementById('mc-odd').value || 1.9),
-        bankroll: Number(document.getElementById('mc-bank').value || 1000),
-        stake_pct: Number(document.getElementById('mc-stake').value || 0.015),
-      }};
-      const data = await api('/api/global-ai/monte-carlo', {{ method:'POST', body: JSON.stringify(payload) }});
-      document.getElementById('mc-result').outerHTML = `<pre id="mc-result">${{JSON.stringify(data, null, 2)}}</pre>`;
+    async function runMonteCarlo(button) {{
+      await withBusy(button, 'Rodando...', async () => {{
+        renderMessage('mc-result', 'Rodando Monte Carlo...');
+        try {{
+          const payload = {{
+            hit_rate: parseLocaleNumber(document.getElementById('mc-hit').value, 0.55),
+            average_odd: parseLocaleNumber(document.getElementById('mc-odd').value, 1.9),
+            bankroll: parseLocaleNumber(document.getElementById('mc-bank').value, 1000),
+            stake_pct: parseLocaleNumber(document.getElementById('mc-stake').value, 0.015),
+          }};
+          const data = await api('/api/global-ai/monte-carlo', {{ method:'POST', body: JSON.stringify(payload) }});
+          renderJson('mc-result', data);
+        }} catch (error) {{
+          renderMessage('mc-result', String(error.message || error), 'error');
+          throw error;
+        }}
+      }});
     }}
     async function loadEvolution() {{
-      root.innerHTML = `<div class="grid"><div class="span-4">${{card('Strategy Evolution Lab', `<div class="actions"><button class="good" onclick="runEvolution()">Gerar nova evolução</button></div><div id="evo-result" class="mini muted" style="margin-top:12px">Aguardando evolução.</div>`)}}</div></div>`;
+      root.innerHTML = `<div class="grid"><div class="span-4">${{card('Strategy Evolution Lab', `<div class="actions"><button id="evo-run" type="button" class="good" onclick="runEvolution(this); return false;">Gerar nova evolução</button></div><div id="evo-result" class="mini muted" style="margin-top:12px">Aguardando evolução.</div>`)}}</div></div>`;
     }}
-    async function runEvolution() {{
-      const data = await api('/api/global-ai/strategy-evolution', {{ method:'POST' }});
-      document.getElementById('evo-result').outerHTML = `<pre id="evo-result">${{JSON.stringify(data, null, 2)}}</pre>`;
+    async function runEvolution(button) {{
+      await withBusy(button, 'Gerando...', async () => {{
+        renderMessage('evo-result', 'Gerando evolução...');
+        try {{
+          const data = await api('/api/global-ai/strategy-evolution', {{ method:'POST' }});
+          renderJson('evo-result', data);
+        }} catch (error) {{
+          renderMessage('evo-result', String(error.message || error), 'error');
+          throw error;
+        }}
+      }});
     }}
     async function loadAgentArena() {{
-      root.innerHTML = `<div class="grid"><div class="span-4">${{card('Agent Arena', `<textarea id="agent-prompt" rows="6" placeholder="Ex: qual liga teve melhor ROI?"></textarea><div class="actions" style="margin-top:12px"><button class="primary" onclick="askAgent()">Perguntar</button></div>`)}}</div><div class="span-8">${{card('Resposta', `<div id="agent-result" class="mini muted">Sem resposta ainda.</div>`)}}</div></div>`;
+      root.innerHTML = `<div class="grid"><div class="span-4">${{card('Agent Arena', `<textarea id="agent-prompt" rows="6" placeholder="Ex: qual liga teve melhor ROI?"></textarea><div class="actions" style="margin-top:12px"><button id="agent-run" type="button" class="primary" onclick="askAgent(this); return false;">Perguntar</button></div>`)}}</div><div class="span-8">${{card('Resposta', `<div id="agent-result" class="mini muted">Sem resposta ainda.</div>`)}}</div></div>`;
     }}
-    async function askAgent() {{
-      const data = await api('/api/global-ai/agent-arena', {{ method:'POST', body: JSON.stringify({{ prompt: document.getElementById('agent-prompt').value || 'qual mercado performou melhor?' }}) }});
-      document.getElementById('agent-result').outerHTML = `<pre id="agent-result">${{JSON.stringify(data, null, 2)}}</pre>`;
+    async function askAgent(button) {{
+      await withBusy(button, 'Consultando...', async () => {{
+        renderMessage('agent-result', 'Consultando agentes...');
+        try {{
+          const data = await api('/api/global-ai/agent-arena', {{ method:'POST', body: JSON.stringify({{ prompt: document.getElementById('agent-prompt').value || 'qual mercado performou melhor?' }}) }});
+          renderJson('agent-result', data);
+        }} catch (error) {{
+          renderMessage('agent-result', String(error.message || error), 'error');
+          throw error;
+        }}
+      }});
     }}
     async function loadFeatureLab() {{
       const data = await api('/api/global-ai/feature-lab');
@@ -289,11 +434,19 @@ def _shell(title: str, mode: str) -> str:
       root.innerHTML = `<div class="grid"><div class="span-12">${{card('Market Bias & Anomaly Center', `<pre>${{JSON.stringify(data, null, 2)}}</pre>`)}}</div></div>`;
     }}
     async function loadRagMemory() {{
-      root.innerHTML = `<div class="grid"><div class="span-4">${{card('RAG Memory Explorer', `<textarea id="rag-q" rows="6" placeholder="Ex: o que funcionou em situações parecidas?"></textarea><div class="actions" style="margin-top:12px"><button class="primary" onclick="askRag()">Consultar</button></div>`)}}</div><div class="span-8">${{card('Contexto', `<div id="rag-result" class="mini muted">Sem consulta ainda.</div>`)}}</div></div>`;
+      root.innerHTML = `<div class="grid"><div class="span-4">${{card('RAG Memory Explorer', `<textarea id="rag-q" rows="6" placeholder="Ex: o que funcionou em situações parecidas?"></textarea><div class="actions" style="margin-top:12px"><button id="rag-run" type="button" class="primary" onclick="askRag(this); return false;">Consultar</button></div>`)}}</div><div class="span-8">${{card('Contexto', `<div id="rag-result" class="mini muted">Sem consulta ainda.</div>`)}}</div></div>`;
     }}
-    async function askRag() {{
-      const data = await api('/api/global-ai/rag-query', {{ method:'POST', body: JSON.stringify({{ question: document.getElementById('rag-q').value || 'qual mercado teve melhor ROI?' }}) }});
-      document.getElementById('rag-result').outerHTML = `<pre id="rag-result">${{JSON.stringify(data, null, 2)}}</pre>`;
+    async function askRag(button) {{
+      await withBusy(button, 'Consultando...', async () => {{
+        renderMessage('rag-result', 'Consultando memória...');
+        try {{
+          const data = await api('/api/global-ai/rag-query', {{ method:'POST', body: JSON.stringify({{ question: document.getElementById('rag-q').value || 'qual mercado teve melhor ROI?' }}) }});
+          renderJson('rag-result', data);
+        }} catch (error) {{
+          renderMessage('rag-result', String(error.message || error), 'error');
+          throw error;
+        }}
+      }});
     }}
     async function loadGovernance() {{
       const data = await api('/api/global-ai/governance');
