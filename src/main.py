@@ -2615,6 +2615,19 @@ async def remember_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.info("Chat registrado para alertas: %s", update.effective_chat.id)
 
 
+def _ensure_polling_event_loop() -> asyncio.AbstractEventLoop:
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+
 def main() -> None:
     settings = load_settings()
     if not settings.telegram_bot_token:
@@ -2625,6 +2638,7 @@ def main() -> None:
         return
 
     try:
+        _ensure_polling_event_loop()
         app = (
             Application.builder()
             .token(settings.telegram_bot_token)

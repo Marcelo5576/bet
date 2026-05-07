@@ -8,6 +8,24 @@ import src.main as app_main
 
 
 class MainStartupTests(unittest.TestCase):
+    @patch("src.main.asyncio.set_event_loop")
+    @patch("src.main.asyncio.new_event_loop")
+    @patch("src.main.asyncio.get_event_loop", side_effect=RuntimeError("no loop"))
+    def test_ensure_polling_event_loop_creates_one_when_missing(
+        self,
+        get_event_loop_mock,
+        new_event_loop_mock,
+        set_event_loop_mock,
+    ) -> None:
+        loop = object()
+        new_event_loop_mock.return_value = loop
+
+        result = app_main._ensure_polling_event_loop()
+
+        self.assertIs(result, loop)
+        new_event_loop_mock.assert_called_once()
+        set_event_loop_mock.assert_called_once_with(loop)
+
     @patch("src.main.asyncio.run")
     @patch("src.main._passive_service_loop", return_value="passive-loop")
     @patch("src.main.load_settings")
