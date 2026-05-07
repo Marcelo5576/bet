@@ -180,6 +180,21 @@ apt-get install -y docker.io docker-compose-plugin
 systemctl enable --now docker
 ```
 
+`containerd.io conflicts: containerd`
+
+- isso acontece quando o servidor já veio com Docker/containerd próprio
+- nesse caso, preserve o stack atual e rode:
+
+```bash
+SKIP_SYSTEM_PACKAGES=true ./server_bootstrap_apexgol.sh
+```
+
+- ou:
+
+```bash
+SKIP_SYSTEM_PACKAGES=true ./install_apexgol.sh
+```
+
 `porta 80/443 ocupada`
 
 ```bash

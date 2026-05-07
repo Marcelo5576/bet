@@ -7,6 +7,7 @@ REPORT_FILE="${PROJECT_DIR}/install_report.txt"
 SCRIPT_PATH="$0"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 AUTO_DEPLOY="${AUTO_DEPLOY:-true}"
+SKIP_SYSTEM_PACKAGES="${SKIP_SYSTEM_PACKAGES:-false}"
 
 if [[ -f "${SCRIPT_PATH}" ]]; then
   PACKAGE_DIR="${PACKAGE_DIR:-$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)}"
@@ -84,6 +85,12 @@ validate_os() {
 }
 
 install_dependencies() {
+  if [[ "${SKIP_SYSTEM_PACKAGES}" == "true" ]]; then
+    log "SKIP_SYSTEM_PACKAGES=true. Pulando instalação de pacotes do sistema."
+    INSTALL_NOTES+=("Pacotes do sistema preservados por configuracao.")
+    return
+  fi
+
   export DEBIAN_FRONTEND=noninteractive
   log "Instalando dependências do servidor"
   apt-get update -y
@@ -94,10 +101,16 @@ install_dependencies() {
     nano \
     unzip \
     python3 \
-    python3-venv \
-    docker.io \
-    docker-compose-plugin
-  systemctl enable --now docker
+    python3-venv
+
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    log "Docker e Docker Compose já estão disponíveis. Reutilizando instalação atual."
+    INSTALL_NOTES+=("Docker existente reutilizado.")
+  else
+    apt-get install -y docker.io docker-compose-plugin
+    systemctl enable --now docker
+    INSTALL_NOTES+=("Docker instalado pelo instalador.")
+  fi
 }
 
 validate_package() {

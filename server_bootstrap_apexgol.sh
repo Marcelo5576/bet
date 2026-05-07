@@ -8,6 +8,7 @@ DOMAIN="${DOMAIN:-novo.tickpost.com.br}"
 BACKUP_ROOT="${BACKUP_ROOT:-/root/backups/betsignal}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 REPORT_FILE="${PROJECT_DIR}/install_report.txt"
+SKIP_SYSTEM_PACKAGES="${SKIP_SYSTEM_PACKAGES:-false}"
 
 log() {
   printf '==> %s\n' "$1"
@@ -32,6 +33,11 @@ validate_os() {
 }
 
 install_dependencies() {
+  if [[ "${SKIP_SYSTEM_PACKAGES}" == "true" ]]; then
+    log "SKIP_SYSTEM_PACKAGES=true. Pulando instalação de pacotes do sistema."
+    return
+  fi
+
   export DEBIAN_FRONTEND=noninteractive
   log "Instalando dependências base do servidor"
   apt-get update -y
@@ -42,10 +48,14 @@ install_dependencies() {
     nano \
     unzip \
     python3 \
-    python3-venv \
-    docker.io \
-    docker-compose-plugin
-  systemctl enable --now docker
+    python3-venv
+
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    log "Docker e Docker Compose já estão disponíveis. Reutilizando instalação atual."
+  else
+    apt-get install -y docker.io docker-compose-plugin
+    systemctl enable --now docker
+  fi
 }
 
 backup_existing_dir() {
@@ -162,7 +172,7 @@ PY
 run_install() {
   log "Rodando instalador do projeto"
   cd "${PROJECT_DIR}"
-  PROJECT_DIR="${PROJECT_DIR}" BACKUP_ROOT="${BACKUP_ROOT}" AUTO_DEPLOY=false ./install_apexgol.sh
+  PROJECT_DIR="${PROJECT_DIR}" BACKUP_ROOT="${BACKUP_ROOT}" AUTO_DEPLOY=false SKIP_SYSTEM_PACKAGES="${SKIP_SYSTEM_PACKAGES}" ./install_apexgol.sh
 }
 
 edit_env_if_needed() {
