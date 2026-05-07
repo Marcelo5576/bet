@@ -94,6 +94,26 @@ main() {
     printf 'Dashboard container não está ativo.\n'
   fi
 
+  log "Football provider"
+  if docker compose ps --services --filter status=running | grep -q '^dashboard$'; then
+    docker compose exec -T dashboard python - <<'PY' || true
+import json
+from src.config import load_settings
+from src.dashboard import _football_api_provider
+
+settings = load_settings()
+provider = _football_api_provider(settings)
+print(json.dumps({
+    "configured": bool(settings.api_football_key),
+    "base_url": settings.api_football_base_url,
+    "status": provider.status_snapshot(),
+}, ensure_ascii=False, indent=2))
+PY
+    append_report docker compose exec -T dashboard python -c "from src.config import load_settings; from src.dashboard import _football_api_provider; import json; s=load_settings(); p=_football_api_provider(s); print(json.dumps({'configured': bool(s.api_football_key), 'base_url': s.api_football_base_url, 'status': p.status_snapshot()}, ensure_ascii=False, indent=2))"
+  else
+    printf 'Dashboard container não está ativo.\n'
+  fi
+
   log "HTTP local"
   APP_URL="$(read_env_value APP_URL)"
   HOST_NAME="$(python3 - "${APP_URL:-}" <<'PY'

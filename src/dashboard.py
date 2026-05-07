@@ -117,7 +117,7 @@ def _football_provider_status_label(status_payload: dict[str, Any]) -> str:
         return "API-Football ativa"
     if bool((status_payload or {}).get("configured")):
         return "API-Football pronta"
-    return "API-Football inativa"
+    return "API-Football nao configurada"
 
 
 def _provider_live_metrics(live_games: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -194,7 +194,13 @@ def _provider_dashboard_strings(status_payload: dict[str, Any]) -> dict[str, str
 
     odds_text = "🔴 Nao disponiveis"
     note = "Sem odds reais confirmadas. Entrada bloqueada."
-    if status_code == 403:
+    if not configured:
+        odds_text = "⚪ Chave ausente"
+        note = (
+            "API_FOOTBALL_KEY ausente no ambiente do container. "
+            "Edite o .env e recrie dashboard/betsignal."
+        )
+    elif status_code == 403:
         odds_text = "⚪ Plano/API sem odds"
         note = "API retornou 403 para odds: plano/permissao pode nao incluir esse endpoint."
     elif status_code == 429:
@@ -211,7 +217,9 @@ def _provider_dashboard_strings(status_payload: dict[str, Any]) -> dict[str, str
             odds_text = f"🟢 Confirmadas: {confirmed_games}/{total_games}"
             note = "Odds reais confirmadas nos jogos ao vivo atuais."
 
-    if total_games <= 0:
+    if not configured:
+        coverage = "Cobertura: provider nao configurado"
+    elif total_games <= 0:
         coverage = "Cobertura: sem fixtures ao vivo"
     elif confirmed_games <= 0:
         coverage = f"Cobertura: 0/{total_games} fixtures com odd operacional"
@@ -222,7 +230,9 @@ def _provider_dashboard_strings(status_payload: dict[str, Any]) -> dict[str, str
 
     recommendation = "Provider complementar: avaliar depois"
     if not configured:
-        recommendation = "Provider complementar: nao, primeiro configurar a API"
+        recommendation = (
+            "Configurar API_FOOTBALL_KEY no .env antes de avaliar provider complementar"
+        )
     elif status_code == 403:
         recommendation = "Provider complementar: sim, o plano atual parece limitar odds"
     elif status_code == 429:

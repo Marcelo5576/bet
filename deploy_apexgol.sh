@@ -102,6 +102,7 @@ PY
 
 validate_env() {
   local missing
+  local app_env football_api_key
   missing="$(python3 - ".env" <<'PY'
 import sys
 from pathlib import Path
@@ -135,6 +136,21 @@ PY
 )"
   if [[ -n "${missing}" ]]; then
     fail "Variáveis obrigatórias pendentes no .env: ${missing//$'\n'/, }"
+  fi
+  app_env="$(read_env_value APP_ENV)"
+  football_api_key="$(
+    read_env_value API_FOOTBALL_KEY
+    printf '%s' "$(read_env_value API_SPORTS_KEY)"
+    printf '%s' "$(read_env_value APIFOOTBALL_KEY)"
+    printf '%s' "$(read_env_value API_FOOTBALL_TOKEN)"
+  )"
+  if [[ -z "${football_api_key}" ]]; then
+    if [[ "${app_env,,}" == "production" ]]; then
+      fail "API_FOOTBALL_KEY ausente no .env (aliases aceitos: API_SPORTS_KEY, APIFOOTBALL_KEY, API_FOOTBALL_TOKEN). O dominio principal ficara sem dados ao vivo."
+    fi
+    note "Football API: chave ausente (modo fallback/local)"
+  else
+    note "Football API: chave presente no .env"
   fi
   note "Env: validado"
 }
@@ -182,6 +198,27 @@ run_container_checks() {
   fi
 
   note "Smokes: instalacao, identidade e mercados OK"
+}
+
+validate_football_provider_env() {
+  local provider_payload
+  log "Validando provider Football no container"
+  provider_payload="$(docker compose exec -T dashboard python - <<'PY'
+import json
+from src.config import load_settings
+
+settings = load_settings()
+print(json.dumps({
+    "configured": bool(settings.api_football_key),
+    "base_url": settings.api_football_base_url,
+}, ensure_ascii=False))
+PY
+)"
+  printf '%s\n' "${provider_payload}"
+  if ! grep -q '"configured": true' <<<"${provider_payload}"; then
+    fail "O container dashboard subiu sem API_FOOTBALL_KEY. Corrija o .env e rode o deploy novamente."
+  fi
+  note "Football API container env: OK"
 }
 
 http_fetch() {
@@ -285,6 +322,7 @@ main() {
   validate_python_syntax
   build_and_up
   run_container_checks
+  validate_football_provider_env
   http_smoke
   show_status
 }

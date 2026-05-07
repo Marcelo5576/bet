@@ -23,6 +23,14 @@ def _as_confidence(value: str | None, default: int = 62) -> int:
     return max(0, min(100, int(round(number))))
 
 
+def _first_env(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     product_name: str
@@ -137,9 +145,15 @@ def load_settings() -> Settings:
         pregame_lead_minutes=max(15, min(360, int(os.getenv("PREGAME_LEAD_MINUTES", "150")))),
         pregame_shortlist_limit=max(4, min(24, int(os.getenv("PREGAME_SHORTLIST_LIMIT", "12")))),
         test_mode=_as_bool(os.getenv("TEST_MODE"), False),
-        api_football_key=os.getenv("API_FOOTBALL_KEY") or None,
-        api_football_base_url=os.getenv(
-            "API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io"
+        api_football_key=_first_env(
+            "API_FOOTBALL_KEY",
+            "API_SPORTS_KEY",
+            "APIFOOTBALL_KEY",
+            "API_FOOTBALL_TOKEN",
+        ),
+        api_football_base_url=(
+            _first_env("API_FOOTBALL_BASE_URL", "API_SPORTS_BASE_URL")
+            or "https://v3.football.api-sports.io"
         ).rstrip("/"),
         football_data_org_token=(os.getenv("FOOTBALL_DATA_ORG_TOKEN") or "").strip() or None,
         odds_api_io_key=(
