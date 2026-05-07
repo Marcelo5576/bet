@@ -2557,8 +2557,6 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         active_interval=active_interval,
     )
     context.job_queue.run_once(scheduled_scan, when=interval)
-    if not chat_ids and not approved_chat_ids and not scan_requested:
-        return
 
     stop = red_stop_status(state.history or [], settings.daily_red_limit)
     if stop.get("discipline_alert"):
@@ -2592,6 +2590,9 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not chat_ids:
+        logger.info(
+            "Scanner atualizado sem chats Telegram ativos. Estado e dashboard seguem alimentados normalmente."
+        )
         return
     for chat_id in chat_ids:
         state = store.load()

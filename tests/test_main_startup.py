@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import src.main as app_main
 
@@ -23,6 +23,46 @@ class MainStartupTests(unittest.TestCase):
 
         passive_loop_mock.assert_called_once()
         asyncio_run_mock.assert_called_once()
+
+    def test_scheduled_scan_updates_dashboard_even_without_telegram_chats(self) -> None:
+        async def run_case() -> None:
+            settings = SimpleNamespace(
+                idle_scan_interval_seconds=20,
+                active_scan_interval_seconds=20,
+                daily_red_limit=2,
+                portal_db_file="data/portal.db",
+            )
+            state = SimpleNamespace(
+                history=[],
+                active_game_id=None,
+                active_signal=None,
+            )
+            store = SimpleNamespace(consume_scan_request=Mock(return_value=(state, False)))
+            job_queue = SimpleNamespace(run_once=Mock())
+            context = SimpleNamespace(
+                application=SimpleNamespace(bot_data={"settings": settings, "store": store}),
+                job_queue=job_queue,
+            )
+
+            with (
+                patch("src.main._notification_chat_ids", return_value=set()),
+                patch("src.main._approved_signal_chat_ids", return_value=set()),
+                patch("src.main.PortalStore") as portal_store_mock,
+                patch("src.main._scanner_cycle_seconds", return_value=20),
+                patch("src.main.red_stop_status", return_value={}),
+                patch("src.main.refresh_active_signal", new_callable=AsyncMock) as refresh_mock,
+                patch("src.main.run_scan", new_callable=AsyncMock, return_value="scan-ok") as run_scan_mock,
+            ):
+                portal_store_mock.return_value.notification_scan_preferences.return_value = (20, 20)
+                await app_main.scheduled_scan(context)
+
+            job_queue.run_once.assert_called_once()
+            refresh_mock.assert_not_awaited()
+            run_scan_mock.assert_awaited_once()
+
+        import asyncio
+
+        asyncio.run(run_case())
 
 
 if __name__ == "__main__":
