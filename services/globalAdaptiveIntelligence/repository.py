@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -13,7 +14,16 @@ def _now_iso() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    def default(item: Any):
+        if isinstance(item, datetime):
+            return item.isoformat()
+        if isinstance(item, Path):
+            return item.as_posix()
+        if is_dataclass(item):
+            return asdict(item)
+        raise TypeError(f"Object of type {item.__class__.__name__} is not JSON serializable")
+
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=default)
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -897,4 +907,3 @@ class GlobalAdaptiveRepository:
                 row = conn.execute(f"SELECT COUNT(*) AS total FROM {table}").fetchone()
                 counts[table] = int(row["total"] if row else 0)
         return {"db_file": self.path.as_posix(), "counts": counts}
-

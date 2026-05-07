@@ -27,7 +27,7 @@ class MainStartupTests(unittest.TestCase):
         set_event_loop_mock.assert_called_once_with(loop)
 
     @patch("src.main.asyncio.run")
-    @patch("src.main._passive_service_loop", return_value="passive-loop")
+    @patch("src.main._passive_service_loop", new_callable=Mock, return_value="passive-loop")
     @patch("src.main.load_settings")
     def test_main_without_telegram_token_enters_passive_mode(
         self,

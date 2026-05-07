@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from services.footballQuantAiSkill import get_football_quant_ai_skill
@@ -63,7 +64,7 @@ class FootballAdapter:
             bankroll_profile=bankroll_profile,
             model_version=str(kwargs.get("model_version", "baseline")),
         )
-        return prediction.__dict__
+        return asdict(prediction)
 
     def runBacktest(self, **kwargs) -> dict[str, Any]:
         summary = self.skill.backtesting.runBacktest(
@@ -81,5 +82,4 @@ class FootballAdapter:
                 user_id=kwargs.get("user_id"),
             )
         )
-        return summary.__dict__
-
+        return asdict(summary)

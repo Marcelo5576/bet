@@ -4,6 +4,7 @@ import html
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -57,6 +58,10 @@ def _global():
 
 def _esc(value: Any) -> str:
     return html.escape(str(value if value is not None else ""))
+
+
+def _json(payload: Any, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=jsonable_encoder(payload), status_code=status_code)
 
 
 def _shell(title: str, mode: str) -> str:
@@ -381,22 +386,22 @@ async def governance_center_page(user: dict[str, Any] = Depends(_require_admin))
 
 @router.get("/api/global-ai/health")
 async def global_ai_health(user: dict[str, Any] = Depends(_require_user), platform=Depends(_global)) -> JSONResponse:
-    return JSONResponse({"ok": True, **platform.control_center_snapshot(user_id=user.get("id"))})
+    return _json({"ok": True, **platform.control_center_snapshot(user_id=user.get("id"))})
 
 
 @router.get("/api/global-ai/audit")
 async def global_ai_audit(user: dict[str, Any] = Depends(_require_admin), platform=Depends(_global)) -> JSONResponse:
-    return JSONResponse(platform.audit_report())
+    return _json(platform.audit_report())
 
 
 @router.get("/api/global-ai/control-center")
 async def global_ai_control_center(user: dict[str, Any] = Depends(_require_user), platform=Depends(_global)) -> JSONResponse:
-    return JSONResponse(platform.control_center_snapshot(user_id=user.get("id")))
+    return _json(platform.control_center_snapshot(user_id=user.get("id")))
 
 
 @router.get("/api/global-ai/football-analysis")
 async def global_ai_football_analysis(user: dict[str, Any] = Depends(_require_user), platform=Depends(_global)) -> JSONResponse:
-    return JSONResponse(platform.football_analysis_board(user_id=user.get("id")))
+    return _json(platform.football_analysis_board(user_id=user.get("id")))
 
 
 @router.post("/api/global-ai/football-analysis/event")
@@ -405,7 +410,14 @@ async def global_ai_football_analysis_event(
     user: dict[str, Any] = Depends(_require_user),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.analyze_football_event(payload.event_id, market=payload.market, offered_odd=payload.offered_odd, user_id=user.get("id")))
+    return _json(
+        platform.analyze_football_event(
+            payload.event_id,
+            market=payload.market,
+            offered_odd=payload.offered_odd,
+            user_id=user.get("id"),
+        )
+    )
 
 
 @router.post("/api/global-ai/backtest")
@@ -414,7 +426,7 @@ async def global_ai_backtest(
     user: dict[str, Any] = Depends(_require_user),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.run_backtest({**payload.model_dump(), "user_id": user.get("id")}))
+    return _json(platform.run_backtest({**payload.model_dump(), "user_id": user.get("id")}))
 
 
 @router.post("/api/global-ai/monte-carlo")
@@ -423,7 +435,7 @@ async def global_ai_monte_carlo(
     user: dict[str, Any] = Depends(_require_user),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.run_monte_carlo(**payload.model_dump(), user_id=user.get("id")))
+    return _json(platform.run_monte_carlo(**payload.model_dump(), user_id=user.get("id")))
 
 
 @router.post("/api/global-ai/strategy-evolution")
@@ -431,7 +443,7 @@ async def global_ai_strategy_evolution(
     user: dict[str, Any] = Depends(_require_admin),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.evolve_strategy(user_id=user.get("id")))
+    return _json(platform.evolve_strategy(user_id=user.get("id")))
 
 
 @router.post("/api/global-ai/agent-arena")
@@ -440,7 +452,7 @@ async def global_ai_agent_arena(
     user: dict[str, Any] = Depends(_require_user),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.agent_arena(prompt=payload.prompt, user_id=user.get("id")))
+    return _json(platform.agent_arena(prompt=payload.prompt, user_id=user.get("id")))
 
 
 @router.get("/api/global-ai/feature-lab")
@@ -448,7 +460,7 @@ async def global_ai_feature_lab(
     user: dict[str, Any] = Depends(_require_admin),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(
+    return _json(
         {
             "features": platform.repository.list_generated_features(limit=80),
             "snapshot": platform.repository.snapshot(),
@@ -461,7 +473,7 @@ async def global_ai_drift_regime(
     user: dict[str, Any] = Depends(_require_admin),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(
+    return _json(
         {
             "drift_events": platform.repository.list_drift_events(limit=40),
             "risk_events": platform.repository.list_risk_events(limit=40),
@@ -475,7 +487,7 @@ async def global_ai_bias_anomaly(
     user: dict[str, Any] = Depends(_require_admin),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(
+    return _json(
         {
             "pattern_insights": platform.repository.list_pattern_insights(limit=40),
             "drift_events": platform.repository.list_drift_events(limit=20),
@@ -489,7 +501,7 @@ async def global_ai_rag_query(
     user: dict[str, Any] = Depends(_require_user),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.rag_explorer(payload.question))
+    return _json(platform.rag_explorer(payload.question))
 
 
 @router.get("/api/global-ai/governance")
@@ -497,7 +509,7 @@ async def global_ai_governance(
     user: dict[str, Any] = Depends(_require_admin),
     platform=Depends(_global),
 ) -> JSONResponse:
-    return JSONResponse(platform.governance.snapshot())
+    return _json(platform.governance.snapshot())
 
 
 @router.post("/api/global-ai/governance/{request_id}")
@@ -508,4 +520,4 @@ async def global_ai_governance_decide(
     platform=Depends(_global),
 ) -> JSONResponse:
     decided = platform.governance.decide(request_id, payload.decision, user_id=user.get("id"))
-    return JSONResponse({"request": decided})
+    return _json({"request": decided})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -305,7 +306,7 @@ class GlobalAdaptiveIntelligencePlatform:
                 user_id=payload.get("user_id"),
             )
         )
-        return summary.__dict__
+        return asdict(summary)
 
     def run_monte_carlo(self, *, hit_rate: float, average_odd: float, bankroll: float, stake_pct: float, user_id: int | None = None) -> dict[str, Any]:
         run = self.monte_carlo.run(
