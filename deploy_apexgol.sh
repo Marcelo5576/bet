@@ -192,7 +192,7 @@ http_fetch() {
 }
 
 http_smoke() {
-  local app_url app_host dashboard_user dashboard_password
+  local app_url app_host app_host_only dashboard_user dashboard_password
   app_url="$(read_env_value APP_URL)"
   app_host="$(python3 - "${app_url:-}" <<'PY'
 import sys
@@ -204,15 +204,25 @@ print(parsed.netloc or "novo.tickpost.com.br")
 PY
 )"
   app_host="${app_host:-$APP_HOST_DEFAULT}"
+  app_host_only="$(python3 - "${app_host}" <<'PY'
+import sys
+
+raw = (sys.argv[1] or "novo.tickpost.com.br").strip()
+print(raw.split(":", 1)[0] or "novo.tickpost.com.br")
+PY
+)"
   dashboard_user="$(read_env_value DASHBOARD_USER)"
   dashboard_password="$(read_env_value DASHBOARD_PASSWORD)"
 
   log "Validando HTTP via Caddy"
-  http_fetch /tmp/apexgol_landing.html -H "Host: ${app_host}" "http://127.0.0.1/"
-  http_fetch /tmp/apexgol_login.html -H "Host: ${app_host}" "http://127.0.0.1/login"
-  http_fetch /tmp/apexgol_dashboard.html -u "${dashboard_user}:${dashboard_password}" -H "Host: ${app_host}" "http://127.0.0.1/dashboard"
-  http_fetch /tmp/apexgol_cerebro.html -u "${dashboard_user}:${dashboard_password}" -H "Host: ${app_host}" "http://127.0.0.1/cerebro-ia"
-  http_fetch /tmp/apexgol_rate_limit.json -u "${dashboard_user}:${dashboard_password}" -H "Host: ${app_host}" "http://127.0.0.1/api/system/rate-limit-protection"
+  curl -fsS -I -H "Host: ${app_host}" "http://127.0.0.1/" >/tmp/apexgol_http_headers.txt
+  grep -qi "Location: https://${app_host_only}/" /tmp/apexgol_http_headers.txt || fail "Caddy nao redirecionou HTTP para HTTPS como esperado."
+
+  http_fetch /tmp/apexgol_landing.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" "https://${app_host_only}/"
+  http_fetch /tmp/apexgol_login.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" "https://${app_host_only}/login"
+  http_fetch /tmp/apexgol_dashboard.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" -u "${dashboard_user}:${dashboard_password}" "https://${app_host_only}/dashboard"
+  http_fetch /tmp/apexgol_cerebro.html --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" -u "${dashboard_user}:${dashboard_password}" "https://${app_host_only}/cerebro-ia"
+  http_fetch /tmp/apexgol_rate_limit.json --noproxy "*" -k --resolve "${app_host_only}:443:127.0.0.1" -u "${dashboard_user}:${dashboard_password}" "https://${app_host_only}/api/system/rate-limit-protection"
 
   for legacy in "Fantasy" "Jogos do Dia" "Live Center" "ENTRA_FORTE" "Decision class"; do
     if grep -q "${legacy}" /tmp/apexgol_landing.html; then
