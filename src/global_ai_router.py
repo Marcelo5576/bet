@@ -337,7 +337,7 @@ def _shell(title: str, mode: str) -> str:
       }}
     }}
     function historicalSourceSummary(health) {{
-      const counts = health?.counts || {{}};
+      const counts = health?.counts || health?.supabase?.local_snapshot?.counts || {{}};
       const supabase = health?.supabase || {{}};
       const localMatches = Number(counts.historical_matches || 0);
       const localFeatures = Number(counts.historical_features || 0);
@@ -371,7 +371,7 @@ def _shell(title: str, mode: str) -> str:
       }};
     }}
     function historicalContextCard(title, health) {{
-      const counts = health?.counts || {{}};
+      const counts = health?.counts || health?.supabase?.local_snapshot?.counts || {{}};
       const supabase = health?.supabase || {{}};
       const summary = historicalSourceSummary(health || {{}});
       const lastHydrate = supabase?.last_hydrate_at ? String(supabase.last_hydrate_at).slice(0, 16).replace('T', ' ') : 'ainda nao executada';

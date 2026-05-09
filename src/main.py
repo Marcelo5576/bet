@@ -725,8 +725,11 @@ def games_menu(active: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def assisted_prepare_menu(signal_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def assisted_prepare_menu(signal_id: str, page_url: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if page_url:
+        rows.append([InlineKeyboardButton("Abrir pagina da aposta", url=page_url)])
+    rows.extend(
         [
             [
                 InlineKeyboardButton("Preparar Bet365", callback_data=f"prepare_bet365|{signal_id}"),
@@ -736,16 +739,21 @@ def assisted_prepare_menu(signal_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("Menu principal", callback_data="menu:home")],
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
-def assisted_confirmation_menu(signal_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def assisted_confirmation_menu(signal_id: str, page_url: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if page_url:
+        rows.append([InlineKeyboardButton("Abrir pagina da aposta", url=page_url)])
+    rows.extend(
         [
             [InlineKeyboardButton("Confirmei entrada", callback_data=f"confirm_entry|{signal_id}")],
             [InlineKeyboardButton("Monitorar sem entrada", callback_data=f"monitor_signal|{signal_id}")],
             [InlineKeyboardButton("Menu principal", callback_data="menu:home")],
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 def ia_menu() -> InlineKeyboardMarkup:
@@ -1137,6 +1145,8 @@ def _assisted_prepare_summary(signal: dict[str, Any], response) -> str:
         "",
         response.message,
     ]
+    if getattr(response, "page_url", None):
+        lines.extend(["", f"🔗 Pagina preparada: {response.page_url}"])
     if response.screenshot_path:
         lines.extend(["", f"📸 Screenshot: {response.screenshot_path}"])
     return "\n".join(lines)
@@ -1240,7 +1250,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload = build_prepare_request_from_signal(signal)
             except ValueError as exc:
                 text = f"⚠️ Nao consegui preparar a Bet365 agora.\n\n{exc}"
-                reply_markup = assisted_prepare_menu(signal_id)
+                page_url = str(signal.get("assisted_page_url") or "").strip() or None
+                reply_markup = assisted_prepare_menu(signal_id, page_url=page_url)
             else:
                 chat_id = query.message.chat_id if query.message else None
                 response = await execute_prepare_request(
@@ -1251,13 +1262,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 refreshed = store.get_signal(signal_id) or signal
                 text = _assisted_prepare_summary(refreshed, response)
+                page_url = str(response.page_url or refreshed.get("assisted_page_url") or "").strip() or None
                 if response.status == "prepared":
                     if chat_id:
                         await send_motion(context, chat_id, "signal")
                     await supabase_sink(context).sync_signal(refreshed)
-                    reply_markup = assisted_confirmation_menu(signal_id)
+                    reply_markup = assisted_confirmation_menu(signal_id, page_url=page_url)
                 else:
-                    reply_markup = assisted_prepare_menu(signal_id)
+                    reply_markup = assisted_prepare_menu(signal_id, page_url=page_url)
     elif data.startswith("confirm_entry|"):
         store: StateStore = context.application.bot_data["store"]
         signal_id = _callback_signal_id(data)
@@ -1270,7 +1282,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await supabase_sink(context).sync_signal(signal)
             text = _assisted_confirmation_text(signal)
-            reply_markup = active_menu() if state.active_signal else assisted_confirmation_menu(signal_id)
+            page_url = str(signal.get("assisted_page_url") or "").strip() or None
+            reply_markup = active_menu() if state.active_signal else assisted_confirmation_menu(signal_id, page_url=page_url)
     elif data.startswith("monitor_signal|"):
         store: StateStore = context.application.bot_data["store"]
         signal_id = _callback_signal_id(data)
@@ -1286,7 +1299,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal,
                 prefix="🔵 MONITORANDO SEM ENTRADA",
             )
-            reply_markup = active_menu() if state.active_signal else assisted_prepare_menu(signal_id)
+            page_url = str(signal.get("assisted_page_url") or "").strip() or None
+            reply_markup = active_menu() if state.active_signal else assisted_prepare_menu(signal_id, page_url=page_url)
     elif data.startswith("ignore_signal|"):
         store: StateStore = context.application.bot_data["store"]
         signal_id = _callback_signal_id(data)
@@ -2561,8 +2575,9 @@ async def _maybe_send_assisted_monitor_alert(context: ContextTypes.DEFAULT_TYPE)
         if elapsed < 300:
             return
     text = _assisted_monitor_text(signal)
+    page_url = str(signal.get("assisted_page_url") or "").strip() or None
     reply_markup = (
-        assisted_confirmation_menu(str(signal.get("signal_id") or ""))
+        assisted_confirmation_menu(str(signal.get("signal_id") or ""), page_url=page_url)
         if status == "prepared_waiting_manual_confirmation"
         else active_menu()
     )

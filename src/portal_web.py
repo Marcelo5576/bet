@@ -2386,13 +2386,17 @@ async function saveApprovedTelegramConfig() {
 function renderExecutorResult(data) {
   const target = document.getElementById('executor-result');
   const ok = Boolean(data && data.ok);
+  const safePageUrl = data && data.page_url ? String(data.page_url).replace(/"/g, '&quot;') : '';
   const screenshot = data && data.screenshot_path
     ? `<div class="muted" style="margin-top:6px;">Screenshot: <code>${data.screenshot_path}</code></div>`
+    : '';
+  const pageUrl = safePageUrl
+    ? `<div class="muted" style="margin-top:6px;">Pagina preparada: <a class="btn" href="${safePageUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;min-height:36px;padding:0 12px;margin-left:6px;">Abrir Bet365</a></div>`
     : '';
   const odd = data && data.current_odd != null ? ` | odd atual: ${Number(data.current_odd).toFixed(2)}` : '';
   const signalId = data && data.signal_id ? ` | signal_id: ${data.signal_id}` : '';
   target.className = ok ? 'notice ok' : 'notice muted';
-  target.innerHTML = `<strong>${data && data.status ? data.status : 'sem_status'}</strong> - ${data && data.message ? data.message : 'Sem resposta do executor.'}${odd}${signalId}${screenshot}`;
+  target.innerHTML = `<strong>${data && data.status ? data.status : 'sem_status'}</strong> - ${data && data.message ? data.message : 'Sem resposta do executor.'}${odd}${signalId}${screenshot}${pageUrl}`;
 }
 async function prepareBet365FromSignal() {
   const note = document.getElementById('executor-note');

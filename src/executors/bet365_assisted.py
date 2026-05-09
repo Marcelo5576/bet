@@ -79,6 +79,11 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _page_url(page: Any | None) -> str | None:
+    raw = str(getattr(page, "url", "") or "").strip() if page is not None else ""
+    return raw or None
+
+
 def _pick_first(data: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = data.get(key)
@@ -146,6 +151,8 @@ def persist_prepare_response(
     }
     if response.screenshot_path:
         updates["assisted_screenshot_path"] = response.screenshot_path
+    if response.page_url:
+        updates["assisted_page_url"] = response.page_url
     if response.current_odd is not None:
         updates["entry_odds"] = float(response.current_odd)
         updates["target_odds"] = float(response.current_odd)
@@ -330,6 +337,7 @@ class Bet365AssistedExecutor:
                     status="manual_login_required",
                     message="Faça login manualmente na janela aberta e rode novamente.",
                     screenshot_path=screenshot,
+                    page_url=_page_url(page),
                     signal_id=req.signal_id,
                 )
 
@@ -342,6 +350,7 @@ class Bet365AssistedExecutor:
                     status="multiple_matches_found",
                     message="Encontrei múltiplos jogos parecidos. Abra o evento correto manualmente e tente novamente.",
                     screenshot_path=screenshot,
+                    page_url=_page_url(page),
                     signal_id=req.signal_id,
                 )
             if not matches:
@@ -352,6 +361,7 @@ class Bet365AssistedExecutor:
                     status="match_not_found",
                     message="Nao encontrei o jogo informado na Bet365.",
                     screenshot_path=screenshot,
+                    page_url=_page_url(page),
                     signal_id=req.signal_id,
                 )
 
@@ -365,6 +375,7 @@ class Bet365AssistedExecutor:
                     status="market_not_found",
                     message="Nao encontrei o mercado informado na Bet365.",
                     screenshot_path=screenshot,
+                    page_url=_page_url(page),
                     signal_id=req.signal_id,
                 )
 
@@ -377,6 +388,7 @@ class Bet365AssistedExecutor:
                     status="selection_not_found",
                     message="Nao encontrei a seleção informada na Bet365.",
                     screenshot_path=screenshot,
+                    page_url=_page_url(page),
                     signal_id=req.signal_id,
                 )
 
@@ -390,6 +402,7 @@ class Bet365AssistedExecutor:
                     message=f"Odd atual {current_odd:.2f} abaixo da mínima {req.min_odd:.2f}. Entrada cancelada.",
                     current_odd=current_odd,
                     screenshot_path=screenshot,
+                    page_url=_page_url(page),
                     signal_id=req.signal_id,
                 )
 
@@ -402,6 +415,7 @@ class Bet365AssistedExecutor:
                 message="Entrada preparada na Bet365. Confirme manualmente.",
                 current_odd=current_odd,
                 screenshot_path=screenshot,
+                page_url=_page_url(page),
                 signal_id=req.signal_id,
             )
         except PlaywrightTimeoutError as exc:  # pragma: no cover - depends on real UI
@@ -413,6 +427,7 @@ class Bet365AssistedExecutor:
                 status="timeout",
                 message=f"A janela da Bet365 demorou mais do que o esperado: {exc}",
                 screenshot_path=screenshot,
+                page_url=_page_url(page),
                 signal_id=req.signal_id,
             )
         except Exception as exc:  # pragma: no cover - defensive path for runtime browser issues
@@ -424,6 +439,7 @@ class Bet365AssistedExecutor:
                 status="prepare_failed",
                 message=f"Falha ao preparar a entrada assistida: {exc}",
                 screenshot_path=screenshot,
+                page_url=_page_url(page),
                 signal_id=req.signal_id,
             )
 

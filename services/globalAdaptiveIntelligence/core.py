@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+import logging
+import os
 from typing import Any
 
 from services.footballQuantAiSkill import get_football_quant_ai_skill
+from src.config import load_settings
 
 from .alerts.alert_service import AlertService
 from .backtesting.backtesting_engine import GlobalBacktestingEngine
@@ -44,6 +47,8 @@ from .repository import GlobalAdaptiveRepository
 from .risk.global_risk_service import GlobalRiskService
 from .sports.football_adapter import FootballAdapter
 from .strategy_lab.evolutionary_strategy_engine import EvolutionaryStrategyEngine
+
+logger = logging.getLogger(__name__)
 
 
 class GlobalAdaptiveIntelligencePlatform:
@@ -90,7 +95,105 @@ class GlobalAdaptiveIntelligencePlatform:
         ]
 
     def _research_health_snapshot(self) -> dict[str, Any]:
-        return self.football_skill.health()
+        try:
+            payload = self.football_skill.health()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "db_file": getattr(self.football_skill.settings, "db_file", "data/football_quant_research.db"),
+                "counts": {},
+                "sources": [],
+                "supabase": {
+                    "enabled": False,
+                    "schema_mode": "unavailable",
+                    "last_error": str(exc),
+                    "available_tables": {},
+                    "last_hydrate_result": {},
+                },
+            }
+        if not isinstance(payload, dict):
+            return {
+                "ok": False,
+                "db_file": getattr(self.football_skill.settings, "db_file", "data/football_quant_research.db"),
+                "counts": {},
+                "sources": [],
+                "supabase": {
+                    "enabled": False,
+                    "schema_mode": "unavailable",
+                    "last_error": f"payload_invalido:{type(payload).__name__}",
+                    "available_tables": {},
+                    "last_hydrate_result": {},
+                },
+            }
+        payload["counts"] = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+        payload["sources"] = payload.get("sources") if isinstance(payload.get("sources"), list) else []
+        payload["supabase"] = payload.get("supabase") if isinstance(payload.get("supabase"), dict) else {
+            "enabled": False,
+            "schema_mode": "unavailable",
+            "last_error": "supabase_status_invalido",
+            "available_tables": {},
+            "last_hydrate_result": {},
+        }
+        payload["supabase"].setdefault("available_tables", {})
+        payload["supabase"].setdefault("last_hydrate_result", {})
+        payload["supabase"].setdefault("schema_mode", "unavailable")
+        return payload
+
+    def _live_source_runtime_snapshot(self) -> list[dict[str, Any]]:
+        settings = load_settings()
+        isports_key = (os.getenv("ISPORTS_API_KEY") or "").strip()
+        odds_api_key = (os.getenv("ODDS_API_KEY") or os.getenv("ODDS_API_IO_KEY") or "").strip()
+        return [
+            {
+                "id": "api_football",
+                "label": "API-Football",
+                "configured": bool(settings.api_football_key),
+                "status": "ready" if settings.api_football_key else "missing_key",
+                "base_url": settings.api_football_base_url,
+                "role": "Fixtures, live stats e odds principais",
+                "markets": ["Goals", "1X2", "estatisticas ao vivo"],
+                "coverage_note": "Fonte principal para scanner, leitura live e fixtures operacionais.",
+            },
+            {
+                "id": "espn",
+                "label": "ESPN Scoreboard",
+                "configured": True,
+                "status": "ready",
+                "base_url": settings.espn_site_api_base_url,
+                "role": "Fallback global de placar e estatisticas leves",
+                "markets": ["scoreboard", "shots", "corners", "cards", "1X2 basico"],
+                "coverage_note": (
+                    f"Timeout {settings.espn_timeout}s, retries {settings.espn_max_retries}. "
+                    "Mantem a leitura viva quando o provider principal oscila."
+                ),
+            },
+            {
+                "id": "isports",
+                "label": "iSports Odds",
+                "configured": bool(isports_key),
+                "status": "ready" if isports_key else "missing_key",
+                "base_url": (os.getenv("ISPORTS_API_BASE_URL") or "http://api.isportsapi.com").rstrip("/"),
+                "role": "Odds complementares reais para linhas principais",
+                "markets": [
+                    "1X2",
+                    "Asian Handicap",
+                    "Over/Under",
+                    "Asian HT",
+                    "Over/Under HT",
+                ],
+                "coverage_note": "Usado como complemento de mercado via companyID 8 (Bet365), sem mockar linhas ausentes.",
+            },
+            {
+                "id": "odds_api_io",
+                "label": "Odds-API.io",
+                "configured": bool(odds_api_key),
+                "status": "ready" if odds_api_key else "missing_key",
+                "base_url": settings.odds_api_io_base_url,
+                "role": "Cobertura complementar multi-bookmaker",
+                "markets": ["Goals", "1X2", "totais", "live odds"],
+                "coverage_note": "Enriquecimento de odds no scanner principal quando houver chave ativa.",
+            },
+        ]
 
     def audit_report(self) -> dict[str, Any]:
         discovery = self.football_skill.discovery.scan()
@@ -260,19 +363,54 @@ class GlobalAdaptiveIntelligencePlatform:
         }
 
     def control_center_snapshot(self, *, user_id: int | None = None) -> dict[str, Any]:
-        features = self.features.generate_for_recent_matches(limit=24, user_id=user_id)
-        learning = self.football_skill.continuous_learning.evaluate_and_suggest(user_id=user_id)
+        try:
+            sources = self.data_sources.list_sources()
+        except Exception as exc:
+            sources = []
+            logger.warning("global ai data source registry failed: %s", exc)
+        try:
+            features = self.features.generate_for_recent_matches(limit=24, user_id=user_id)
+        except Exception as exc:
+            features = []
+            logger.warning("global ai feature generation failed: %s", exc)
+        try:
+            learning = self.football_skill.continuous_learning.evaluate_and_suggest(user_id=user_id)
+        except Exception as exc:
+            learning = {"pending_suggestions": [], "status": "degraded", "error": str(exc)}
+            logger.warning("global ai continuous learning snapshot failed: %s", exc)
+        try:
+            governance = self.governance.snapshot()
+        except Exception as exc:
+            governance = {"pending": [], "error": str(exc)}
+            logger.warning("global ai governance snapshot failed: %s", exc)
+        try:
+            drift_events = self.repository.list_drift_events(limit=6)
+        except Exception as exc:
+            drift_events = []
+            logger.warning("global ai drift list failed: %s", exc)
+        try:
+            risk_events = self.repository.list_risk_events(limit=6)
+        except Exception as exc:
+            risk_events = []
+            logger.warning("global ai risk list failed: %s", exc)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sources": self.data_sources.list_sources(),
+            "sources": sources,
+            "live_sources": self._live_source_runtime_snapshot(),
             "research_health": self._research_health_snapshot(),
             "global_snapshot": self.repository.snapshot(),
             "generated_features": features[:8],
             "learning": learning,
-            "governance": self.governance.snapshot(),
-            "drift_events": self.repository.list_drift_events(limit=6),
-            "risk_events": self.repository.list_risk_events(limit=6),
+            "governance": governance,
+            "drift_events": drift_events,
+            "risk_events": risk_events,
         }
+
+    def research_health_snapshot(self) -> dict[str, Any]:
+        return self._research_health_snapshot()
+
+    def live_source_runtime_snapshot(self) -> list[dict[str, Any]]:
+        return self._live_source_runtime_snapshot()
 
     def football_analysis_board(self, *, limit: int = 20, market: str | None = None, user_id: int | None = None) -> dict[str, Any]:
         matches = self.football.getHistoricalEvents(limit=limit)
@@ -292,6 +430,7 @@ class GlobalAdaptiveIntelligencePlatform:
         return {
             "market": chosen_market,
             "items": rows,
+            "live_sources": self._live_source_runtime_snapshot(),
             "research_health": self._research_health_snapshot(),
         }
 

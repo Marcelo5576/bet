@@ -18,4 +18,5 @@ class PrepareBet365Response(BaseModel):
     message: str
     current_odd: float | None = None
     screenshot_path: str | None = None
+    page_url: str | None = None
     signal_id: str | None = None

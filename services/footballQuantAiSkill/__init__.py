@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
 from typing import Any
+
+
+logger = logging.getLogger("football_quant.health")
 
 
 class FootballQuantAiSkill:
@@ -98,14 +102,98 @@ class FootballQuantAiSkill:
             metadata={"category": "compliance"},
         )
 
+    def _safe_system_snapshot(self) -> dict[str, Any]:
+        try:
+            snapshot = self.repository.system_snapshot()
+        except Exception as exc:
+            logger.warning("football_quant health snapshot failed: %s", exc)
+            return {"db_file": self.settings.db_file, "counts": {}}
+        if not isinstance(snapshot, dict):
+            return {"db_file": self.settings.db_file, "counts": {}}
+        counts = snapshot.get("counts")
+        if not isinstance(counts, dict):
+            counts = {}
+        return {
+            "db_file": str(snapshot.get("db_file") or self.settings.db_file),
+            "counts": counts,
+        }
+
+    def _safe_source_status(self) -> list[dict[str, Any]]:
+        try:
+            rows = self.data_sources.source_status()
+        except Exception as exc:
+            logger.warning("football_quant source status failed: %s", exc)
+            return []
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def _safe_supabase_status(self) -> dict[str, Any]:
+        try:
+            status = self.supabase.sync_status()
+        except Exception as exc:
+            logger.warning("football_quant supabase status failed: %s", exc)
+            return {
+                "enabled": bool(self.settings.supabase_url and self.settings.supabase_service_role_key),
+                "supabase_url": self.settings.supabase_url or "",
+                "local_snapshot": self._safe_system_snapshot(),
+                "last_hydrate_at": None,
+                "last_hydrate_result": {},
+                "last_error": str(exc),
+                "schema_mode": "unavailable",
+                "available_tables": {},
+                "table_probe_errors": {},
+                "last_capability_check_at": None,
+                "note": "Falha ao consultar o status remoto; seguimos com o cache local.",
+            }
+        if not isinstance(status, dict):
+            return {
+                "enabled": False,
+                "supabase_url": self.settings.supabase_url or "",
+                "local_snapshot": self._safe_system_snapshot(),
+                "last_hydrate_at": None,
+                "last_hydrate_result": {},
+                "last_error": f"status_invalido:{type(status).__name__}",
+                "schema_mode": "unavailable",
+                "available_tables": {},
+                "table_probe_errors": {},
+                "last_capability_check_at": None,
+                "note": "O retorno do sincronismo remoto veio em formato invalido; seguimos com o cache local.",
+            }
+        status.setdefault("enabled", bool(self.settings.supabase_url and self.settings.supabase_service_role_key))
+        status.setdefault("supabase_url", self.settings.supabase_url or "")
+        if not isinstance(status.get("local_snapshot"), dict):
+            status["local_snapshot"] = self._safe_system_snapshot()
+        if not isinstance(status.get("last_hydrate_result"), dict):
+            status["last_hydrate_result"] = {}
+        if not isinstance(status.get("available_tables"), dict):
+            status["available_tables"] = {}
+        if not isinstance(status.get("table_probe_errors"), dict):
+            status["table_probe_errors"] = {}
+        return status
+
     def health(self) -> dict[str, Any]:
-        snapshot = self.repository.system_snapshot()
+        snapshot = self._safe_system_snapshot()
+        counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
+        local_matches = int(counts.get("historical_matches") or 0) if isinstance(counts, dict) else 0
+        local_features = int(counts.get("historical_features") or 0) if isinstance(counts, dict) else 0
+        if bool(self.settings.supabase_url and self.settings.supabase_service_role_key) and (local_matches == 0 or local_features == 0):
+            try:
+                self.supabase.hydrate_local_cache_if_needed(
+                    min_local_matches=300,
+                    min_local_features=300,
+                    recent_match_limit=400,
+                    recent_feature_limit=600,
+                )
+                snapshot = self._safe_system_snapshot()
+            except Exception as exc:
+                logger.warning("football_quant initial hydrate failed: %s", exc)
         return {
             "ok": True,
-            "db_file": snapshot["db_file"],
-            "counts": snapshot["counts"],
-            "sources": self.data_sources.source_status(),
-            "supabase": self.supabase.sync_status(),
+            "db_file": snapshot.get("db_file") or self.settings.db_file,
+            "counts": snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {},
+            "sources": self._safe_source_status(),
+            "supabase": self._safe_supabase_status(),
         }
 
 

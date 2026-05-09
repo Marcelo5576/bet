@@ -16,6 +16,14 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_first(*keys: str) -> str | None:
+    for key in keys:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchSkillSettings:
     db_file: str
@@ -47,14 +55,18 @@ def load_research_skill_settings() -> ResearchSkillSettings:
         default_profile=(os.getenv("FOOTBALL_RESEARCH_DEFAULT_PROFILE", "moderado").strip().lower() or "moderado"),
         min_ev_to_recommend=float(os.getenv("FOOTBALL_RESEARCH_MIN_EV", "0.03")),
         min_confidence_to_recommend=float(os.getenv("FOOTBALL_RESEARCH_MIN_CONFIDENCE", "60")),
-        api_football_key=(os.getenv("API_FOOTBALL_KEY") or "").strip() or None,
+        api_football_key=_env_first("API_FOOTBALL_KEY", "API_SPORTS_KEY", "APIFOOTBALL_KEY", "API_FOOTBALL_TOKEN"),
         api_football_base_url=(os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io").rstrip("/")),
         football_data_org_token=(os.getenv("FOOTBALL_DATA_ORG_TOKEN") or "").strip() or None,
         football_data_org_base_url=(os.getenv("FOOTBALL_DATA_ORG_BASE_URL", "https://api.football-data.org/v4").rstrip("/")),
-        odds_api_key=((os.getenv("ODDS_API_KEY") or "").strip() or None),
+        odds_api_key=_env_first("ODDS_API_KEY", "ODDS_API_IO_KEY"),
         odds_api_base_url=(os.getenv("ODDS_API_IO_BASE_URL", "https://api.odds-api.io/v3").rstrip("/")),
         statsbomb_open_base_url=(os.getenv("STATSBOMB_OPEN_BASE_URL", "https://raw.githubusercontent.com/statsbomb/open-data/master").rstrip("/")),
         supabase_url=(os.getenv("SUPABASE_URL") or "").rstrip("/") or None,
-        supabase_service_role_key=(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or None,
+        supabase_service_role_key=_env_first(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_SERVICE_KEY",
+            "SUPABASE_KEY",
+        ),
         auto_seed_mocks=_as_bool(os.getenv("FOOTBALL_RESEARCH_AUTO_SEED_MOCKS"), True),
     )
