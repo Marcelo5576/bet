@@ -7,9 +7,22 @@ import hashlib
 import logging
 import random
 import re
+import time
 import traceback
 from zoneinfo import ZoneInfo
 
+from services.agents import run_supervisor_pipeline
+from services.backtesting import get_auto_backtest_service
+from services.integrations import get_telegram_vip_service
+from services.intelligence import (
+    evaluate_pressure_engine,
+    get_performance_ranking_service,
+    get_referee_intelligence_service,
+)
+from services.learning import get_drift_detection_service, get_strategy_suggestion_service
+from services.memory import get_operational_memory_service
+from services.observability import get_observability_service
+from services.scoring import get_apex_score_service
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -23,9 +36,18 @@ from telegram.ext import (
 
 from src.config import Settings, load_settings
 from src.decision_log import DecisionLogStore
+from src.executors.bet365_assisted import (
+    build_prepare_request_from_signal,
+    close_assisted_session,
+    confirm_prepared_signal,
+    execute_prepare_request,
+    ignore_signal_for_assisted_flow,
+    monitor_signal_without_entry,
+)
 from src.integrations.supabase import SupabaseSink
 from src.intelligence.gemini import answer_question, refine_signal
 from src.intelligence.football_brain import get_football_brain
+from src.intelligence.historical_live_context import get_historical_live_context_service
 from src.intelligence.learning import summarize_history_with_simulation
 from src.intelligence.manual_import import parse_manual_bets
 from src.intelligence.markets import market_recommendations
@@ -76,6 +98,38 @@ def _decision_log_store(settings: Settings) -> DecisionLogStore:
     return DecisionLogStore(settings.decision_audit_db_file)
 
 
+def _operational_memory(settings: Settings):
+    return get_operational_memory_service(settings.decision_audit_db_file)
+
+
+def _observability(settings: Settings):
+    return get_observability_service(settings.decision_audit_db_file)
+
+
+def _performance_ranking(settings: Settings):
+    return get_performance_ranking_service(settings.decision_audit_db_file)
+
+
+def _auto_backtest(settings: Settings):
+    return get_auto_backtest_service(settings.decision_audit_db_file)
+
+
+def _drift_monitor(settings: Settings):
+    return get_drift_detection_service(settings.decision_audit_db_file)
+
+
+def _strategy_suggestions(settings: Settings):
+    return get_strategy_suggestion_service(settings.decision_audit_db_file)
+
+
+def _referee_intelligence(settings: Settings):
+    return get_referee_intelligence_service(settings.decision_audit_db_file)
+
+
+def _telegram_vip(settings: Settings):
+    return get_telegram_vip_service(settings.decision_audit_db_file)
+
+
 def build_provider(settings: Settings) -> LiveProvider:
     if settings.test_mode:
         return MockProvider()
@@ -94,8 +148,12 @@ def build_provider(settings: Settings) -> LiveProvider:
         )
     providers.append(
         EspnProvider(
+            site_api_base_url=settings.espn_site_api_base_url,
             usage_tracker=usage_tracker,
             cost_per_request_brl=settings.espn_cost_per_request_brl,
+            timeout_seconds=settings.espn_timeout,
+            max_retries=settings.espn_max_retries,
+            user_agent=settings.espn_user_agent,
         )
     )
     if settings.football_data_org_token:
@@ -175,12 +233,24 @@ def monitor_text(signal: dict) -> str:
 
 
 def _entry_status(signal: dict) -> str:
+    status = str(signal.get("status") or "").strip().lower()
+    if status == "prepared_waiting_manual_confirmation":
+        return "PREPARADA. Confirme manualmente na Bet365 e use Confirmei entrada no Telegram."
+    if status == "position_open":
+        return f"POSICAO ABERTA desde {signal.get('entered_at', '-')}"
     if signal.get("entered"):
         return f"ENTROU em {signal.get('entered_at', '-')}"
     return "NAO INFORMADO. Aperte Entrei quando fizer a entrada."
 
 
 def _short_entry_status(signal: dict) -> str:
+    status = str(signal.get("status") or "").strip().lower()
+    if status == "prepared_waiting_manual_confirmation":
+        return "Status: preparada aguardando confirmacao manual"
+    if status == "position_open":
+        return "Status: posicao aberta"
+    if status == "monitoring_without_entry":
+        return "Status: monitorando sem entrada"
     return "Status: ENTROU" if signal.get("entered") else "Status: aguardando confirmacao"
 
 
@@ -655,6 +725,29 @@ def games_menu(active: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def assisted_prepare_menu(signal_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Preparar Bet365", callback_data=f"prepare_bet365|{signal_id}"),
+                InlineKeyboardButton("Ignorar", callback_data=f"ignore_signal|{signal_id}"),
+            ],
+            [InlineKeyboardButton("Monitorar sem entrada", callback_data=f"monitor_signal|{signal_id}")],
+            [InlineKeyboardButton("Menu principal", callback_data="menu:home")],
+        ]
+    )
+
+
+def assisted_confirmation_menu(signal_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Confirmei entrada", callback_data=f"confirm_entry|{signal_id}")],
+            [InlineKeyboardButton("Monitorar sem entrada", callback_data=f"monitor_signal|{signal_id}")],
+            [InlineKeyboardButton("Menu principal", callback_data="menu:home")],
+        ]
+    )
+
+
 def ia_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -998,7 +1091,91 @@ def _valid_callback_data(data: str) -> bool:
         return raw.isdigit() and int(raw) < 30
     if data.startswith("outcome:"):
         return data.split(":", 1)[1] in {"win", "loss", "void"}
+    if "|" in data:
+        action, raw_signal_id = data.split("|", 1)
+        if action not in {
+            "prepare_bet365",
+            "confirm_entry",
+            "monitor_signal",
+            "ignore_signal",
+        }:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z0-9._-]{3,80}", raw_signal_id))
     return False
+
+
+def _callback_signal_id(data: str) -> str:
+    if "|" not in data:
+        return ""
+    return data.split("|", 1)[1].strip()
+
+
+def _signal_monitor_state(signal: dict[str, Any]) -> tuple[str, str]:
+    management = position_management(signal)
+    raw = str(management.get("decision") or "").upper()
+    if "SAIR PARCIAL" in raw or raw == "PROTEGER":
+        return "CASHOUT", str(management.get("reason") or "Proteja a posição.")
+    if raw == "SAIR":
+        return "SAIR", str(management.get("reason") or "Leitura perdeu força.")
+    if raw == "MANTER":
+        return "SEGURAR", str(management.get("reason") or "Leitura ainda sustenta a posição.")
+    if raw == "OBSERVAR":
+        return "AGUARDAR", str(management.get("reason") or "Aguardando confirmação manual.")
+    return "AGUARDAR", str(management.get("reason") or "Aguardando próxima leitura.")
+
+
+def _assisted_prepare_summary(signal: dict[str, Any], response) -> str:
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    lines = [
+        "🎯 BET365 ASSISTIDA",
+        "",
+        f"⚽ Jogo: {game.get('home') or '-'} x {game.get('away') or '-'}",
+        f"🎯 Mercado: {signal.get('entry_market') or signal.get('market') or '-'}",
+        f"🧩 Seleção: {signal.get('entry_selection') or signal.get('selection') or signal.get('team') or '-'}",
+        f"💰 Odd atual: {response.current_odd if response.current_odd is not None else '-'}",
+        f"📝 Status: {response.status}",
+        "",
+        response.message,
+    ]
+    if response.screenshot_path:
+        lines.extend(["", f"📸 Screenshot: {response.screenshot_path}"])
+    return "\n".join(lines)
+
+
+def _assisted_confirmation_text(signal: dict[str, Any]) -> str:
+    monitor_state, reason = _signal_monitor_state(signal)
+    return "\n".join(
+        [
+            "🟢 ENTRADA CONFIRMADA MANUALMENTE",
+            "",
+            f"⚽ Jogo: {(signal.get('game') or {}).get('home', '-')} x {(signal.get('game') or {}).get('away', '-')}",
+            f"🎯 Mercado: {signal.get('entry_market') or signal.get('market') or '-'}",
+            f"💰 Odd: {signal.get('entry_odds') or signal.get('target_odds') or '-'}",
+            "",
+            "Vou continuar monitorando a posição e avisar quando a leitura pedir:",
+            f"• {monitor_state}",
+            "",
+            f"Motivo atual: {reason}",
+        ]
+    )
+
+
+def _assisted_monitor_text(signal: dict[str, Any], *, prefix: str = "📡 MONITORAMENTO ASSISTIDO") -> str:
+    state_label, reason = _signal_monitor_state(signal)
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    lines = [
+        prefix,
+        "",
+        f"⚽ Jogo: {game.get('home') or '-'} x {game.get('away') or '-'}",
+        f"⏱ Minuto: {game.get('minute') or '-'}",
+        f"📊 Estado: {state_label}",
+        f"🧠 Leitura: {reason}",
+    ]
+    if signal.get("entry_market") or signal.get("market"):
+        lines.append(f"🎯 Mercado: {signal.get('entry_market') or signal.get('market')}")
+    if signal.get("entry_odds") or signal.get("target_odds"):
+        lines.append(f"💰 Odd de referência: {signal.get('entry_odds') or signal.get('target_odds')}")
+    return "\n".join(lines)
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1051,6 +1228,79 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else "Nao consegui escolher esse jogo. Rode /scan novamente."
         )
         reply_markup = active_menu() if state.active_signal else games_menu()
+    elif data.startswith("prepare_bet365|"):
+        store: StateStore = context.application.bot_data["store"]
+        signal_id = _callback_signal_id(data)
+        signal = store.get_signal(signal_id)
+        if not signal:
+            text = "Nao encontrei esse sinal no estado atual. Rode um novo scan e tente novamente."
+            reply_markup = games_menu()
+        else:
+            try:
+                payload = build_prepare_request_from_signal(signal)
+            except ValueError as exc:
+                text = f"⚠️ Nao consegui preparar a Bet365 agora.\n\n{exc}"
+                reply_markup = assisted_prepare_menu(signal_id)
+            else:
+                chat_id = query.message.chat_id if query.message else None
+                response = await execute_prepare_request(
+                    payload,
+                    assisted_chat_id=chat_id,
+                    settings=context.application.bot_data["settings"],
+                    store=store,
+                )
+                refreshed = store.get_signal(signal_id) or signal
+                text = _assisted_prepare_summary(refreshed, response)
+                if response.status == "prepared":
+                    if chat_id:
+                        await send_motion(context, chat_id, "signal")
+                    await supabase_sink(context).sync_signal(refreshed)
+                    reply_markup = assisted_confirmation_menu(signal_id)
+                else:
+                    reply_markup = assisted_prepare_menu(signal_id)
+    elif data.startswith("confirm_entry|"):
+        store: StateStore = context.application.bot_data["store"]
+        signal_id = _callback_signal_id(data)
+        chat_id = query.message.chat_id if query.message else None
+        state, signal = confirm_prepared_signal(store, signal_id, assisted_chat_id=chat_id)
+        await close_assisted_session(signal_id)
+        if not signal:
+            text = "Nao consegui confirmar essa entrada. Talvez o sinal ja tenha saído do histórico ativo."
+            reply_markup = games_menu(active=bool(state.active_signal))
+        else:
+            await supabase_sink(context).sync_signal(signal)
+            text = _assisted_confirmation_text(signal)
+            reply_markup = active_menu() if state.active_signal else assisted_confirmation_menu(signal_id)
+    elif data.startswith("monitor_signal|"):
+        store: StateStore = context.application.bot_data["store"]
+        signal_id = _callback_signal_id(data)
+        chat_id = query.message.chat_id if query.message else None
+        state, signal = monitor_signal_without_entry(store, signal_id, assisted_chat_id=chat_id)
+        await close_assisted_session(signal_id)
+        if not signal:
+            text = "Nao consegui colocar esse sinal em monitoramento. Rode novo scan e tente de novo."
+            reply_markup = games_menu(active=bool(state.active_signal))
+        else:
+            await supabase_sink(context).sync_signal(signal)
+            text = _assisted_monitor_text(
+                signal,
+                prefix="🔵 MONITORANDO SEM ENTRADA",
+            )
+            reply_markup = active_menu() if state.active_signal else assisted_prepare_menu(signal_id)
+    elif data.startswith("ignore_signal|"):
+        store: StateStore = context.application.bot_data["store"]
+        signal_id = _callback_signal_id(data)
+        chat_id = query.message.chat_id if query.message else None
+        state, signal = ignore_signal_for_assisted_flow(store, signal_id, assisted_chat_id=chat_id)
+        await close_assisted_session(signal_id)
+        if signal:
+            await supabase_sink(context).sync_signal(signal)
+        text = (
+            "Ok, marquei esse sinal como ignorado. O scanner segue vivo e pode trazer outra leitura limpa."
+            if signal
+            else "Nao consegui marcar o sinal como ignorado, mas o scanner continua funcionando."
+        )
+        reply_markup = games_menu(active=bool(state.active_signal))
     elif data == "entry:yes":
         store: StateStore = context.application.bot_data["store"]
         state = store.load()
@@ -1225,6 +1475,7 @@ async def run_scan(
     store.touch_scan()
     pregame_watchlist: list[dict] = []
     pregame_scope = "agenda indisponivel"
+    pregame_started = time.perf_counter()
     try:
         pregame_watchlist, pregame_scope = await discover_pregame_watchlist(
             provider,
@@ -1233,7 +1484,23 @@ async def run_scan(
             block_esports=settings.block_esports,
         )
     except Exception as exc:
+        _observability(settings).log_provider_call(
+            provider_label(provider),
+            "discover_pregame_watchlist",
+            status="error",
+            latency_ms=round((time.perf_counter() - pregame_started) * 1000, 2),
+            args={"scan_preference": state.scan_preference},
+            error=str(exc),
+        )
         logger.info("Falha ao montar watchlist de pre-jogo: %s", exc)
+    else:
+        _observability(settings).log_provider_call(
+            provider_label(provider),
+            "discover_pregame_watchlist",
+            status="ok",
+            latency_ms=round((time.perf_counter() - pregame_started) * 1000, 2),
+            args={"scan_preference": state.scan_preference, "watchlist": len(pregame_watchlist)},
+        )
     store.set_pregame_watchlist(pregame_watchlist)
     brain = get_football_brain(settings)
     if brain:
@@ -1246,6 +1513,7 @@ async def run_scan(
         for item in pregame_watchlist
         if str(item.get("game_id") or "").strip()
     }
+    live_started = time.perf_counter()
     try:
         games, scan_scope = await scan_games(
             provider,
@@ -1254,8 +1522,23 @@ async def run_scan(
             preferred_game_ids=preferred_game_ids,
         )
     except Exception as exc:
+        _observability(settings).log_provider_call(
+            provider_label(provider),
+            "scan_games",
+            status="error",
+            latency_ms=round((time.perf_counter() - live_started) * 1000, 2),
+            args={"scan_preference": state.scan_preference, "preferred_game_ids": len(preferred_game_ids)},
+            error=str(exc),
+        )
         logger.warning("Falha ao buscar jogos ao vivo: %s", exc)
         return "Nao consegui buscar jogos ao vivo agora. Vou tentar no proximo scan."
+    _observability(settings).log_provider_call(
+        provider_label(provider),
+        "scan_games",
+        status="ok",
+        latency_ms=round((time.perf_counter() - live_started) * 1000, 2),
+        args={"scan_preference": state.scan_preference, "games": len(games), "scope": scan_scope},
+    )
     if brain:
         try:
             brain.record_live_games(games, provider_label(provider))
@@ -1600,6 +1883,40 @@ def _pregame_watchlist_text(items: list[dict[str, Any]], scope: str) -> str:
     return _shorten("\n".join(lines), TELEGRAM_TEXT_LIMIT)
 
 
+def _apply_supervisor_guard(signal: dict[str, Any], supervisor: dict[str, Any]) -> dict[str, Any]:
+    signal = dict(signal or {})
+    blockers = [str(item) for item in supervisor.get("blockers") or [] if str(item).strip()]
+    findings = [str(item) for item in supervisor.get("findings") or [] if str(item).strip()]
+    decision = str(supervisor.get("recommendation") or "MONITOR").upper()
+    signal["supervisor_decision"] = decision
+    signal["supervisor_blockers"] = blockers
+    signal["supervisor_findings"] = findings
+    signal["why_decision"] = "; ".join((signal.get("apex_reasons") or [])[:3] + findings[:2]).strip("; ")
+    reasons = list(signal.get("decision_reasons") or [])
+    for item in blockers[:4]:
+        if item not in reasons:
+            reasons.append(item)
+    signal["decision_reasons"] = reasons[:12]
+
+    if decision == "ENTER_NOW":
+        return signal
+    signal["entry_allowed"] = False
+    current_action = str(signal.get("action") or "").upper()
+    if current_action != "SAIR":
+        signal["action"] = "AGUARDAR"
+    if decision == "WAIT":
+        signal["recommendation"] = "Aguardar"
+    elif decision == "MONITOR":
+        signal["recommendation"] = "Monitorar"
+    elif decision == "NO_DATA":
+        signal["recommendation"] = "Sem dados"
+        signal["decision_class"] = "NO_BET"
+    else:
+        signal["recommendation"] = "Ignorar"
+        signal["decision_class"] = "NO_BET"
+    return signal
+
+
 def prepare_signal(signal: dict, state, settings: Settings) -> dict:
     learning_context = _learning_context(state)
     signal["learning_context"] = learning_context
@@ -1616,6 +1933,21 @@ def prepare_signal(signal: dict, state, settings: Settings) -> dict:
             signal = brain.enrich_signal(signal)
         except Exception as exc:
             logger.info("Brain: falha ao enriquecer sinal %s: %s", signal.get("signal_id"), exc)
+    try:
+        historical_context = get_historical_live_context_service().build_for_signal(signal)
+    except Exception as exc:
+        logger.info("Historico: falha ao enriquecer sinal %s: %s", signal.get("signal_id"), exc)
+        historical_context = {"available": False, "reason": "falha ao comparar com a base historica"}
+    signal["historical_context"] = historical_context
+    if historical_context.get("available"):
+        signal["historical_performance_score"] = historical_context.get("historical_performance_score")
+        signal["league_reliability_score"] = historical_context.get("league_reliability_score")
+        signal["historical_reference_sample_size"] = historical_context.get("league_sample_size")
+        signal["historical_market_fit_score"] = historical_context.get("market_fit_score")
+        signal["learning_context"] = {
+            **learning_context,
+            "historical_live_reference": historical_context,
+        }
     signal["market_recommendations"] = market_recommendations(signal)
     if settings.block_esports and is_forbidden_esports_game(signal.get("game", {})):
         signal["action"] = "AGUARDAR"
@@ -1646,6 +1978,95 @@ def prepare_signal(signal: dict, state, settings: Settings) -> dict:
         selected_profile=getattr(state, "risk_profile", "moderado"),
     )
     signal["market_recommendations"] = market_recommendations(signal)
+    pressure_payload = evaluate_pressure_engine(game)
+    signal["pressure_engine"] = pressure_payload
+    signal["referee_intelligence"] = _referee_intelligence(settings).evaluate_signal(signal)
+    try:
+        _performance_ranking(settings).refresh_from_memory()
+    except Exception as exc:
+        logger.info("Ranking: falha ao atualizar snapshot local: %s", exc)
+    ranking_payload = _performance_ranking(settings).for_signal(signal)
+    signal["performance_ranking"] = ranking_payload
+    apex_payload = get_apex_score_service().score_signal(
+        signal,
+        pressure_payload=pressure_payload,
+        performance_ranking=ranking_payload,
+    )
+    signal["apex_score"] = apex_payload["apex_score"]
+    signal["apex_grade"] = apex_payload["grade"]
+    signal["apex_decision"] = apex_payload["decision"]
+    signal["apex_reasons"] = apex_payload["reasons"]
+    signal["apex_blockers"] = apex_payload["blockers"]
+    signal["apex_components"] = apex_payload["components"]
+    signal["apex_odds_confirmed"] = apex_payload["odds_confirmed"]
+    signal["apex_data_quality"] = apex_payload["data_quality"]
+    signal["apex_risk_score"] = apex_payload["risk_score"]
+    supervisor_payload = run_supervisor_pipeline(
+        signal,
+        context={
+            "pressure": pressure_payload,
+            "ranking": ranking_payload,
+            "telegram_vip": {},
+        },
+    )
+    signal["agent_outputs"] = supervisor_payload["agents"]
+    signal = _apply_supervisor_guard(signal, supervisor_payload["supervisor"])
+    drift_payload = _drift_monitor(settings).evaluate_signal(signal, rankings=ranking_payload)
+    suggestions = _strategy_suggestions(settings).generate_for_signal(
+        signal,
+        drift=drift_payload,
+        rankings=ranking_payload,
+    )
+    signal["drift_monitor"] = drift_payload
+    signal["strategy_suggestions"] = suggestions[:6]
+    vip_payload = _telegram_vip(settings).qualify_signal(signal)
+    signal["telegram_vip"] = vip_payload
+    signal["signal_source"] = str(signal.get("source") or signal.get("provider") or game.get("source") or "scanner")
+    memory = _operational_memory(settings)
+    observability = _observability(settings)
+    memory.record_signal_cycle(signal)
+    memory.record_decision_context(
+        str(signal.get("signal_id") or signal.get("analysis_id") or ""),
+        provider=str(signal.get("signal_source") or "scanner"),
+        context_type="apex_score",
+        context=apex_payload,
+    )
+    memory.record_decision_context(
+        str(signal.get("signal_id") or signal.get("analysis_id") or ""),
+        provider=str(signal.get("signal_source") or "scanner"),
+        context_type="supervisor",
+        context=supervisor_payload,
+    )
+    memory.record_learning_event(
+        signal_id=str(signal.get("signal_id") or signal.get("analysis_id") or ""),
+        event_type="signal_cycle",
+        status="ready",
+        message=f"ApexScore {signal.get('apex_score')} · decisão {signal.get('supervisor_decision')}",
+        payload={
+            "drift": drift_payload,
+            "suggestions": suggestions[:3],
+            "telegram_vip": vip_payload,
+        },
+    )
+    observability.log_decision(signal, stage="prepare_signal")
+    for agent_output in supervisor_payload["agents"]:
+        observability.log_agent_trace(
+            str(signal.get("signal_id") or signal.get("analysis_id") or ""),
+            str(agent_output.get("agent_name") or "Agent"),
+            status=str(agent_output.get("status") or "unknown"),
+            score=float(agent_output.get("score") or 0.0),
+            findings=agent_output.get("findings") or [],
+            blockers=agent_output.get("blockers") or [],
+            recommendation=str(agent_output.get("recommendation") or "MONITOR"),
+        )
+    observability.log_memory_event(
+        str(signal.get("signal_id") or signal.get("analysis_id") or ""),
+        event_type="operational_memory",
+        operation="write",
+        status="ok",
+        detail="Ciclo salvo na memória operacional.",
+        payload={"apex_score": signal.get("apex_score"), "decision": signal.get("supervisor_decision")},
+    )
     _decision_log_store(settings).log_signal(signal)
     return signal
 
@@ -1655,11 +2076,26 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
     store: StateStore = context.application.bot_data["store"]
     provider: LiveProvider = context.application.bot_data["provider"]
     store.touch_scan()
+    started_at = time.perf_counter()
     try:
         games = await provider.get_live_games()
     except Exception as exc:
+        _observability(settings).log_provider_call(
+            provider_label(provider),
+            "refresh_active_signal",
+            status="error",
+            latency_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            error=str(exc),
+        )
         logger.warning("Falha ao atualizar jogo ativo: %s", exc)
         return "Jogo ativo mantido, mas nao consegui atualizar os dados agora.\n\n" + monitor_text(state.active_signal)
+    _observability(settings).log_provider_call(
+        provider_label(provider),
+        "refresh_active_signal",
+        status="ok",
+        latency_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        args={"games": len(games)},
+    )
     brain = get_football_brain(settings)
     if brain:
         try:
@@ -1694,11 +2130,24 @@ async def refresh_active_signal(context: ContextTypes.DEFAULT_TYPE, state) -> st
         "created_at",
         "entered",
         "entered_at",
+        "status",
         "entry_market",
+        "entry_selection",
         "entry_value",
         "entry_odds",
         "entry_notes",
         "outcome",
+        "assisted_executor",
+        "assisted_chat_id",
+        "assisted_monitor_last_sent_at",
+        "assisted_last_alert_state",
+        "bet365_last_prepare_status",
+        "bet365_last_prepare_message",
+        "bet365_last_prepare_at",
+        "bet365_prepared_at",
+        "bet365_screenshot_path",
+        "bet365_current_odd",
+        "bet365_min_odd",
     ):
         if key in previous:
             signal[key] = previous[key]
@@ -2041,14 +2490,21 @@ def _parse_utc(value: str | None) -> datetime | None:
 
 
 def _is_approved_signal_for_telegram(signal: dict) -> bool:
+    current_status = str(signal.get("status") or "").strip().lower()
+    if current_status in {
+        "prepared_waiting_manual_confirmation",
+        "position_open",
+        "monitoring_without_entry",
+        "ignored_by_user",
+    }:
+        return False
+    settings = load_settings()
     try:
-        decision = build_scanner_decision(signal)
+        allowed, _ = _telegram_vip(settings).can_dispatch(signal)
+        return allowed
     except Exception as exc:
-        logger.info("Nao consegui validar decisao para Telegram aprovado: %s", exc)
+        logger.info("Nao consegui validar Telegram VIP: %s", exc)
         return False
-    if decision.get("decision_status") != "ENTER_NOW":
-        return False
-    return bool(decision.get("entry_allowed"))
 
 
 def _approved_signals_to_alert(store: StateStore, state) -> list[dict]:
@@ -2075,11 +2531,53 @@ def _approved_signals_to_alert(store: StateStore, state) -> list[dict]:
 
 
 def _approved_signal_text(signal: dict) -> str:
-    return _shorten(
-        "✅ APEXGOL AI · ENTRADA APROVADA\n"
-        "Este envio passou pelos filtros de odd, confiança, score, EV e risco.\n\n"
-        + signal_text(signal),
-        TELEGRAM_TEXT_LIMIT,
+    settings = load_settings()
+    base = _telegram_vip(settings).format_message(signal)
+    return _shorten(base, TELEGRAM_TEXT_LIMIT)
+
+
+async def _maybe_send_assisted_monitor_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    store: StateStore = context.application.bot_data["store"]
+    if not hasattr(store, "load") or not hasattr(store, "update_signal_fields"):
+        logger.debug("Store sem suporte a monitoramento assistido; pulando alerta.")
+        return
+    state = store.load()
+    signal = state.active_signal if isinstance(state.active_signal, dict) else None
+    if not signal:
+        return
+    status = str(signal.get("status") or "").strip().lower()
+    if status not in {"prepared_waiting_manual_confirmation", "position_open", "monitoring_without_entry"}:
+        return
+    chat_id = _safe_int(signal.get("assisted_chat_id"), 0)
+    if chat_id <= 0:
+        return
+    now = datetime.now(timezone.utc)
+    last_sent_at = _parse_utc(signal.get("assisted_monitor_last_sent_at"))
+    alert_state, _ = _signal_monitor_state(signal)
+    last_state = str(signal.get("assisted_last_alert_state") or "").strip().upper()
+    if last_sent_at and alert_state == last_state:
+        elapsed = (now - last_sent_at).total_seconds()
+        if elapsed < 300:
+            return
+    text = _assisted_monitor_text(signal)
+    reply_markup = (
+        assisted_confirmation_menu(str(signal.get("signal_id") or ""))
+        if status == "prepared_waiting_manual_confirmation"
+        else active_menu()
+    )
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    except Exception as exc:
+        logger.warning("Falha ao enviar monitoramento assistido para chat %s: %s", chat_id, exc)
+        return
+    store.update_signal_fields(
+        str(signal.get("signal_id") or ""),
+        {
+            "assisted_monitor_last_sent_at": now.isoformat(timespec="seconds"),
+            "assisted_last_alert_state": alert_state,
+        },
+        activate=False,
     )
 
 
@@ -2526,6 +3024,10 @@ async def scheduled_daily_simulation(context: ContextTypes.DEFAULT_TYPE) -> None
     if not ran or not text:
         return
     settings: Settings = context.application.bot_data["settings"]
+    try:
+        _auto_backtest(settings).daily_backtest_job()
+    except Exception as exc:
+        logger.info("Backtest automatico: falha ao gerar snapshot diario: %s", exc)
     store: StateStore = context.application.bot_data["store"]
     state = store.load()
     for chat_id in _notification_chat_ids(settings, state):
@@ -2571,11 +3073,14 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         text = await run_scan(context, auto_pick=False)
 
+    await _maybe_send_assisted_monitor_alert(context)
+
     if approved_chat_ids:
         refreshed_state = store.load()
         approved_signals = _approved_signals_to_alert(store, refreshed_state)
         if not approved_signals:
             return
+        vip = _telegram_vip(settings)
         for signal in approved_signals:
             message = _approved_signal_text(signal)
             for chat_id in approved_chat_ids:
@@ -2583,9 +3088,13 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=message,
-                        reply_markup=candidate_menu(store.load()),
+                        reply_markup=assisted_prepare_menu(
+                            str(signal.get("signal_id") or signal.get("analysis_id") or "")
+                        ),
                     )
+                    vip.record_dispatch(signal, chat_id, status="sent")
                 except Exception as exc:
+                    vip.record_dispatch(signal, chat_id, status=f"error:{type(exc).__name__}")
                     logger.warning("Falha ao enviar entrada aprovada para chat %s: %s", chat_id, exc)
         return
 

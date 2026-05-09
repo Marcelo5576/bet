@@ -10,7 +10,7 @@ from services.globalAdaptiveIntelligence.core import GlobalAdaptiveIntelligenceP
 from services.globalAdaptiveIntelligence.sports.football_adapter import FootballAdapter
 from services.footballQuantAiSkill.schemas import BacktestSummary, BankrollAdvice, MatchPrediction
 from src.dashboard import app
-from src.global_ai_router import _global, _require_user
+from src.global_ai_router import _GlobalDependencyFailure, _global, _require_admin, _require_user
 
 
 class GlobalAIRouterTests(unittest.TestCase):
@@ -132,6 +132,93 @@ class GlobalAIRouterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Base historica usada nesta leitura", response.text)
         self.assertIn("Historico local", response.text)
+        self.assertIn("Fontes ao vivo e odds reais", response.text)
+
+    def test_bias_page_surfaces_history_context_copy(self) -> None:
+        app.dependency_overrides[_require_admin] = lambda: {"id": 1, "email": "test@example.com"}
+        client = TestClient(app)
+
+        response = client.get("/app/market-bias-anomaly-center")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Historico usado para detectar", response.text)
+        self.assertIn("loadBiasAnomaly", response.text)
+        self.assertIn("Fontes ao vivo e odds reais", response.text)
+
+    def test_global_ai_shell_handles_auth_expiry_and_admin_access_gracefully(self) -> None:
+        app.dependency_overrides[_require_admin] = lambda: {"id": 1, "email": "test@example.com"}
+        client = TestClient(app)
+
+        response = client.get("/app/market-bias-anomaly-center")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Sessao expirada", response.text)
+        self.assertIn("Acesso restrito", response.text)
+        self.assertIn("Entrar novamente", response.text)
+
+    def test_feature_lab_endpoint_includes_research_health(self) -> None:
+        class StubRepo:
+            def list_generated_features(self, limit=80):
+                return [{"feature_name": "rolling::Serie A"}]
+
+            def snapshot(self):
+                return {"counts": {"generated_features": 1}}
+
+        class StubPlatform:
+            repository = StubRepo()
+
+            def research_health_snapshot(self):
+                return {"counts": {"historical_matches": 12}, "supabase": {"enabled": False}}
+
+        app.dependency_overrides[_require_admin] = lambda: {"id": 1, "email": "test@example.com"}
+        app.dependency_overrides[_global] = lambda: StubPlatform()
+        client = TestClient(app)
+
+        response = client.get("/api/global-ai/feature-lab")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["research_health"]["counts"]["historical_matches"], 12)
+        self.assertEqual(payload["features"][0]["feature_name"], "rolling::Serie A")
+
+    def test_football_analysis_endpoint_exposes_live_source_runtime(self) -> None:
+        class StubPlatform:
+            def football_analysis_board(self, *, user_id=None):
+                return {
+                    "market": "match_winner_home",
+                    "items": [],
+                    "research_health": {"counts": {"historical_matches": 3}},
+                    "live_sources": [
+                        {"id": "espn", "label": "ESPN Scoreboard", "status": "ready"},
+                        {"id": "isports", "label": "iSports Odds", "status": "ready"},
+                    ],
+                }
+
+        app.dependency_overrides[_require_user] = lambda: {"id": 1, "email": "test@example.com"}
+        app.dependency_overrides[_global] = lambda: StubPlatform()
+        client = TestClient(app)
+
+        response = client.get("/api/global-ai/football-analysis")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["live_sources"][0]["label"], "ESPN Scoreboard")
+        self.assertEqual(payload["live_sources"][1]["label"], "iSports Odds")
+
+    def test_football_analysis_degrades_when_global_dependency_is_unavailable(self) -> None:
+        app.dependency_overrides[_require_user] = lambda: {"id": 1, "email": "test@example.com"}
+        app.dependency_overrides[_global] = lambda: _GlobalDependencyFailure(RuntimeError("boom"))
+        client = TestClient(app)
+
+        response = client.get("/api/global-ai/football-analysis")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["research_health"]["supabase"]["schema_mode"], "unavailable")
+        self.assertEqual(payload["error_type"], "RuntimeError")
 
 
 if __name__ == "__main__":
