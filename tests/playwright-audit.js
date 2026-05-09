@@ -44,7 +44,7 @@ async function main() {
     await page.goto(`${baseURL}/`, { waitUntil: "networkidle" });
     await assert.equal(await page.title(), "ApexGol AI | Plataforma");
     await assert.equal(await page.locator("meta[name='description']").count(), 1);
-    await assert.equal(await page.locator("link[rel='canonical']").getAttribute("href"), "https://novo.tickpost.com.br/");
+    await assert.equal(await page.locator("link[rel='canonical']").getAttribute("href"), "https://apexgol.com.br/");
     await assert.ok((await page.locator("body").innerText()).includes("decisão"));
     await assert.equal(await page.locator("text=O que o cliente compra").count(), 1);
     await assert.equal(await page.locator("text=Agente com memória").count(), 1);
@@ -110,10 +110,10 @@ async function main() {
     const page = await browser.newPage();
     const robots = await page.request.get(`${baseURL}/robots.txt`);
     assert.equal(robots.status(), 200);
-    assert.match(await robots.text(), /Sitemap: https:\/\/novo\.tickpost\.com\.br\/sitemap\.xml/);
+    assert.match(await robots.text(), /Sitemap: https:\/\/apexgol\.com\.br\/sitemap\.xml/);
     const sitemap = await page.request.get(`${baseURL}/sitemap.xml`);
     assert.equal(sitemap.status(), 200);
-    assert.match(await sitemap.text(), /<loc>https:\/\/novo\.tickpost\.com\.br\/<\/loc>/);
+    assert.match(await sitemap.text(), /<loc>https:\/\/apexgol\.com\.br\/<\/loc>/);
     await page.close();
   });
 

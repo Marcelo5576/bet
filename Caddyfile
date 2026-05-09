@@ -1,4 +1,12 @@
+www.apexgol.com.br {
+	redir https://apexgol.com.br{uri} 308
+}
+
 novo.tickpost.com.br {
+	redir https://apexgol.com.br{uri} 308
+}
+
+apexgol.com.br {
 	encode zstd gzip
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"

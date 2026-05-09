@@ -15,6 +15,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from src.config import Settings, load_settings
+from src.executors.bet365_assisted import (
+    assisted_session_snapshot,
+    build_prepare_request_from_signal,
+    close_assisted_session,
+    execute_prepare_request,
+)
 from src.integrations.supabase import SupabaseSink
 from src.intelligence.risk import red_stop_status
 from src.portal import (
@@ -120,6 +126,16 @@ class PlanPricePayload(BaseModel):
 class AdminTelegramApprovedPayload(BaseModel):
     enabled: bool | None = None
     chat_id: str | None = None
+
+
+class AdminPrepareSignalPayload(BaseModel):
+    signal_id: str
+    min_odd: float | None = None
+    stake: float | None = None
+
+
+class AdminCloseSessionPayload(BaseModel):
+    signal_id: str
 
 
 def _settings() -> Settings:
@@ -447,6 +463,19 @@ def _mask_secret(value: str | None) -> dict[str, Any]:
     return {"configured": True, "preview": preview, "length": len(raw)}
 
 
+def _resolve_app_path(raw_value: str | None) -> Path:
+    raw = str(raw_value or "").strip()
+    root = Path(__file__).resolve().parent.parent
+    if not raw:
+        return root
+    if raw.startswith("/app/"):
+        return root / raw.removeprefix("/app/").replace("/", os.sep)
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return root / path
+
+
 _FANTASY_POSITION_ALIASES = {
     "GOL": "GOL",
     "GK": "GOL",
@@ -700,13 +729,14 @@ def _page_shell(
     extra_script: str = "",
     description: str | None = None,
     canonical_path: str | None = None,
+    canonical_base_url: str | None = None,
 ) -> str:
     settings = _settings()
     desc = description or (
         "APEXGOL AI é uma central quantitativa de inteligência esportiva com scanner, odds, "
         "backtesting, risco, Telegram e explicabilidade IA."
     )
-    site_url = (settings.website_url or "").rstrip("/")
+    site_url = (canonical_base_url or settings.website_url or "").rstrip("/")
     canonical_url = f"{site_url}{canonical_path or ''}" if site_url else canonical_path or "/"
     return f"""<!doctype html>
 <html lang="pt-BR">
@@ -1269,6 +1299,24 @@ async function askAiFloat() {{
 </html>"""
 
 
+def _preferred_site_url(request: Request | None, settings: Settings) -> str:
+    configured = (settings.website_url or "").rstrip("/")
+    if request is None:
+        return configured
+
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip().lower()
+    raw_host = forwarded_host or (request.headers.get("host") or "").split(",", 1)[0].strip().lower()
+    host = raw_host.split(":", 1)[0]
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    proto = forwarded_proto or (request.url.scheme if request.url and request.url.scheme else "https")
+
+    if host in {"apexgol.com.br", "www.apexgol.com.br", "novo.tickpost.com.br"}:
+        return "https://apexgol.com.br"
+    if host and host not in {"localhost", "127.0.0.1", "testserver"} and not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
+        return f"{proto}://{host}".rstrip("/")
+    return configured
+
+
 def _auth_js(kind: str) -> str:
     return f"""<script>
 async function submitAuth(event) {{
@@ -1298,7 +1346,7 @@ async function submitAuth(event) {{
 
 
 @router.get("/", response_class=HTMLResponse)
-def landing() -> str:
+def landing(request: Request) -> str:
     settings = _settings()
     store = _portal_store(settings)
     plans = _plan_catalog(settings, store)
@@ -1693,13 +1741,14 @@ def landing() -> str:
         body,
         description="APEXGOL AI une scanner quantitativo, IA esportiva, odds, análise estatística, backtesting, risco e Telegram para apoiar decisões esportivas.",
         canonical_path="/",
+        canonical_base_url=_preferred_site_url(request, settings),
     )
 
 
 @router.get("/robots.txt")
-def robots_txt() -> HTMLResponse:
+def robots_txt(request: Request) -> HTMLResponse:
     settings = _settings()
-    base = (settings.website_url or "").rstrip("/")
+    base = _preferred_site_url(request, settings).rstrip("/")
     content = "User-agent: *\nAllow: /\n"
     if base:
         content += f"Sitemap: {base}/sitemap.xml\n"
@@ -1712,9 +1761,9 @@ def favicon() -> RedirectResponse:
 
 
 @router.get("/sitemap.xml")
-def sitemap_xml() -> HTMLResponse:
+def sitemap_xml(request: Request) -> HTMLResponse:
     settings = _settings()
-    base = (settings.website_url or "").rstrip("/")
+    base = _preferred_site_url(request, settings).rstrip("/")
     urls = ["", "/signup", "/login"]
     items = "".join(
         f"<url><loc>{_esc(base + (path or '/'))}</loc><changefreq>weekly</changefreq><priority>{'1.0' if path == '' else '0.7'}</priority></url>"
@@ -1727,7 +1776,7 @@ def sitemap_xml() -> HTMLResponse:
 
 
 @router.get("/signup", response_class=HTMLResponse)
-def signup_page(plan: str | None = None) -> str:
+def signup_page(request: Request, plan: str | None = None) -> str:
     settings = _settings()
     selected = _safe_plan(plan)
     body = f"""
@@ -1751,11 +1800,17 @@ def signup_page(plan: str | None = None) -> str:
   </div>
 </main>
 """
-    return _page_shell(f"Cadastro | {settings.product_name}", body, _auth_js("/api/auth/signup"), canonical_path="/signup")
+    return _page_shell(
+        f"Cadastro | {settings.product_name}",
+        body,
+        _auth_js("/api/auth/signup"),
+        canonical_path="/signup",
+        canonical_base_url=_preferred_site_url(request, settings),
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_page() -> str:
+def login_page(request: Request) -> str:
     settings = _settings()
     body = """
 <header class='top'><div class='topin'><div class='brand'>Login</div><nav class='nav nav-scroll'><a class='btn' href='/'>Início</a><a class='btn' href='/signup'>Cadastro</a></nav></div></header>
@@ -1772,11 +1827,17 @@ def login_page() -> str:
   </div>
 </main>
 """
-    return _page_shell(f"Login | {settings.product_name}", body, _auth_js("/api/auth/login"), canonical_path="/login")
+    return _page_shell(
+        f"Login | {settings.product_name}",
+        body,
+        _auth_js("/api/auth/login"),
+        canonical_path="/login",
+        canonical_base_url=_preferred_site_url(request, settings),
+    )
 
 
 @router.get("/forgot-password", response_class=HTMLResponse)
-def forgot_page() -> str:
+def forgot_page(request: Request) -> str:
     settings = _settings()
     body = """
 <header class='top'><div class='topin'><div class='brand'>Recuperar senha</div><nav class='nav'><a class='btn' href='/login'>Voltar</a></nav></div></header>
@@ -1791,11 +1852,16 @@ def forgot_page() -> str:
   </div>
 </main>
 """
-    return _page_shell(f"Recuperar senha | {settings.product_name}", body, _auth_js("/api/auth/forgot-password"))
+    return _page_shell(
+        f"Recuperar senha | {settings.product_name}",
+        body,
+        _auth_js("/api/auth/forgot-password"),
+        canonical_base_url=_preferred_site_url(request, settings),
+    )
 
 
 @router.get("/reset-password", response_class=HTMLResponse)
-def reset_page(token: str | None = None) -> str:
+def reset_page(request: Request, token: str | None = None) -> str:
     settings = _settings()
     token_value = token or ""
     body = f"""
@@ -1813,7 +1879,12 @@ def reset_page(token: str | None = None) -> str:
   </div>
 </main>
 """
-    return _page_shell(f"Redefinir senha | {settings.product_name}", body, _auth_js("/api/auth/reset-password"))
+    return _page_shell(
+        f"Redefinir senha | {settings.product_name}",
+        body,
+        _auth_js("/api/auth/reset-password"),
+        canonical_base_url=_preferred_site_url(request, settings),
+    )
 
 
 @router.get("/app", response_class=HTMLResponse)
@@ -2024,7 +2095,7 @@ function renderAiMemoryStatus(status) {
   box.innerHTML = `<strong>Memoria IA:</strong> ${status.summary || '-'}`;
 }
 </script>"""
-    return _page_shell("Portal do Cliente", body, script)
+    return _page_shell("Portal do Cliente", body, script, canonical_base_url=_preferred_site_url(request, settings))
 
 
 @router.get("/fantasy-ia", include_in_schema=False)
@@ -2033,7 +2104,7 @@ def fantasy_ia_page(user: dict[str, Any] = Depends(_require_user)) -> RedirectRe
     return RedirectResponse("/dashboard", status_code=303)
 
 @router.get("/admin/users", response_class=HTMLResponse)
-def admin_users(_: dict[str, Any] = Depends(_require_admin)) -> str:
+def admin_users(request: Request, _: dict[str, Any] = Depends(_require_admin)) -> str:
     settings = _settings()
     body = """
 <header class='top'><div class='topin'><div class='brand'>Admin APEXGOL AI</div><nav class='nav'><a class='btn' href='/app'>Area cliente</a><a class='btn' href='/dashboard'>Dashboard</a></nav></div></header>
@@ -2084,6 +2155,74 @@ def admin_users(_: dict[str, Any] = Depends(_require_admin)) -> str:
     <div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;'>
       <button class='btn primary' onclick='saveApprovedTelegramConfig()'>Salvar Telegram de sinais</button>
       <a class='btn' href='/app#telegram'>Ver configuração do cliente</a>
+    </div>
+  </section>
+  <section class='section card'>
+    <h2 class='title'>Executor assistido Bet365</h2>
+    <p class='muted'>Prepara a entrada em navegador real, com perfil persistente, mas nunca confirma a aposta. A confirmação final continua manual.</p>
+    <div id='executor-note' class='notice muted'></div>
+    <div class='grid g3'>
+      <div class='mini'><div class='muted'>Feature flag</div><div id='bet365-enabled' class='kpi'>-</div></div>
+      <div class='mini'><div class='muted'>Modo navegador</div><div id='bet365-headless' class='kpi'>-</div></div>
+      <div class='mini'><div class='muted'>Stake maxima</div><div id='bet365-max-stake' class='kpi'>-</div></div>
+      <div class='mini'><div class='muted'>Sessoes abertas</div><div id='bet365-open-sessions' class='kpi'>-</div></div>
+    </div>
+    <div class='section'>
+      <h3 class='title'>Preparar por signal_id</h3>
+      <div class='grid g3'>
+        <div>
+          <label>Signal ID</label>
+          <input id='bet365-signal-id' type='text' placeholder='Ex: SIG-123' />
+        </div>
+        <div>
+          <label>Odd minima override (opcional)</label>
+          <input id='bet365-signal-min-odd' type='number' step='0.01' min='1.01' placeholder='Ex: 1.55' />
+        </div>
+        <div>
+          <label>Stake override (opcional)</label>
+          <input id='bet365-signal-stake' type='number' step='0.01' min='0.01' placeholder='Ex: 10.00' />
+        </div>
+      </div>
+      <div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;'>
+        <button class='btn primary' onclick='prepareBet365FromSignal()'>Preparar a partir do sinal salvo</button>
+        <button class='btn' onclick='closeBet365Session()'>Fechar sessao desse signal_id</button>
+      </div>
+    </div>
+    <div class='section'>
+      <h3 class='title'>Preparar manualmente</h3>
+      <div class='grid g2'>
+        <div>
+          <label>Jogo</label>
+          <input id='bet365-match-name' type='text' placeholder='Flamengo x Palmeiras' />
+        </div>
+        <div>
+          <label>Signal ID</label>
+          <input id='bet365-manual-signal-id' type='text' placeholder='SIG-123' />
+        </div>
+        <div>
+          <label>Mercado</label>
+          <input id='bet365-market' type='text' placeholder='Total de Gols' />
+        </div>
+        <div>
+          <label>Selecao</label>
+          <input id='bet365-selection' type='text' placeholder='Mais de 1.5' />
+        </div>
+        <div>
+          <label>Odd minima</label>
+          <input id='bet365-min-odd' type='number' step='0.01' min='1.01' placeholder='1.55' />
+        </div>
+        <div>
+          <label>Stake</label>
+          <input id='bet365-stake' type='number' step='0.01' min='0.01' placeholder='10.00' />
+        </div>
+      </div>
+      <div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;'>
+        <button class='btn primary' onclick='prepareBet365Manual()'>Preparar manualmente</button>
+      </div>
+    </div>
+    <div class='section'>
+      <h3 class='title'>Ultimo retorno do executor</h3>
+      <div id='executor-result' class='notice muted'>Ainda nao rodamos nenhuma preparacao nesta sessao admin.</div>
     </div>
   </section>
   <section class='section card'>
@@ -2244,6 +2383,96 @@ async function saveApprovedTelegramConfig() {
   await loadApprovedTelegramConfig();
   await loadSystemHealth();
 }
+function renderExecutorResult(data) {
+  const target = document.getElementById('executor-result');
+  const ok = Boolean(data && data.ok);
+  const screenshot = data && data.screenshot_path
+    ? `<div class="muted" style="margin-top:6px;">Screenshot: <code>${data.screenshot_path}</code></div>`
+    : '';
+  const odd = data && data.current_odd != null ? ` | odd atual: ${Number(data.current_odd).toFixed(2)}` : '';
+  const signalId = data && data.signal_id ? ` | signal_id: ${data.signal_id}` : '';
+  target.className = ok ? 'notice ok' : 'notice muted';
+  target.innerHTML = `<strong>${data && data.status ? data.status : 'sem_status'}</strong> - ${data && data.message ? data.message : 'Sem resposta do executor.'}${odd}${signalId}${screenshot}`;
+}
+async function prepareBet365FromSignal() {
+  const note = document.getElementById('executor-note');
+  const signalId = document.getElementById('bet365-signal-id').value.trim();
+  const minOddRaw = document.getElementById('bet365-signal-min-odd').value.trim();
+  const stakeRaw = document.getElementById('bet365-signal-stake').value.trim();
+  if (!signalId) {
+    note.textContent = 'Informe um signal_id antes de preparar.';
+    return;
+  }
+  note.textContent = 'Abrindo a Bet365 e preparando o sinal salvo...';
+  const payload = {signal_id: signalId};
+  if (minOddRaw) payload.min_odd = Number(minOddRaw);
+  if (stakeRaw) payload.stake = Number(stakeRaw);
+  const res = await fetch('/api/admin/executor/bet365/prepare-signal', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body:JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    note.textContent = data.detail || 'Falha ao preparar via signal_id.';
+    renderExecutorResult({ok:false, status:'request_failed', message:data.detail || 'Falha ao preparar via signal_id.'});
+    return;
+  }
+  note.textContent = data.message || 'Preparação concluída.';
+  renderExecutorResult(data);
+  await loadSystemHealth();
+}
+async function closeBet365Session() {
+  const note = document.getElementById('executor-note');
+  const signalId = document.getElementById('bet365-signal-id').value.trim();
+  if (!signalId) {
+    note.textContent = 'Informe um signal_id para fechar a sessão assistida.';
+    return;
+  }
+  note.textContent = 'Fechando sessão assistida da Bet365...';
+  const res = await fetch('/api/admin/executor/bet365/close-session', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body:JSON.stringify({signal_id: signalId})
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    note.textContent = data.detail || 'Falha ao fechar sessão assistida.';
+    return;
+  }
+  note.textContent = data.message || 'Sessão assistida encerrada.';
+  await loadSystemHealth();
+}
+async function prepareBet365Manual() {
+  const note = document.getElementById('executor-note');
+  const payload = {
+    match_name: document.getElementById('bet365-match-name').value.trim(),
+    market: document.getElementById('bet365-market').value.trim(),
+    selection: document.getElementById('bet365-selection').value.trim(),
+    min_odd: Number(document.getElementById('bet365-min-odd').value || 0),
+    stake: Number(document.getElementById('bet365-stake').value || 0),
+    signal_id: document.getElementById('bet365-manual-signal-id').value.trim() || null
+  };
+  if (!payload.match_name || !payload.market || !payload.selection || !(payload.min_odd > 1) || !(payload.stake > 0) || !payload.signal_id) {
+    note.textContent = 'Preencha jogo, mercado, seleção, odd mínima, stake e signal_id.';
+    return;
+  }
+  note.textContent = 'Abrindo a Bet365 e preparando entrada manual...';
+  const res = await fetch('/executor/bet365/prepare', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body:JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    note.textContent = data.detail || 'Falha ao preparar manualmente.';
+    renderExecutorResult({ok:false, status:'request_failed', message:data.detail || 'Falha ao preparar manualmente.'});
+    return;
+  }
+  note.textContent = data.message || 'Preparação concluída.';
+  renderExecutorResult(data);
+  await loadSystemHealth();
+}
 async function savePlanPrice() {
   const note = document.getElementById('sys-note');
   note.textContent = 'Salvando preco...';
@@ -2261,7 +2490,7 @@ async function savePlanPrice() {
   await loadSystemConfig();
 }
 function tokenRow(name, item, detail) {
-  const status = item && item.configured ? 'configurado' : 'faltando';
+  const status = item ? (item.status_label || (item.configured ? 'configurado' : 'faltando')) : 'faltando';
   const preview = item ? item.preview : 'nao configurado';
   const detailText = detail || '-';
   return `<tr><td>${name}</td><td>${status}</td><td>${preview}</td><td>${detailText}</td></tr>`;
@@ -2297,9 +2526,18 @@ async function loadSystemHealth() {
   document.getElementById('health-payments').textContent = `${db.payments_paid || 0}/${db.payments_total || 0}`;
   document.getElementById('health-telegram').textContent = `${db.telegram_linked || 0}`;
   const integrations = data.integrations || {};
+  const bet365 = integrations.bet365_assisted || {};
+  document.getElementById('bet365-enabled').textContent = bet365.configured ? 'ativo' : 'desativado';
+  document.getElementById('bet365-headless').textContent = bet365.headless ? 'headless' : 'janela visivel';
+  document.getElementById('bet365-max-stake').textContent = bet365.max_assisted_stake ? `R$ ${Number(bet365.max_assisted_stake).toFixed(2)}` : '-';
+  document.getElementById('bet365-open-sessions').textContent = String(bet365.open_sessions || 0);
+  document.getElementById('executor-note').textContent = bet365.configured
+    ? `Perfil: ${bet365.profile_dir || '-'} | screenshots: ${bet365.screenshot_dir || '-'} | sessoes: ${(bet365.signal_ids || []).join(', ') || 'nenhuma'}`
+    : 'Executor Bet365 desativado por feature flag. Ative BET365_ASSISTED_ENABLED para preparar entradas.';
   const rows = [
     tokenRow('Telegram Bot', integrations.telegram_bot, `chat ids: ${state.chat_ids || 0}`),
     tokenRow('Telegram entradas aprovadas', integrations.telegram_approved_signals, integrations.telegram_approved_signals && integrations.telegram_approved_signals.enabled ? 'somente Entrada aprovada' : 'inativo'),
+    tokenRow('Bet365 assistido', integrations.bet365_assisted, integrations.bet365_assisted && integrations.bet365_assisted.configured ? `max stake R$ ${Number(integrations.bet365_assisted.max_assisted_stake || 0).toFixed(2)} | ${integrations.bet365_assisted.headless ? 'headless' : 'janela visivel'}` : 'feature flag desligada'),
     tokenRow('Gemini', integrations.gemini_key, integrations.gemini_model || '-'),
     tokenRow('Odds-API.io', integrations.odds_api_io_key, integrations.odds_api_io_bookmakers || 'bookmaker nao configurado'),
     tokenRow('Supabase', integrations.supabase_key, integrations.supabase_url || 'URL nao configurada'),
@@ -2347,7 +2585,12 @@ loadUsers();
 loadSystemHealth();
 window.setInterval(loadSystemHealth, 60 * 1000);
 </script>"""
-    return _page_shell(f"Admin | {settings.product_name}", body, script)
+    return _page_shell(
+        f"Admin | {settings.product_name}",
+        body,
+        script,
+        canonical_base_url=_preferred_site_url(request, settings),
+    )
 
 
 @router.post("/api/auth/signup")
@@ -2661,6 +2904,78 @@ def api_admin_telegram_approved_signals_update(
     )
 
 
+@router.post("/api/admin/executor/bet365/prepare-signal")
+async def api_admin_executor_prepare_signal(
+    request: Request,
+    payload: AdminPrepareSignalPayload,
+    _: dict[str, Any] = Depends(_require_admin),
+) -> JSONResponse:
+    settings = _settings()
+    _assert_same_origin(request, settings)
+    signal_id = str(payload.signal_id or "").strip()
+    if not signal_id:
+        raise HTTPException(status_code=400, detail="signal_id é obrigatório.")
+    store = StateStore(os.getenv("STATE_FILE", "data/state.json"))
+    signal = store.get_signal(signal_id)
+    if not signal:
+        raise HTTPException(status_code=404, detail="Sinal não encontrado no state atual.")
+    try:
+        request_payload = build_prepare_request_from_signal(signal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updates: dict[str, Any] = {}
+    if payload.min_odd is not None:
+        if float(payload.min_odd) <= 1:
+            raise HTTPException(status_code=400, detail="Odd mínima deve ser maior que 1.00.")
+        updates["min_odd"] = round(float(payload.min_odd), 2)
+    if payload.stake is not None:
+        if float(payload.stake) <= 0:
+            raise HTTPException(status_code=400, detail="Stake deve ser maior que zero.")
+        updates["stake"] = round(float(payload.stake), 2)
+    if updates:
+        request_payload = request_payload.model_copy(update=updates)
+    assisted_chat_id = None
+    try:
+        raw_chat_id = signal.get("assisted_chat_id")
+        if raw_chat_id not in (None, ""):
+            assisted_chat_id = int(raw_chat_id)
+    except (TypeError, ValueError):
+        assisted_chat_id = None
+    response = await execute_prepare_request(
+        request_payload,
+        settings=settings,
+        store=store,
+        assisted_chat_id=assisted_chat_id,
+    )
+    return JSONResponse(response.model_dump())
+
+
+@router.post("/api/admin/executor/bet365/close-session")
+async def api_admin_executor_close_session(
+    request: Request,
+    payload: AdminCloseSessionPayload,
+    _: dict[str, Any] = Depends(_require_admin),
+) -> JSONResponse:
+    settings = _settings()
+    _assert_same_origin(request, settings)
+    signal_id = str(payload.signal_id or "").strip()
+    if not signal_id:
+        raise HTTPException(status_code=400, detail="signal_id é obrigatório.")
+    closed = await close_assisted_session(signal_id)
+    return JSONResponse(
+        {
+            "ok": True,
+            "closed": bool(closed),
+            "signal_id": signal_id,
+            "message": (
+                "Sessão assistida encerrada."
+                if closed
+                else "Nenhuma sessão aberta encontrada para esse signal_id."
+            ),
+        }
+    )
+
+
 @router.get("/api/admin/system-health")
 def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSONResponse:
     settings = _settings()
@@ -2677,6 +2992,9 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
         "world_first": "Mundo -> Brasil",
         "live_only": "Somente ao vivo",
     }
+    bet365_profile_dir = _resolve_app_path(settings.bet365_profile_dir)
+    bet365_screenshot_dir = _resolve_app_path(settings.bet365_screenshot_dir)
+    bet365_sessions = assisted_session_snapshot()
     integrations = {
         "payment_gateway": settings.payment_gateway,
         "telegram_bot": _mask_secret(settings.telegram_bot_token),
@@ -2684,6 +3002,20 @@ def api_admin_system_health(_: dict[str, Any] = Depends(_require_admin)) -> JSON
             "configured": bool(store.approved_signal_telegram_chat_ids()),
             "preview": store.approved_signal_telegram_config().get("chat_id") or "nao configurado",
             "enabled": bool(store.approved_signal_telegram_config().get("enabled")),
+        },
+        "bet365_assisted": {
+            "configured": bool(settings.bet365_assisted_enabled),
+            "status_label": "ativo" if settings.bet365_assisted_enabled else "desativado",
+            "preview": "ativo" if settings.bet365_assisted_enabled else "desativado",
+            "base_url": settings.bet365_base_url,
+            "headless": bool(settings.bet365_headless),
+            "profile_dir": str(bet365_profile_dir),
+            "profile_dir_exists": bet365_profile_dir.exists(),
+            "screenshot_dir": str(bet365_screenshot_dir),
+            "screenshot_dir_exists": bet365_screenshot_dir.exists(),
+            "max_assisted_stake": float(settings.max_assisted_stake),
+            "open_sessions": int(bet365_sessions.get("count") or 0),
+            "signal_ids": list(bet365_sessions.get("signal_ids") or []),
         },
         "gemini_key": _mask_secret(settings.gemini_api_key),
         "gemini_model": settings.gemini_model,

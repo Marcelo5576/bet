@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/opt/betsignal-cloud}"
 BRANCH="${BRANCH:-main}"
-APP_HOST_DEFAULT="${DOMAIN:-novo.tickpost.com.br}"
+APP_HOST_DEFAULT="${DOMAIN:-apexgol.com.br}"
 BACKUP_ROOT="${BACKUP_ROOT:-${HOME}/backups/betsignal}"
 REPORT_FILE="${PROJECT_DIR}/deploy_report.txt"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -101,6 +101,7 @@ PY
 }
 
 validate_env() {
+  python3 scripts/normalize_domain_env.py ".env" "${APP_HOST_DEFAULT}" >/dev/null
   local missing
   local app_env football_api_key
   missing="$(python3 - ".env" <<'PY'
@@ -235,17 +236,17 @@ http_smoke() {
 import sys
 from urllib.parse import urlparse
 
-raw = sys.argv[1] or "https://novo.tickpost.com.br"
+raw = sys.argv[1] or "https://apexgol.com.br"
 parsed = urlparse(raw if "://" in raw else f"https://{raw}")
-print(parsed.netloc or "novo.tickpost.com.br")
+print(parsed.netloc or "apexgol.com.br")
 PY
 )"
   app_host="${app_host:-$APP_HOST_DEFAULT}"
   app_host_only="$(python3 - "${app_host}" <<'PY'
 import sys
 
-raw = (sys.argv[1] or "novo.tickpost.com.br").strip()
-print(raw.split(":", 1)[0] or "novo.tickpost.com.br")
+raw = (sys.argv[1] or "apexgol.com.br").strip()
+print(raw.split(":", 1)[0] or "apexgol.com.br")
 PY
 )"
   dashboard_user="$(read_env_value DASHBOARD_USER)"
@@ -306,10 +307,10 @@ show_status() {
   write_report
   log "Status final"
   docker compose ps
-  printf 'Landing: %s/\n' "${app_url:-https://novo.tickpost.com.br}"
-  printf 'Login: %s/login\n' "${app_url:-https://novo.tickpost.com.br}"
-  printf 'Dashboard: %s/dashboard\n' "${app_url:-https://novo.tickpost.com.br}"
-  printf 'Cerebro IA: %s/cerebro-ia\n' "${app_url:-https://novo.tickpost.com.br}"
+  printf 'Landing: %s/\n' "${app_url:-https://apexgol.com.br}"
+  printf 'Login: %s/login\n' "${app_url:-https://apexgol.com.br}"
+  printf 'Dashboard: %s/dashboard\n' "${app_url:-https://apexgol.com.br}"
+  printf 'Cerebro IA: %s/cerebro-ia\n' "${app_url:-https://apexgol.com.br}"
   printf 'Deploy report: %s\n' "${REPORT_FILE}"
 }
 

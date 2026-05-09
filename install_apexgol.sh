@@ -171,6 +171,7 @@ ensure_env_file() {
   else
     log ".env existente preservado"
   fi
+  python3 "${PROJECT_DIR}/scripts/normalize_domain_env.py" "${PROJECT_DIR}/.env" "${DOMAIN:-apexgol.com.br}" >/dev/null
 }
 
 ensure_script_permissions() {
@@ -301,7 +302,7 @@ for line in path.read_text(encoding="utf-8").splitlines():
     key, value = line.split("=", 1)
     env[key.strip()] = value.strip()
 
-app_url = env.get("APP_URL") or env.get("WEBSITE_URL") or "https://novo.tickpost.com.br"
+app_url = env.get("APP_URL") or env.get("WEBSITE_URL") or "https://apexgol.com.br"
 print(f"Landing: {app_url}/")
 print(f"Login: {app_url}/login")
 print(f"Dashboard: {app_url}/dashboard")

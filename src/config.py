@@ -42,6 +42,13 @@ class Settings:
     plan_pro_price_brl: float
     plan_team_price_brl: float
     telegram_bot_token: str
+    bet365_assisted_enabled: bool
+    bet365_base_url: str
+    bet365_profile_dir: str
+    bet365_headless: bool
+    bet365_timeout_ms: int
+    bet365_screenshot_dir: str
+    max_assisted_stake: float
     scan_interval_seconds: int
     idle_scan_interval_seconds: int
     active_scan_interval_seconds: int
@@ -51,6 +58,14 @@ class Settings:
     test_mode: bool
     api_football_key: str | None
     api_football_base_url: str
+    espn_timeout: int
+    espn_max_retries: int
+    espn_user_agent: str
+    espn_site_api_base_url: str
+    espn_core_api_base_url: str
+    espn_web_v3_api_base_url: str
+    espn_cdn_api_base_url: str
+    espn_now_api_base_url: str
     football_data_org_token: str | None
     odds_api_io_key: str | None
     odds_api_io_base_url: str
@@ -131,13 +146,29 @@ def load_settings() -> Settings:
             "PRODUCT_TAGLINE",
             "Central Quantitativa de Inteligência Esportiva.",
         ).strip(),
-        website_url=os.getenv("WEBSITE_URL", "https://novo.tickpost.com.br").strip(),
+        website_url=os.getenv("WEBSITE_URL", "https://apexgol.com.br").strip(),
         sales_whatsapp=os.getenv("SALES_WHATSAPP", "").strip(),
         sales_email=os.getenv("SALES_EMAIL", "").strip(),
         plan_starter_price_brl=float(os.getenv("PLAN_STARTER_PRICE_BRL", "97")),
         plan_pro_price_brl=float(os.getenv("PLAN_PRO_PRICE_BRL", "197")),
         plan_team_price_brl=float(os.getenv("PLAN_TEAM_PRICE_BRL", "497")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        bet365_assisted_enabled=_as_bool(os.getenv("BET365_ASSISTED_ENABLED"), True),
+        bet365_base_url=(
+            os.getenv("BET365_BASE_URL", "https://www.bet365.com/").strip()
+            or "https://www.bet365.com/"
+        ),
+        bet365_profile_dir=(
+            os.getenv("BET365_PROFILE_DIR", "/app/storage/playwright/bet365-profile").strip()
+            or "/app/storage/playwright/bet365-profile"
+        ),
+        bet365_headless=_as_bool(os.getenv("BET365_HEADLESS"), False),
+        bet365_timeout_ms=max(5000, int(os.getenv("BET365_TIMEOUT_MS", "45000"))),
+        bet365_screenshot_dir=(
+            os.getenv("BET365_SCREENSHOT_DIR", "/app/storage/screenshots").strip()
+            or "/app/storage/screenshots"
+        ),
+        max_assisted_stake=max(1.0, float(os.getenv("MAX_ASSISTED_STAKE", "20.00"))),
         scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "20")),
         idle_scan_interval_seconds=int(os.getenv("IDLE_SCAN_INTERVAL_SECONDS", "20")),
         active_scan_interval_seconds=int(os.getenv("ACTIVE_SCAN_INTERVAL_SECONDS", "20")),
@@ -154,6 +185,32 @@ def load_settings() -> Settings:
         api_football_base_url=(
             _first_env("API_FOOTBALL_BASE_URL", "API_SPORTS_BASE_URL")
             or "https://v3.football.api-sports.io"
+        ).rstrip("/"),
+        espn_timeout=max(5, int(os.getenv("ESPN_TIMEOUT", "30"))),
+        espn_max_retries=max(1, min(8, int(os.getenv("ESPN_MAX_RETRIES", "3")))),
+        espn_user_agent=(
+            os.getenv("ESPN_USER_AGENT", "ESPN-Service/1.0").strip()
+            or "ESPN-Service/1.0"
+        ),
+        espn_site_api_base_url=(
+            os.getenv("ESPN_SITE_API_BASE_URL", "https://site.api.espn.com").strip()
+            or "https://site.api.espn.com"
+        ).rstrip("/"),
+        espn_core_api_base_url=(
+            os.getenv("ESPN_CORE_API_BASE_URL", "https://sports.core.api.espn.com").strip()
+            or "https://sports.core.api.espn.com"
+        ).rstrip("/"),
+        espn_web_v3_api_base_url=(
+            os.getenv("ESPN_WEB_V3_API_BASE_URL", "https://site.web.api.espn.com").strip()
+            or "https://site.web.api.espn.com"
+        ).rstrip("/"),
+        espn_cdn_api_base_url=(
+            os.getenv("ESPN_CDN_API_BASE_URL", "https://cdn.espn.com").strip()
+            or "https://cdn.espn.com"
+        ).rstrip("/"),
+        espn_now_api_base_url=(
+            os.getenv("ESPN_NOW_API_BASE_URL", "https://now.core.api.espn.com").strip()
+            or "https://now.core.api.espn.com"
         ).rstrip("/"),
         football_data_org_token=(os.getenv("FOOTBALL_DATA_ORG_TOKEN") or "").strip() or None,
         odds_api_io_key=(
@@ -197,7 +254,7 @@ def load_settings() -> Settings:
         dashboard_password=os.getenv("DASHBOARD_PASSWORD", "change-me-now"),
         dashboard_domains=os.getenv(
             "DASHBOARD_DOMAINS",
-            "http://2.24.217.214,http://novo.tickpost.com.br",
+            "http://2.24.217.214,https://apexgol.com.br,https://www.apexgol.com.br",
         ),
         support_note=os.getenv(
             "SUPPORT_NOTE",

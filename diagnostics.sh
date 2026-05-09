@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/opt/betsignal-cloud}"
 REPORT_FILE="${PROJECT_DIR}/diagnostics_report.txt"
-APP_HOST_DEFAULT="${DOMAIN:-novo.tickpost.com.br}"
+APP_HOST_DEFAULT="${DOMAIN:-apexgol.com.br}"
 
 log() {
   printf '\n== %s ==\n' "$1"
@@ -120,9 +120,9 @@ PY
 import sys
 from urllib.parse import urlparse
 
-raw = sys.argv[1] or "https://novo.tickpost.com.br"
+raw = sys.argv[1] or "https://apexgol.com.br"
 parsed = urlparse(raw if "://" in raw else f"https://{raw}")
-print(parsed.netloc or "novo.tickpost.com.br")
+print(parsed.netloc or "apexgol.com.br")
 PY
 )"
   HOST_NAME="${HOST_NAME:-$APP_HOST_DEFAULT}"

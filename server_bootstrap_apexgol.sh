@@ -4,7 +4,7 @@ set -Eeuo pipefail
 REPO_URL="${REPO_URL:-}"
 BRANCH="${BRANCH:-main}"
 PROJECT_DIR="${PROJECT_DIR:-/opt/betsignal-cloud}"
-DOMAIN="${DOMAIN:-novo.tickpost.com.br}"
+DOMAIN="${DOMAIN:-apexgol.com.br}"
 BACKUP_ROOT="${BACKUP_ROOT:-/root/backups/betsignal}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 REPORT_FILE="${PROJECT_DIR}/install_report.txt"
@@ -99,29 +99,7 @@ ensure_env_file() {
     cp .env.example .env
   fi
 
-  python3 - ".env" "${DOMAIN}" <<'PY'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-domain = sys.argv[2].strip()
-if not domain:
-    raise SystemExit(0)
-
-lines = path.read_text(encoding="utf-8").splitlines()
-updated = []
-found = False
-target = f"APP_URL=https://{domain}"
-for line in lines:
-    if line.startswith("APP_URL="):
-      updated.append(target)
-      found = True
-    else:
-      updated.append(line)
-if not found:
-    updated.append(target)
-path.write_text("\n".join(updated) + "\n", encoding="utf-8")
-PY
+  python3 scripts/normalize_domain_env.py ".env" "${DOMAIN}" >/dev/null
 }
 
 ensure_permissions() {
