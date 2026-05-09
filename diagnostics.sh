@@ -72,6 +72,14 @@ main() {
   docker compose logs --tail=80 caddy || true
   append_report docker compose logs --tail=80 caddy
 
+  log "Caddyfile montado no container"
+  docker compose exec -T caddy sh -lc 'cat /etc/caddy/Caddyfile' || true
+  append_report docker compose exec -T caddy sh -lc 'cat /etc/caddy/Caddyfile'
+
+  log "Validação do Caddy"
+  docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile || true
+  append_report docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile
+
   log "Uso de disco"
   df -h
   append_report df -h

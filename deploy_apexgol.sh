@@ -167,7 +167,21 @@ build_and_up() {
   docker compose build
   log "Subindo containers"
   docker compose up -d --force-recreate
+  log "Recriando Caddy para recarregar o upstream montado"
+  docker compose up -d --force-recreate caddy
   note "Docker: build e up concluidos"
+}
+
+validate_caddy_runtime() {
+  local caddyfile_runtime
+  log "Validando runtime do Caddy"
+  docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile
+  caddyfile_runtime="$(docker compose exec -T caddy sh -lc 'cat /etc/caddy/Caddyfile' 2>/dev/null || true)"
+  printf '%s\n' "${caddyfile_runtime}"
+  if ! grep -q 'reverse_proxy dashboard:8000' <<<"${caddyfile_runtime}"; then
+    fail "Caddy no container nao esta apontando para dashboard:8000."
+  fi
+  note "Caddy runtime: upstream dashboard:8000 validado"
 }
 
 run_container_checks() {
@@ -322,6 +336,7 @@ main() {
   validate_env
   validate_python_syntax
   build_and_up
+  validate_caddy_runtime
   run_container_checks
   validate_football_provider_env
   http_smoke
