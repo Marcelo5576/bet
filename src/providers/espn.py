@@ -82,17 +82,29 @@ class EspnProvider(LiveProvider):
 
     def __init__(
         self,
-        url: str = "https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard",
+        url: str | None = None,
+        site_api_base_url: str = "https://site.api.espn.com",
         leagues: tuple[str, ...] = DEFAULT_SOCCER_LEAGUES,
         usage_tracker: UsageTracker | None = None,
         cost_per_request_brl: float = 0.0,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 3,
+        user_agent: str = "ESPN-Service/1.0",
     ):
-        self.urls = [url] + [
-            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
+        self.site_api_base_url = (site_api_base_url or "https://site.api.espn.com").rstrip("/")
+        scoreboard_url = (
+            url
+            or f"{self.site_api_base_url}/apis/site/v2/sports/soccer/all/scoreboard"
+        )
+        self.urls = [scoreboard_url] + [
+            f"{self.site_api_base_url}/apis/site/v2/sports/soccer/{league}/scoreboard"
             for league in leagues
         ]
         self.usage_tracker = usage_tracker
         self.cost_per_request_brl = float(cost_per_request_brl or 0)
+        self.timeout_seconds = max(5.0, float(timeout_seconds or 30.0))
+        self.max_retries = max(1, int(max_retries or 1))
+        self.user_agent = str(user_agent or "ESPN-Service/1.0").strip() or "ESPN-Service/1.0"
 
     async def get_live_games(self) -> list[LiveGame]:
         return await self._get_games(live_only=True)
@@ -101,7 +113,10 @@ class EspnProvider(LiveProvider):
         return await self._get_games(live_only=False)
 
     async def _get_games(self, live_only: bool) -> list[LiveGame]:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            headers={"User-Agent": self.user_agent},
+        ) as client:
             payloads = await asyncio.gather(
                 *(self._fetch_scoreboard(client, url) for url in self.urls),
                 return_exceptions=True,
@@ -119,14 +134,22 @@ class EspnProvider(LiveProvider):
         return games
 
     async def _fetch_scoreboard(self, client: httpx.AsyncClient, url: str) -> dict:
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-        except Exception as exc:
-            self._track(False, operation="scoreboard", error=exc)
-            raise
-        self._track(True, operation="scoreboard", response_bytes=len(response.content))
-        return response.json()
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                self._track(True, operation="scoreboard", response_bytes=len(response.content))
+                return response.json()
+            except Exception as exc:
+                last_error = exc
+                self._track(False, operation="scoreboard", error=exc)
+                if attempt >= self.max_retries:
+                    raise
+                await asyncio.sleep(min(1.5, 0.2 * attempt))
+        if last_error:
+            raise last_error
+        raise RuntimeError("Falha inesperada ao consultar ESPN scoreboard.")
 
     def _track(
         self,
