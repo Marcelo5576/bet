@@ -2521,14 +2521,22 @@ def _is_approved_signal_for_telegram(signal: dict) -> bool:
         return False
 
 
-def _approved_signals_to_alert(store: StateStore, state) -> list[dict]:
-    now = datetime.now(timezone.utc)
-    sent = dict(state.approved_signal_alerts or {})
+def _pruned_approved_signal_alerts(
+    alerts: dict[str, str] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    now = now or datetime.now(timezone.utc)
     pruned: dict[str, str] = {}
-    for key, value in sent.items():
+    for key, value in dict(alerts or {}).items():
         parsed = _parse_utc(value)
         if parsed and (now - parsed).total_seconds() < APPROVED_SIGNAL_ALERT_TTL_SECONDS:
             pruned[str(key)] = str(value)
+    return pruned
+
+
+def _approved_signals_to_alert(state, *, now: datetime | None = None) -> list[dict]:
+    pruned = _pruned_approved_signal_alerts(state.approved_signal_alerts or {}, now=now)
     approved: list[dict] = []
     for signal in _checkout_signals(state):
         if not _is_approved_signal_for_telegram(signal):
@@ -2537,11 +2545,26 @@ def _approved_signals_to_alert(store: StateStore, state) -> list[dict]:
         if not key or key in pruned:
             continue
         approved.append(signal)
-        pruned[key] = now.isoformat()
-    if pruned != sent:
-        state.approved_signal_alerts = pruned
-        store.save(state)
     return approved
+
+
+def _mark_approved_signals_alerted(
+    store: StateStore,
+    signal_keys: set[str],
+    *,
+    now: datetime | None = None,
+) -> None:
+    if not signal_keys:
+        return
+    now = now or datetime.now(timezone.utc)
+    state = store.load()
+    alerts = _pruned_approved_signal_alerts(state.approved_signal_alerts or {}, now=now)
+    for key in signal_keys:
+        if str(key).strip():
+            alerts[str(key)] = now.isoformat()
+    if alerts != dict(state.approved_signal_alerts or {}):
+        state.approved_signal_alerts = alerts
+        store.save(state)
 
 
 def _approved_signal_text(signal: dict) -> str:
@@ -3092,12 +3115,12 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if approved_chat_ids:
         refreshed_state = store.load()
-        approved_signals = _approved_signals_to_alert(store, refreshed_state)
-        if not approved_signals:
-            return
+        approved_signals = _approved_signals_to_alert(refreshed_state)
         vip = _telegram_vip(settings)
+        delivered_keys: set[str] = set()
         for signal in approved_signals:
             message = _approved_signal_text(signal)
+            signal_key = _approved_signal_alert_key(signal)
             for chat_id in approved_chat_ids:
                 try:
                     await context.bot.send_message(
@@ -3108,10 +3131,12 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                         ),
                     )
                     vip.record_dispatch(signal, chat_id, status="sent")
+                    if signal_key:
+                        delivered_keys.add(signal_key)
                 except Exception as exc:
                     vip.record_dispatch(signal, chat_id, status=f"error:{type(exc).__name__}")
                     logger.warning("Falha ao enviar entrada aprovada para chat %s: %s", chat_id, exc)
-        return
+        _mark_approved_signals_alerted(store, delivered_keys)
 
     if not chat_ids:
         logger.info(

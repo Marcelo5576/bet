@@ -87,6 +87,23 @@ class ConfigAliasTests(unittest.TestCase):
         self.assertEqual(settings.supabase_url, "https://example.supabase.co")
         self.assertEqual(settings.supabase_service_role_key, "service-key-alias")
 
+    def test_load_settings_accepts_supabase_service_key_alias(self) -> None:
+        with (
+            patch("src.config.load_dotenv", return_value=False),
+            patch.dict(
+                os.environ,
+                {
+                    "SUPABASE_URL": "https://example.supabase.co",
+                    "SUPABASE_SERVICE_KEY": "base-service-alias",
+                },
+                clear=True,
+            ),
+        ):
+            settings = load_settings()
+
+        self.assertEqual(settings.supabase_url, "https://example.supabase.co")
+        self.assertEqual(settings.supabase_service_role_key, "base-service-alias")
+
 
 if __name__ == "__main__":
     unittest.main()

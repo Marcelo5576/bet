@@ -291,7 +291,11 @@ def load_settings() -> Settings:
         stripe_price_team=(os.getenv("STRIPE_PRICE_TEAM") or "").strip() or None,
         mercadopago_access_token=(os.getenv("MERCADOPAGO_ACCESS_TOKEN") or "").strip() or None,
         supabase_url=(os.getenv("SUPABASE_URL") or "").rstrip("/") or None,
-        supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY") or None,
+        supabase_service_role_key=_first_env(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_SERVICE_KEY",
+            "SUPABASE_KEY",
+        ),
         gemini_input_cost_per_1m_brl=float(os.getenv("GEMINI_INPUT_COST_PER_1M_BRL", "0") or 0),
         gemini_output_cost_per_1m_brl=float(os.getenv("GEMINI_OUTPUT_COST_PER_1M_BRL", "0") or 0),
         api_football_cost_per_request_brl=float(os.getenv("API_FOOTBALL_COST_PER_REQUEST_BRL", "0") or 0),
