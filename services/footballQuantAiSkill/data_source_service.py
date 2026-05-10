@@ -90,11 +90,17 @@ class DataSourceService:
         return self.repository.list_data_sources()
 
     def source_status(self) -> list[dict[str, Any]]:
-        rows = self.repository.list_data_sources()
-        by_name = {row["name"]: row for row in rows}
+        rows = [row for row in self.repository.list_data_sources() if isinstance(row, dict)]
+        by_name = {
+            str(row.get("name") or "").strip(): row
+            for row in rows
+            if str(row.get("name") or "").strip()
+        }
         status_rows: list[dict[str, Any]] = []
         for source, record in self.sources:
-            meta = by_name.get(record.name, {})
+            meta = by_name.get(record.name)
+            if not isinstance(meta, dict):
+                meta = {}
             status_rows.append(
                 {
                     "name": record.name,
@@ -162,4 +168,3 @@ class DataSourceService:
         preferred_lower = preferred.strip().lower()
         ordered.sort(key=lambda item: 0 if item[1].name.lower() == preferred_lower else 1)
         return ordered
-

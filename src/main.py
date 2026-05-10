@@ -3122,13 +3122,15 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         for signal in approved_signals:
             message = _approved_signal_text(signal)
             signal_key = _approved_signal_alert_key(signal)
+            page_url = str(signal.get("assisted_page_url") or "").strip() or None
             for chat_id in approved_chat_ids:
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=message,
                         reply_markup=assisted_prepare_menu(
-                            str(signal.get("signal_id") or signal.get("analysis_id") or "")
+                            str(signal.get("signal_id") or signal.get("analysis_id") or ""),
+                            page_url=page_url,
                         ),
                     )
                     vip.record_dispatch(signal, chat_id, status="sent")
