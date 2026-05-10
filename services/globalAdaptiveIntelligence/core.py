@@ -57,7 +57,13 @@ class GlobalAdaptiveIntelligencePlatform:
         self.football_skill = get_football_quant_ai_skill()
         self.repository = GlobalAdaptiveRepository(self.settings.db_file)
         self.data_sources = DataSourceRegistryService(self.repository)
-        self.data_sources.seed()
+        self.bootstrap_warnings: list[str] = []
+        try:
+            self.data_sources.seed()
+        except Exception as exc:
+            warning = f"data_sources_seed_failed:{exc}"
+            self.bootstrap_warnings.append(warning)
+            logger.warning("global ai data source seed failed: %s", exc)
         self.football = FootballAdapter()
         self.features = FeatureEngineeringService(self.repository, self.football)
         self.time_series_model = TimeSeriesBaselineModel()
@@ -404,6 +410,7 @@ class GlobalAdaptiveIntelligencePlatform:
             "governance": governance,
             "drift_events": drift_events,
             "risk_events": risk_events,
+            "bootstrap_warnings": list(self.bootstrap_warnings),
         }
 
     def research_health_snapshot(self) -> dict[str, Any]:

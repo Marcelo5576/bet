@@ -2285,6 +2285,15 @@ def candidate_menu(state) -> InlineKeyboardMarkup:
         game = signal.get("game", {})
         label = f"{idx}. {game.get('home', '?')} x {game.get('away', '?')}"
         rows.append([InlineKeyboardButton(label[:60], callback_data=f"pick:{idx - 1}")])
+        signal_id = str(signal.get("signal_id") or signal.get("analysis_id") or "").strip()
+        page_url = str(signal.get("assisted_page_url") or "").strip()
+        if signal_id:
+            action_row = [
+                InlineKeyboardButton(f"Preparar B365 #{idx}", callback_data=f"prepare_bet365|{signal_id}")
+            ]
+            if page_url:
+                action_row.append(InlineKeyboardButton("Abrir B365", url=page_url))
+            rows.append(action_row)
     rows.append(
         [
             InlineKeyboardButton("Scan agora", callback_data="scan"),
@@ -3141,12 +3150,17 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.warning("Falha ao enviar entrada aprovada para chat %s: %s", chat_id, exc)
         _mark_approved_signals_alerted(store, delivered_keys)
 
-    if not chat_ids:
+    delivery_chat_ids = set(chat_ids)
+    if not delivery_chat_ids:
+        refreshed_state = store.load()
+        if refreshed_state.active_signal or refreshed_state.candidate_signals:
+            delivery_chat_ids = set(approved_chat_ids)
+    if not delivery_chat_ids:
         logger.info(
             "Scanner atualizado sem chats Telegram ativos. Estado e dashboard seguem alimentados normalmente."
         )
         return
-    for chat_id in chat_ids:
+    for chat_id in delivery_chat_ids:
         state = store.load()
         reply_markup = active_menu() if state.active_signal else candidate_menu(state)
         try:

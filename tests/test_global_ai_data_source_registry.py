@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from services.footballQuantAiSkill.data_source_service import DataSourceService
 from services.footballQuantAiSkill.schemas import SourceRecord
 from services.globalAdaptiveIntelligence.data_sources.registry import DataSourceRegistryService
+from services.globalAdaptiveIntelligence.repository import GlobalAdaptiveRepository
 
 
 class FootballQuantSourceStatusTests(unittest.TestCase):
@@ -71,6 +73,23 @@ class GlobalAIRegistrySeedTests(unittest.TestCase):
         self.assertIn("ESPN Scoreboard", names)
         self.assertIn("iSports Odds", names)
         self.assertNotIn("legacy-string-row", names)
+
+    def test_repository_seed_skips_malformed_rows(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            repository = GlobalAdaptiveRepository(f"{tmpdir}/global-ai.db")
+
+            repository.seed_data_sources(
+                [
+                    "broken-row",
+                    {"name": "API-Football", "provider_type": "api", "priority": 20},
+                    {"name": "", "provider_type": "api"},
+                ]
+            )
+
+            rows = repository.list_data_sources()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "API-Football")
 
 
 if __name__ == "__main__":

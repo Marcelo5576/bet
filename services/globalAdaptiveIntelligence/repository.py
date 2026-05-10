@@ -406,6 +406,12 @@ class GlobalAdaptiveRepository:
         now = _now_iso()
         with self.connect() as conn:
             for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                provider_type = str(row.get("provider_type") or "").strip()
+                if not name or not provider_type:
+                    continue
                 conn.execute(
                     """
                     INSERT INTO data_sources (
@@ -427,8 +433,8 @@ class GlobalAdaptiveRepository:
                         updated_at = excluded.updated_at
                     """,
                     (
-                        row["name"],
-                        row["provider_type"],
+                        name,
+                        provider_type,
                         row.get("base_url"),
                         row.get("api_key_env_name"),
                         1 if row.get("is_active", True) else 0,

@@ -55,8 +55,12 @@ class MainStartupTests(unittest.TestCase):
                 history=[],
                 active_game_id=None,
                 active_signal=None,
+                candidate_signals=[],
             )
-            store = SimpleNamespace(consume_scan_request=Mock(return_value=(state, False)))
+            store = SimpleNamespace(
+                consume_scan_request=Mock(return_value=(state, False)),
+                load=Mock(return_value=state),
+            )
             job_queue = SimpleNamespace(run_once=Mock())
             context = SimpleNamespace(
                 application=SimpleNamespace(bot_data={"settings": settings, "store": store}),
@@ -181,6 +185,80 @@ class MainStartupTests(unittest.TestCase):
         import asyncio
 
         asyncio.run(run_case())
+
+    def test_scheduled_scan_falls_back_to_approved_chat_for_actionable_signal_when_general_chat_is_empty(self) -> None:
+        async def run_case() -> None:
+            settings = SimpleNamespace(
+                idle_scan_interval_seconds=20,
+                active_scan_interval_seconds=20,
+                daily_red_limit=2,
+                portal_db_file="data/portal.db",
+            )
+            candidate = {
+                "signal_id": "sig-1",
+                "game": {"home": "Flamengo", "away": "Palmeiras"},
+                "assisted_page_url": "https://www.bet365.com/#/AC/B1/C1/D13/E181645/F2/",
+            }
+            state = SimpleNamespace(
+                history=[],
+                active_game_id=None,
+                active_signal=None,
+                candidate_signals=[candidate],
+                chat_ids=[],
+                approved_signal_alerts={},
+            )
+            store = SimpleNamespace(
+                consume_scan_request=Mock(return_value=(state, False)),
+                load=Mock(return_value=state),
+            )
+            bot = SimpleNamespace(send_message=AsyncMock())
+            job_queue = SimpleNamespace(run_once=Mock())
+            context = SimpleNamespace(
+                application=SimpleNamespace(bot_data={"settings": settings, "store": store}),
+                job_queue=job_queue,
+                bot=bot,
+            )
+
+            with (
+                patch("src.main._notification_chat_ids", return_value=set()),
+                patch("src.main._approved_signal_chat_ids", return_value={202}),
+                patch("src.main._approved_signals_to_alert", return_value=[]),
+                patch("src.main._telegram_vip", return_value=SimpleNamespace(record_dispatch=Mock())),
+                patch("src.main.PortalStore") as portal_store_mock,
+                patch("src.main._scanner_cycle_seconds", return_value=20),
+                patch("src.main.red_stop_status", return_value={}),
+                patch("src.main._maybe_send_assisted_monitor_alert", new_callable=AsyncMock),
+                patch("src.main.run_scan", new_callable=AsyncMock, return_value="scan-ok"),
+            ):
+                portal_store_mock.return_value.notification_scan_preferences.return_value = (20, 20)
+                await app_main.scheduled_scan(context)
+
+            bot.send_message.assert_awaited_once()
+            kwargs = bot.send_message.await_args.kwargs
+            self.assertEqual(kwargs["chat_id"], 202)
+            self.assertEqual(kwargs["text"], "scan-ok")
+
+        import asyncio
+
+        asyncio.run(run_case())
+
+    def test_candidate_menu_includes_bet365_prepare_button_for_signal_candidates(self) -> None:
+        state = SimpleNamespace(
+            candidate_signals=[
+                {
+                    "signal_id": "sig-1",
+                    "game": {"home": "Flamengo", "away": "Palmeiras"},
+                    "assisted_page_url": "https://www.bet365.com/#/AC/B1/C1/D13/E181645/F2/",
+                }
+            ]
+        )
+
+        markup = app_main.candidate_menu(state)
+        rows = markup.inline_keyboard
+
+        self.assertEqual(rows[1][0].text, "Preparar B365 #1")
+        self.assertEqual(rows[1][0].callback_data, "prepare_bet365|sig-1")
+        self.assertEqual(rows[1][1].text, "Abrir B365")
 
     def test_passive_service_cycle_keeps_scanner_running_without_telegram(self) -> None:
         async def run_case() -> None:
