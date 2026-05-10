@@ -11,6 +11,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from services.footballQuantAiSkill import get_football_quant_ai_skill
+from services.footballQuantAiSkill.config import load_research_skill_settings
+from services.footballQuantAiSkill.repository import FootballResearchRepository
 from services.globalAdaptiveIntelligence import get_global_adaptive_intelligence
 from src.config import load_settings
 from src.portal_web import _require_admin, _require_user
@@ -99,6 +101,27 @@ def _research_health_fallback(error: str | None = None) -> dict[str, Any]:
             }
     except Exception:
         logger.exception("global ai research health fallback bootstrap failed")
+    try:
+        settings = load_research_skill_settings()
+        snapshot = FootballResearchRepository(settings.db_file).system_snapshot()
+        counts = snapshot.get("counts") if isinstance(snapshot, dict) else {}
+        if not isinstance(counts, dict):
+            counts = {}
+        return {
+            "counts": {
+                "historical_matches": int(counts.get("historical_matches") or 0),
+                "historical_features": int(counts.get("historical_features") or 0),
+                "league_reliability_scores": int(counts.get("league_reliability_scores") or 0),
+            },
+            "supabase": {
+                "enabled": bool(settings.supabase_url and settings.supabase_service_role_key),
+                "schema_mode": "legacy_betsignal" if (settings.supabase_url and settings.supabase_service_role_key) else "unavailable",
+                "last_error": error or "",
+                "available_tables": {},
+            },
+        }
+    except Exception:
+        logger.exception("global ai direct repository fallback failed")
     return {
         "counts": {
             "historical_matches": 0,
