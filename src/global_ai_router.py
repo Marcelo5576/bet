@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -9,7 +10,9 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from services.footballQuantAiSkill import get_football_quant_ai_skill
 from services.globalAdaptiveIntelligence import get_global_adaptive_intelligence
+from src.config import load_settings
 from src.portal_web import _require_admin, _require_user
 
 
@@ -76,6 +79,26 @@ def _json(payload: Any, status_code: int = 200) -> JSONResponse:
 
 
 def _research_health_fallback(error: str | None = None) -> dict[str, Any]:
+    try:
+        payload = get_football_quant_ai_skill().health()
+        if isinstance(payload, dict):
+            counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+            supabase = payload.get("supabase") if isinstance(payload.get("supabase"), dict) else {}
+            return {
+                "counts": {
+                    "historical_matches": int(counts.get("historical_matches") or 0),
+                    "historical_features": int(counts.get("historical_features") or 0),
+                    "league_reliability_scores": int(counts.get("league_reliability_scores") or 0),
+                },
+                "supabase": {
+                    "enabled": bool(supabase.get("enabled")),
+                    "schema_mode": str(supabase.get("schema_mode") or "unavailable"),
+                    "last_error": str(supabase.get("last_error") or error or ""),
+                    "available_tables": supabase.get("available_tables") if isinstance(supabase.get("available_tables"), dict) else {},
+                },
+            }
+    except Exception:
+        logger.exception("global ai research health fallback bootstrap failed")
     return {
         "counts": {
             "historical_matches": 0,
@@ -88,6 +111,46 @@ def _research_health_fallback(error: str | None = None) -> dict[str, Any]:
             "last_error": error or "",
         },
     }
+
+
+def _live_sources_fallback() -> list[dict[str, Any]]:
+    try:
+        settings = load_settings()
+    except Exception:
+        logger.exception("global ai live source fallback settings failed")
+        return []
+    isports_key = (os.getenv("ISPORTS_API_KEY") or "").strip()
+    odds_api_key = (os.getenv("ODDS_API_KEY") or os.getenv("ODDS_API_IO_KEY") or "").strip()
+    return [
+        {
+            "id": "api_football",
+            "label": "API-Football",
+            "configured": bool(settings.api_football_key),
+            "status": "ready" if settings.api_football_key else "missing_key",
+            "base_url": settings.api_football_base_url,
+        },
+        {
+            "id": "espn",
+            "label": "ESPN Scoreboard",
+            "configured": True,
+            "status": "ready",
+            "base_url": settings.espn_site_api_base_url,
+        },
+        {
+            "id": "isports",
+            "label": "iSports Odds",
+            "configured": bool(isports_key),
+            "status": "ready" if isports_key else "missing_key",
+            "base_url": (os.getenv("ISPORTS_API_BASE_URL") or "http://api.isportsapi.com").rstrip("/"),
+        },
+        {
+            "id": "odds_api_io",
+            "label": "Odds-API.io",
+            "configured": bool(odds_api_key),
+            "status": "ready" if odds_api_key else "missing_key",
+            "base_url": settings.odds_api_io_base_url,
+        },
+    ]
 
 
 def _degraded_payload(
@@ -104,7 +167,7 @@ def _degraded_payload(
         "message": message,
         "error_type": error.__class__.__name__ if error else "",
         "research_health": research_health or _research_health_fallback(str(error or "")),
-        "live_sources": live_sources or [],
+        "live_sources": live_sources or _live_sources_fallback(),
     }
     if extra:
         payload.update(extra)

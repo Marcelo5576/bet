@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -208,16 +209,33 @@ class GlobalAIRouterTests(unittest.TestCase):
     def test_football_analysis_degrades_when_global_dependency_is_unavailable(self) -> None:
         app.dependency_overrides[_require_user] = lambda: {"id": 1, "email": "test@example.com"}
         app.dependency_overrides[_global] = lambda: _GlobalDependencyFailure(RuntimeError("boom"))
-        client = TestClient(app)
-
-        response = client.get("/api/global-ai/football-analysis")
+        with patch(
+            "src.global_ai_router.get_football_quant_ai_skill",
+            return_value=SimpleNamespace(
+                health=lambda: {
+                    "counts": {
+                        "historical_matches": 12,
+                        "historical_features": 8,
+                        "league_reliability_scores": 3,
+                    },
+                    "supabase": {
+                        "enabled": True,
+                        "schema_mode": "legacy_betsignal",
+                        "last_error": "",
+                    },
+                }
+            ),
+        ):
+            client = TestClient(app)
+            response = client.get("/api/global-ai/football-analysis")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertFalse(payload["ok"])
         self.assertTrue(payload["degraded"])
         self.assertEqual(payload["items"], [])
-        self.assertEqual(payload["research_health"]["supabase"]["schema_mode"], "unavailable")
+        self.assertEqual(payload["research_health"]["supabase"]["schema_mode"], "legacy_betsignal")
+        self.assertEqual(payload["research_health"]["counts"]["historical_matches"], 12)
         self.assertEqual(payload["error_type"], "RuntimeError")
 
 
