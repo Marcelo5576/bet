@@ -9,6 +9,7 @@ import random
 import re
 import time
 import traceback
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from services.agents import run_supervisor_pipeline
@@ -3255,23 +3256,71 @@ async def _passive_service_loop(settings: Settings, reason: str) -> None:
         reason,
     )
     try:
-        StateStore(settings.state_file).load()
+        store = StateStore(settings.state_file)
+        store.load()
     except Exception as exc:
         logger.warning("Modo passivo: nao consegui inicializar o StateStore: %s", exc)
+        store = StateStore(settings.state_file)
     try:
-        build_provider(settings)
+        provider = build_provider(settings)
     except Exception as exc:
         logger.warning("Modo passivo: provider inicializado com alerta: %s", exc)
+        provider = MockProvider()
     try:
-        SupabaseSink.from_settings(settings)
+        supabase = SupabaseSink.from_settings(settings)
     except Exception as exc:
         logger.warning("Modo passivo: Supabase indisponivel no bootstrap: %s", exc)
+        supabase = SupabaseSink(None, None)
+
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                "settings": settings,
+                "store": store,
+                "provider": provider,
+                "supabase": supabase,
+            }
+        )
+    )
 
     while True:
+        sleep_seconds = PASSIVE_SERVICE_HEARTBEAT_SECONDS
+        try:
+            sleep_seconds = await _passive_service_cycle(context)
+        except Exception as exc:
+            logger.warning("Modo passivo: falha ao atualizar scanner/dashboard: %s", exc)
         logger.info(
-            "Modo passivo ativo ha espera da configuracao do Telegram ou da correcao do token."
+            "Modo passivo ativo. Scanner segue alimentando dashboard/estado. Proximo ciclo em %ss.",
+            sleep_seconds,
         )
-        await asyncio.sleep(PASSIVE_SERVICE_HEARTBEAT_SECONDS)
+        await asyncio.sleep(max(20, int(sleep_seconds or PASSIVE_SERVICE_HEARTBEAT_SECONDS)))
+
+
+async def _passive_service_cycle(context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.application.bot_data["settings"]
+    store: StateStore = context.application.bot_data["store"]
+    state, scan_requested = store.consume_scan_request()
+    idle_interval = settings.idle_scan_interval_seconds
+    active_interval = settings.active_scan_interval_seconds
+    try:
+        idle_interval, active_interval = PortalStore(settings.portal_db_file).notification_scan_preferences(
+            settings.idle_scan_interval_seconds,
+            settings.active_scan_interval_seconds,
+        )
+    except Exception as exc:
+        logger.info("Modo passivo: nao consegui aplicar preferencias de scanner por usuario: %s", exc)
+
+    if state.active_game_id and not scan_requested:
+        await refresh_active_signal(context, state)
+    else:
+        await run_scan(context, auto_pick=False)
+
+    return _scanner_cycle_seconds(
+        store.load(),
+        settings,
+        idle_interval=idle_interval,
+        active_interval=active_interval,
+    )
 
 
 def _with_chat_memory(handler):

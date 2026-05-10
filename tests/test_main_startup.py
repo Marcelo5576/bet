@@ -182,6 +182,51 @@ class MainStartupTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_passive_service_cycle_keeps_scanner_running_without_telegram(self) -> None:
+        async def run_case() -> None:
+            settings = SimpleNamespace(
+                idle_scan_interval_seconds=20,
+                active_scan_interval_seconds=20,
+                portal_db_file="data/portal.db",
+            )
+            state = SimpleNamespace(
+                active_game_id=None,
+                active_signal=None,
+                candidate_signals=[],
+                history=[],
+            )
+            store = SimpleNamespace(
+                consume_scan_request=Mock(return_value=(state, False)),
+                load=Mock(return_value=state),
+            )
+            context = SimpleNamespace(
+                application=SimpleNamespace(
+                    bot_data={
+                        "settings": settings,
+                        "store": store,
+                        "provider": object(),
+                        "supabase": object(),
+                    }
+                )
+            )
+
+            with (
+                patch("src.main.PortalStore") as portal_store_mock,
+                patch("src.main._scanner_cycle_seconds", return_value=20),
+                patch("src.main.run_scan", new_callable=AsyncMock, return_value="scan-ok") as run_scan_mock,
+                patch("src.main.refresh_active_signal", new_callable=AsyncMock) as refresh_mock,
+            ):
+                portal_store_mock.return_value.notification_scan_preferences.return_value = (20, 20)
+                interval = await app_main._passive_service_cycle(context)
+
+            self.assertEqual(interval, 20)
+            run_scan_mock.assert_awaited_once_with(context, auto_pick=False)
+            refresh_mock.assert_not_awaited()
+
+        import asyncio
+
+        asyncio.run(run_case())
+
 
 if __name__ == "__main__":
     unittest.main()
