@@ -1193,9 +1193,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = str(query.data or "")
     if not _valid_callback_data(data):
-        await query.answer("Comando invalido.", show_alert=True)
+        await safe_answer_callback_query(query, "Comando invalido.", show_alert=True)
         return
-    await query.answer()
+    await safe_answer_callback_query(query)
     reply_markup = menu()
     if data == "menu:home":
         text = _home_text(context)
@@ -1456,6 +1456,20 @@ async def safe_edit_message(query, text: str, reply_markup: InlineKeyboardMarkup
         await query.edit_message_text(text, reply_markup=reply_markup)
     except BadRequest as exc:
         if "Message is not modified" in str(exc):
+            return
+        raise
+
+
+async def safe_answer_callback_query(query, text: str | None = None, show_alert: bool = False) -> None:
+    try:
+        if text is None:
+            await query.answer()
+        else:
+            await query.answer(text, show_alert=show_alert)
+    except BadRequest as exc:
+        message = str(exc)
+        if "Query is too old" in message or "query id is invalid" in message:
+            logger.info("Callback query expirada ignorada: %s", message)
             return
         raise
 

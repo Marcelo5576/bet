@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import src.main as app_main
+from telegram.error import BadRequest
 
 
 class MainStartupTests(unittest.TestCase):
@@ -300,6 +301,16 @@ class MainStartupTests(unittest.TestCase):
             self.assertEqual(interval, 20)
             run_scan_mock.assert_awaited_once_with(context, auto_pick=False)
             refresh_mock.assert_not_awaited()
+
+        import asyncio
+
+        asyncio.run(run_case())
+
+    def test_safe_answer_callback_query_ignores_expired_query(self) -> None:
+        async def run_case() -> None:
+            query = SimpleNamespace(answer=AsyncMock(side_effect=BadRequest("Query is too old and response timeout expired or query id is invalid")))
+            await app_main.safe_answer_callback_query(query)
+            query.answer.assert_awaited_once()
 
         import asyncio
 
