@@ -170,7 +170,7 @@ async function main() {
     const stateResponse = await page.request.get(`${baseURL}/api/state`);
     assert.equal(stateResponse.status(), 200);
     const stateJson = await stateResponse.json();
-    assert.equal(stateJson.scanner.active_scan_interval_seconds, 120);
+    assert.equal(stateJson.scanner.active_scan_interval_seconds, 25);
     const csrfResponse = await page.request.post(`${baseURL}/api/scanner-run`);
     assert.equal(csrfResponse.status(), 403);
     await page.locator("#account-toggle").click();

@@ -11,35 +11,35 @@ import unicodedata
 
 PROFILE_RULES: dict[str, dict[str, float]] = {
     "conservador": {
-        "min_ev": 0.08,
-        "min_confidence": 0.75,
-        "min_score": 70.0,
-        "odd_min": 1.60,
-        "odd_max": 2.50,
+        "min_ev": 0.07,
+        "min_confidence": 0.72,
+        "min_score": 68.0,
+        "odd_min": 1.55,
+        "odd_max": 2.70,
         "stake_cap": 0.01,
     },
     "moderado": {
-        "min_ev": 0.05,
-        "min_confidence": 0.65,
-        "min_score": 65.0,
-        "odd_min": 1.60,
-        "odd_max": 3.00,
-        "stake_cap": 0.03,
-    },
-    "agressivo": {
         "min_ev": 0.03,
         "min_confidence": 0.60,
         "min_score": 60.0,
-        "odd_min": 1.60,
+        "odd_min": 1.45,
         "odd_max": 3.50,
+        "stake_cap": 0.03,
+    },
+    "agressivo": {
+        "min_ev": 0.015,
+        "min_confidence": 0.52,
+        "min_score": 52.0,
+        "odd_min": 1.35,
+        "odd_max": 4.25,
         "stake_cap": 0.03,
     },
 }
 
 DEFAULT_PROFILE = "moderado"
-MONITOR_CONFIDENCE_MIN = 0.55
-MONITOR_SCORE_MIN = 55
-MONITOR_EV_MIN = 0.03
+MONITOR_CONFIDENCE_MIN = 0.48
+MONITOR_SCORE_MIN = 48
+MONITOR_EV_MIN = 0.01
 MARKET_GUARD_TTL_SECONDS = 300
 MARKET_GUARD_MIN_ENTRIES = 10
 MARKET_GUARD_MAX_ROI = -10.0

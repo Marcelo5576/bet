@@ -24,13 +24,20 @@ from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from services.ai_brain import get_ai_brain_metrics_service
+from services.backtesting import get_auto_backtest_service
 from services.footballQuantAiSkill.data_sources.api_football_provider import (
     get_shared_api_football_provider,
 )
+from services.intelligence import get_performance_ranking_service
+from services.learning import get_drift_detection_service, get_strategy_suggestion_service
+from services.memory import get_operational_memory_service
+from services.observability import get_observability_service
 from src.config import Settings, load_settings
 from src.ai_brain_router import router as ai_brain_router
 from src.cache import get_runtime_cache
 from src.decision_log import DecisionLogStore
+from src.routes.executor_routes import router as executor_router
 from src.football_quant_router import router as football_quant_router
 from src.global_ai_router import router as global_ai_router
 from src.markets_router import router as markets_router
@@ -64,6 +71,7 @@ app.include_router(football_quant_router)
 app.include_router(global_ai_router)
 app.include_router(ai_brain_router)
 app.include_router(markets_router)
+app.include_router(executor_router)
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -78,6 +86,30 @@ def _build_stamp() -> str:
 
 def _decision_log_store(settings: Settings) -> DecisionLogStore:
     return DecisionLogStore(settings.decision_audit_db_file)
+
+
+def _operational_memory(settings: Settings):
+    return get_operational_memory_service(settings.decision_audit_db_file)
+
+
+def _observability(settings: Settings):
+    return get_observability_service(settings.decision_audit_db_file)
+
+
+def _auto_backtest(settings: Settings):
+    return get_auto_backtest_service(settings.decision_audit_db_file)
+
+
+def _rankings(settings: Settings):
+    return get_performance_ranking_service(settings.decision_audit_db_file)
+
+
+def _drift_service(settings: Settings):
+    return get_drift_detection_service(settings.decision_audit_db_file)
+
+
+def _strategy_service(settings: Settings):
+    return get_strategy_suggestion_service(settings.decision_audit_db_file)
 
 
 def _usage_tracker(settings: Settings) -> UsageTracker:
@@ -528,7 +560,7 @@ def dashboard(request: Request) -> str:
     learning = _learning_context(state, visible_history)
     backtest = learning.get("backtest") or {}
     fast_learning = learning.get("fast_learning") or {}
-    rankings = _rankings(learning)
+    rankings = _learning_rankings_panel(learning)
     fast_panel = _fast_learning_panel(fast_learning)
     manual_stats = _manual_stats(visible_history)
     supabase_info = _supabase_info(settings)
@@ -3116,10 +3148,10 @@ def dashboard(request: Request) -> str:
         <div class="decision-count-card hold"><span>⚪ Sem dados</span><strong id="scanner-count-hold">{decision_counts.get("NO_DATA", 0)}</strong></div>
       </div>
       <div class="criteria-bar" id="scanner-criteria-bar">
-        <span class="criteria-chip" id="criteria-ev">EV minimo: 5%</span>
-        <span class="criteria-chip" id="criteria-confidence">Confianca minima: 65%</span>
-        <span class="criteria-chip" id="criteria-score">Score minimo: 65</span>
-        <span class="criteria-chip" id="criteria-odds">Odds: 1.60 ate 3.00</span>
+        <span class="criteria-chip" id="criteria-ev">EV minimo: 3%</span>
+        <span class="criteria-chip" id="criteria-confidence">Confianca minima: 60%</span>
+        <span class="criteria-chip" id="criteria-score">Score minimo: 60</span>
+        <span class="criteria-chip" id="criteria-odds">Odds: 1.45 ate 3.50</span>
         <span class="criteria-chip" id="criteria-profile">Perfil: Moderado</span>
       </div>
       <p class="muted" id="scanner-criteria-note">Padrao visual: mostrar liberadas, aguardar confirmacao e monitorar. “Nao entrar” fica oculto por padrao para reduzir ruido.</p>
@@ -3267,15 +3299,15 @@ def dashboard(request: Request) -> str:
           </label>
           <label class="field">
             <span>EV minimo</span>
-            <input id="scanner-filter-ev" type="number" min="0" max="1" step="0.01" value="0.05" oninput="applyScannerTableFilters()" />
+            <input id="scanner-filter-ev" type="number" min="0" max="1" step="0.01" value="0.03" oninput="applyScannerTableFilters()" />
           </label>
           <label class="field">
             <span>Confianca minima</span>
-            <input id="scanner-filter-confidence" type="number" min="0" max="100" step="1" value="65" oninput="applyScannerTableFilters()" />
+            <input id="scanner-filter-confidence" type="number" min="0" max="100" step="1" value="60" oninput="applyScannerTableFilters()" />
           </label>
           <label class="field">
             <span>Score minimo</span>
-            <input id="scanner-filter-score" type="number" min="0" max="100" step="1" value="65" oninput="applyScannerTableFilters()" />
+            <input id="scanner-filter-score" type="number" min="0" max="100" step="1" value="60" oninput="applyScannerTableFilters()" />
           </label>
           <label class="field">
             <span>Mercado</span>
@@ -3291,11 +3323,11 @@ def dashboard(request: Request) -> str:
           </label>
           <label class="field">
             <span>Odd minima</span>
-            <input id="scanner-filter-odd-min" type="number" min="1" max="10" step="0.01" value="1.60" oninput="applyScannerTableFilters()" />
+            <input id="scanner-filter-odd-min" type="number" min="1" max="10" step="0.01" value="1.45" oninput="applyScannerTableFilters()" />
           </label>
           <label class="field">
             <span>Odd maxima</span>
-            <input id="scanner-filter-odd-max" type="number" min="1" max="10" step="0.01" value="3.00" oninput="applyScannerTableFilters()" />
+            <input id="scanner-filter-odd-max" type="number" min="1" max="10" step="0.01" value="3.50" oninput="applyScannerTableFilters()" />
           </label>
         </div>
       </section>
@@ -3786,9 +3818,9 @@ def dashboard(request: Request) -> str:
   function profileRules(profileName) {{
     const key = String(profileName || 'moderado').toLowerCase();
     const rules = {{
-      conservador: {{minEv: 0.08, minConfidence: 75, minScore: 70, oddMin: 1.60, oddMax: 2.50, note: 'Modo conservador ativo: somente sinais fortes serao exibidos.'}},
-      agressivo: {{minEv: 0.03, minConfidence: 60, minScore: 60, oddMin: 1.60, oddMax: 3.50, note: 'Modo agressivo: a tela abre mais sinais, inclusive os mais sensiveis.'}},
-      moderado: {{minEv: 0.05, minConfidence: 65, minScore: 65, oddMin: 1.60, oddMax: 3.00, note: 'Padrao visual: mostrar liberadas, aguardar confirmacao e monitorar. “Nao entrar” fica oculto por padrao para reduzir ruido.'}},
+      conservador: {{minEv: 0.07, minConfidence: 72, minScore: 68, oddMin: 1.55, oddMax: 2.70, note: 'Modo conservador ativo: menos rigido que antes, mas ainda prioriza sinais fortes.'}},
+      agressivo: {{minEv: 0.015, minConfidence: 52, minScore: 52, oddMin: 1.35, oddMax: 4.25, note: 'Modo agressivo: abre mais jogos para leitura, sem liberar entrada sem odd real.'}},
+      moderado: {{minEv: 0.03, minConfidence: 60, minScore: 60, oddMin: 1.45, oddMax: 3.50, note: 'Padrao visual menos rigido: mostrar liberadas, aguardar confirmacao e monitorar. “Nao entrar” fica oculto por padrao para reduzir ruido.'}},
     }};
     return rules[key] || rules.moderado;
   }}
@@ -6001,6 +6033,95 @@ def api_rate_limit_protection(_: None = Depends(_auth)) -> JSONResponse:
     )
 
 
+@app.get("/api/system/observability")
+def api_system_observability(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    snapshot = _observability(settings).snapshot()
+    return JSONResponse(
+        {
+            "ok": True,
+            "providers": snapshot.get("providers") or [],
+            "agents": snapshot.get("agents") or [],
+            "errors": snapshot.get("errors") or [],
+            "decisions_by_status": snapshot.get("decisions_by_status") or [],
+            "telegram": snapshot.get("telegram") or {},
+            "memory": _operational_memory(settings).counts(),
+            "drift": _drift_service(settings).latest(12),
+            "suggestions": _strategy_service(settings).latest(12),
+        }
+    )
+
+
+@app.get("/api/system/health-center")
+def api_system_health_center(_: None = Depends(_auth)) -> JSONResponse:
+    settings = load_settings()
+    state = StateStore(os.getenv("STATE_FILE", settings.state_file)).load()
+    live_games = _fresh_live_games(state, settings)
+    provider_status = _provider_status_with_live(_football_api_provider(settings).status_snapshot(), live_games)
+    observability = _observability(settings).snapshot()
+    memory = _operational_memory(settings).counts()
+    backtests = _auto_backtest(settings).latest_runs(6)
+    rankings = _rankings(settings).snapshot()
+    ai_brain = get_ai_brain_metrics_service().metrics()
+    telegram_cfg = PortalStore(settings.portal_db_file).approved_signal_telegram_config()
+    limiter = get_provider_limiter()
+    cache = get_runtime_cache()
+    queue = get_request_queue_service()
+    return JSONResponse(
+        {
+            "ok": True,
+            "dashboard": {"status": "up", "build": _build_stamp()},
+            "betsignal": {
+                "last_scan_at": state.last_scan_at,
+                "active_signal": bool(state.active_signal),
+                "candidate_signals": len(state.candidate_signals or []),
+                "live_games_cached": len(state.last_games or []),
+            },
+            "caddy": {
+                "expected_url": settings.website_url,
+                "status": "indirect",
+            },
+            "supabase": {
+                "configured": bool(settings.supabase_url and settings.supabase_service_role_key),
+                "url": settings.supabase_url,
+            },
+            "telegram": {
+                "bot_configured": bool(settings.telegram_bot_token),
+                "vip_enabled": bool(telegram_cfg.get("enabled")),
+                "vip_chat_id": str(telegram_cfg.get("chat_id") or ""),
+                "dispatch": observability.get("telegram") or {},
+            },
+            "gemini": {
+                "configured": bool(settings.gemini_api_key),
+                "max_rpm": settings.gemini_max_rpm,
+            },
+            "odds_providers": {
+                "api_football": {
+                    "configured": bool(settings.api_football_key),
+                    "status": provider_status,
+                },
+                "odds_api_io": {
+                    "configured": bool(settings.odds_api_io_key),
+                    "rate_limit": limiter.status("odds_api_io", settings.odds_max_rpm).__dict__,
+                },
+            },
+            "cache": cache.stats(),
+            "queue": queue.stats(),
+            "memory": memory,
+            "backtests": backtests,
+            "rankings": rankings,
+            "drift": _drift_service(settings).latest(10),
+            "suggestions": _strategy_service(settings).latest(10),
+            "observability": observability,
+            "ai_brain": {
+                "status": ai_brain.get("status"),
+                "maturity": ai_brain.get("ia_maturity_score"),
+                "updated_at": (ai_brain.get("metrics") or {}).get("ultima_atualizacao"),
+            },
+        }
+    )
+
+
 async def _football_live_fallback_payload(settings: Settings) -> dict[str, Any]:
     provider = build_provider(settings)
     games = await provider.get_live_games()
@@ -6056,6 +6177,20 @@ async def api_football_provider_status(_: None = Depends(_auth)) -> JSONResponse
     provider = _football_api_provider(settings)
     health = await provider.health_check()
     status_payload = _provider_status_with_live(provider.status_snapshot(), live_games)
+    _observability(settings).log_provider_call(
+        "api-football",
+        "provider_status",
+        status="ok" if bool(status_payload.get("configured")) else "warning",
+        http_status=status_payload.get("last_http_status"),
+        cache_hit=False,
+        rate_limited=bool(status_payload.get("cooldown_active")),
+        freshness_seconds=None,
+        args={
+            "live_fixture_count": status_payload.get("live_fixture_count") or 0,
+            "configured": bool(status_payload.get("configured")),
+        },
+        error=str(status_payload.get("last_error") or ""),
+    )
     active_label = _football_provider_status_label(status_payload)
     return JSONResponse(
         {
@@ -6108,6 +6243,14 @@ async def api_football_live(_: None = Depends(_auth)) -> JSONResponse:
     try:
         fixtures = await provider.get_live_fixtures()
         status_payload = provider.status_snapshot()
+        _observability(settings).log_provider_call(
+            "api-football",
+            "live_fixtures",
+            status="ok",
+            http_status=status_payload.get("last_http_status"),
+            args={"fixtures": len(fixtures)},
+            error=str(status_payload.get("last_error") or ""),
+        )
         return JSONResponse(
             {
                 "ok": True,
@@ -6124,6 +6267,12 @@ async def api_football_live(_: None = Depends(_auth)) -> JSONResponse:
             }
         )
     except Exception:
+        _observability(settings).log_provider_call(
+            "api-football",
+            "live_fixtures",
+            status="error",
+            error="fallback_active",
+        )
         payload = await _football_live_fallback_payload(settings)
         payload["status"] = provider.status_snapshot()
         return JSONResponse(payload)
@@ -6135,9 +6284,26 @@ async def api_football_odds_debug(_: None = Depends(_auth)) -> JSONResponse:
     provider = _football_api_provider(settings)
     try:
         debug = await provider.odds_debug()
+        _observability(settings).log_provider_call(
+            "api-football",
+            "odds_debug",
+            status="ok",
+            http_status=(debug.get("status") or {}).get("last_http_status"),
+            args={
+                "raw_response_count": debug.get("raw_response_count"),
+                "normalized_count": debug.get("normalized_count"),
+            },
+            error=str(debug.get("last_error") or ""),
+        )
         debug["status"] = provider.status_snapshot()
         return JSONResponse(debug)
     except Exception as exc:
+        _observability(settings).log_provider_call(
+            "api-football",
+            "odds_debug",
+            status="error",
+            error=str(exc),
+        )
         return JSONResponse(
             {
                 "api_key_configured": bool(settings.api_football_key),
@@ -8343,13 +8509,13 @@ def _scanner_status(state, settings=None) -> dict[str, Any]:
     live_games = _fresh_live_games(state, settings)
     pregame_games = _fresh_pregame_watchlist(state, settings)
     idle_seconds = int(getattr(settings, "idle_scan_interval_seconds", 1800) or 1800)
-    active_seconds = int(getattr(settings, "active_scan_interval_seconds", 120) or 120)
+    active_seconds = int(getattr(settings, "active_scan_interval_seconds", 25) or 25)
     pregame_seconds = int(getattr(settings, "pregame_scan_interval_seconds", 300) or 300)
     current_seconds = _scanner_cycle_seconds(state, settings, idle_interval=idle_seconds, active_interval=active_seconds)
     if has_active:
-        mode_label = f"{max(1, round(active_seconds / 60))} min com jogo ativo"
+        mode_label = f"{current_seconds}s com jogo ativo"
     elif live_games or candidates:
-        mode_label = f"{max(1, round(current_seconds / 60))} min com jogos ao vivo"
+        mode_label = f"radar {current_seconds}s com jogos ao vivo"
     elif pregame_games:
         mode_label = f"{max(1, round(pregame_seconds / 60))} min aguardando inicio dos promissores"
     else:
@@ -9502,7 +9668,7 @@ def _bankroll_entry_row(entry: dict[str, Any]) -> str:
     )
 
 
-def _rankings(learning: dict[str, Any]) -> str:
+def _learning_rankings_panel(learning: dict[str, Any]) -> str:
     blocks = []
     for title, key in (
         ("Ligas", "by_league"),

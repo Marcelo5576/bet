@@ -86,6 +86,10 @@ SOURCE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 DAILY_SIMULATION_CHECK_INTERVAL_SECONDS = 15 * 60
 APPROVED_SIGNAL_ALERT_TTL_SECONDS = 20 * 60
 PASSIVE_SERVICE_HEARTBEAT_SECONDS = 5 * 60
+RADAR_IDLE_SCAN_INTERVAL_SECONDS = 20
+TELEGRAM_IDLE_MESSAGE_INTERVAL_SECONDS = 10 * 60
+TELEGRAM_ACTIVE_MIN_INTERVAL_SECONDS = 20
+TELEGRAM_ACTIVE_MAX_INTERVAL_SECONDS = 25
 TELEGRAM_DICE = {
     "scan": "⚽",
     "signal": "🎯",
@@ -1233,7 +1237,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         store: StateStore = context.application.bot_data["store"]
         state = store.choose_candidate(index)
         text = (
-            "Jogo escolhido. Scanner ativo a cada 2 minutos:\n\n"
+            "Jogo escolhido. Monitoramento ativo a cada 20-25 segundos:\n\n"
             + monitor_text(state.active_signal)
             if state.active_signal
             else "Nao consegui escolher esse jogo. Rode /scan novamente."
@@ -1947,6 +1951,7 @@ def _apply_supervisor_guard(signal: dict[str, Any], supervisor: dict[str, Any]) 
 
 
 def prepare_signal(signal: dict, state, settings: Settings) -> dict:
+    signal = _ensure_signal_identity(signal)
     learning_context = _learning_context(state)
     signal["learning_context"] = learning_context
     game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
@@ -2231,6 +2236,38 @@ def _scan_state_has_pregame_watchlist(state) -> bool:
     return any(isinstance(item, dict) for item in (state.pregame_watchlist or []))
 
 
+def _has_selected_game(state) -> bool:
+    return bool(getattr(state, "active_game_id", None) or getattr(state, "active_signal", None))
+
+
+def _interval_int(value, default: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _ensure_signal_identity(signal: dict) -> dict:
+    if str(signal.get("signal_id") or "").strip():
+        signal.setdefault("analysis_id", str(signal.get("signal_id")))
+        return signal
+    game = signal.get("game") if isinstance(signal.get("game"), dict) else {}
+    identity = "|".join(
+        str(value or "").strip().lower()
+        for value in (
+            game.get("game_id"),
+            game.get("home"),
+            game.get("away"),
+            signal.get("entry_market") or signal.get("market"),
+            signal.get("entry_selection") or signal.get("selection") or signal.get("team"),
+        )
+    )
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:18]
+    signal["signal_id"] = f"sig-{digest}"
+    signal.setdefault("analysis_id", signal["signal_id"])
+    return signal
+
+
 def _scanner_cycle_seconds(
     state,
     settings: Settings,
@@ -2238,10 +2275,57 @@ def _scanner_cycle_seconds(
     idle_interval: int | None = None,
     active_interval: int | None = None,
 ) -> int:
-    del settings, idle_interval, active_interval
-    # O ciclo principal do scanner agora fica fixo em 20s para manter o radar vivo,
-    # enquanto cache/rate limiter seguram o custo das chamadas externas.
-    return 20
+    del idle_interval
+    if _has_selected_game(state):
+        active = _interval_int(active_interval, settings.active_scan_interval_seconds)
+        return max(
+            TELEGRAM_ACTIVE_MIN_INTERVAL_SECONDS,
+            min(TELEGRAM_ACTIVE_MAX_INTERVAL_SECONDS, active),
+        )
+    # Sem jogo escolhido, o radar segue vivo para painel/API. O envio geral ao
+    # Telegram e controlado separadamente para nao poluir o grupo.
+    return RADAR_IDLE_SCAN_INTERVAL_SECONDS
+
+
+def _telegram_scan_delivery_interval_seconds(
+    state,
+    *,
+    idle_interval: int | None,
+    active_interval: int | None,
+) -> int:
+    if _has_selected_game(state):
+        active = _interval_int(active_interval, TELEGRAM_ACTIVE_MAX_INTERVAL_SECONDS)
+        return max(
+            TELEGRAM_ACTIVE_MIN_INTERVAL_SECONDS,
+            min(TELEGRAM_ACTIVE_MAX_INTERVAL_SECONDS, active),
+        )
+    idle = _interval_int(idle_interval, TELEGRAM_IDLE_MESSAGE_INTERVAL_SECONDS)
+    return max(TELEGRAM_IDLE_MESSAGE_INTERVAL_SECONDS, min(1800, idle))
+
+
+def _scheduled_scan_message_key(state) -> str:
+    if _has_selected_game(state):
+        signal = getattr(state, "active_signal", None) or {}
+        game = signal.get("game") if isinstance(signal, dict) else {}
+        game_id = getattr(state, "active_game_id", None) or (game or {}).get("game_id") or "active"
+        return f"active:{game_id}"
+    return "general"
+
+
+def _should_send_scheduled_scan_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    state,
+    *,
+    interval_seconds: int,
+) -> bool:
+    key = _scheduled_scan_message_key(state)
+    now = time.time()
+    registry = context.application.bot_data.setdefault("_scheduled_scan_message_at", {})
+    last_sent = float(registry.get(key) or 0)
+    if last_sent and now - last_sent < max(1, int(interval_seconds)):
+        return False
+    registry[key] = now
+    return True
 
 
 def candidate_list_text(signals: list[dict]) -> str:
@@ -2253,7 +2337,7 @@ def candidate_list_text(signals: list[dict]) -> str:
     no_data_count = sum(1 for item in decisions if item["decision_status"] == "NO_DATA")
     lines = [
         "📡 SCANNER AO VIVO",
-        "Atualiza a cada 20s",
+        "Radar atualiza em segundo plano; resumo geral no Telegram a cada 10 min",
         "",
         f"🟢 Entrar agora: {enter_count}",
         f"🟡 Aguardar: {wait_count}",
@@ -2262,10 +2346,8 @@ def candidate_list_text(signals: list[dict]) -> str:
         f"⚪ Sem dados: {no_data_count}",
         "",
         "Critério atual:",
-        "EV mínimo: 5%",
-        "Confiança mínima: 65%",
-        "Score mínimo: 65",
-        "Odds: 1.60 até 3.00",
+        "Perfil menos rígido: mais jogos entram como Aguardar/Monitorar.",
+        "Entrada aprovada continua exigindo odd real confirmada e filtros de risco.",
     ]
     scope = signals[0].get("scan_scope") if signals else None
     if scope:
@@ -2288,7 +2370,8 @@ def candidate_list_text(signals: list[dict]) -> str:
         lines.append(f"   Motivo: {decision['main_reason']}")
         lines.append("")
     lines.append("")
-    lines.append("Sem escolha: novo scan automatico em ate 20 segundos.")
+    lines.append("Sem escolha: novo resumo automatico no Telegram em ate 10 minutos.")
+    lines.append("Ao escolher um jogo, o monitoramento cai para 20-25 segundos.")
     return _shorten("\n".join(lines), TELEGRAM_TEXT_LIMIT)
 
 
@@ -3174,6 +3257,22 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
             "Scanner atualizado sem chats Telegram ativos. Estado e dashboard seguem alimentados normalmente."
         )
         return
+    message_state = store.load()
+    delivery_interval = _telegram_scan_delivery_interval_seconds(
+        message_state,
+        idle_interval=idle_interval,
+        active_interval=active_interval,
+    )
+    if not _should_send_scheduled_scan_message(
+        context,
+        message_state,
+        interval_seconds=delivery_interval,
+    ):
+        logger.info(
+            "Scanner atualizado; proxima mensagem geral/ativa no Telegram respeita janela de %ss.",
+            delivery_interval,
+        )
+        return
     for chat_id in delivery_chat_ids:
         state = store.load()
         reply_markup = active_menu() if state.active_signal else candidate_menu(state)
@@ -3434,7 +3533,7 @@ def _games_text(state) -> str:
         [
             "Menu Jogos",
             "🔵 Nenhum jogo ativo.",
-            "Use Scan agora para listar partidas ao vivo. O radar principal trabalha de 20 em 20 segundos e acelera so os candidatos fortes.",
+            "Use Scan agora para listar partidas ao vivo. O radar fica vivo em segundo plano; o Telegram manda resumo geral a cada 10 minutos e acelera para 20-25 segundos quando voce escolhe um jogo.",
         ]
     )
 

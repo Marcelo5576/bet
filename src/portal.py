@@ -169,8 +169,8 @@ DEFAULT_AI_SUPPORT_SKILLS: list[dict[str, Any]] = [
         "skill_id": "scanner_active_monitoring",
         "title": "Monitoramento ativo",
         "intent": "Explicar intervalo do scanner após escolher um jogo.",
-        "keywords": ["monitoramento", "2 minutos", "dois minutos", "jogo escolhido", "scanner", "ativo", "sair"],
-        "answer": "Com jogo escolhido, o scanner monitora a cada 2 minutos. Ao sair, volta ao ciclo normal.",
+        "keywords": ["monitoramento", "25 segundos", "jogo escolhido", "scanner", "ativo", "sair"],
+        "answer": "Sem jogo escolhido, o Telegram recebe resumo a cada 10 minutos. Com jogo escolhido, o monitoramento fica em 20 a 25 segundos.",
         "priority": 73,
     },
     {
@@ -417,8 +417,8 @@ class PortalStore:
                 create table if not exists user_preferences (
                   user_id integer primary key,
                   scan_enabled integer not null default 1,
-                  idle_scan_seconds integer not null default 60,
-                  active_scan_seconds integer not null default 120,
+                  idle_scan_seconds integer not null default 600,
+                  active_scan_seconds integer not null default 25,
                   telegram_enabled integer not null default 0,
                   telegram_chat_id text,
                   updated_at text not null,
@@ -479,7 +479,8 @@ class PortalStore:
             self._ensure_column(conn, "users", "gateway_subscription_id", "text")
             self._ensure_column(conn, "user_preferences", "scan_enabled", "integer not null default 1")
             self._ensure_column(conn, "bankroll_accounts", "default_stake_percent", "real not null default 2")
-            conn.execute("update user_preferences set active_scan_seconds = 120 where active_scan_seconds = 300")
+            conn.execute("update user_preferences set idle_scan_seconds = 600 where idle_scan_seconds < 600")
+            conn.execute("update user_preferences set active_scan_seconds = 25 where active_scan_seconds > 25")
 
     def get_system_setting(self, key: str, default: str = "") -> str:
         clean_key = str(key or "").strip()
@@ -839,7 +840,7 @@ class PortalStore:
                 """
                 insert into user_preferences (
                     user_id, scan_enabled, idle_scan_seconds, active_scan_seconds, telegram_enabled, telegram_chat_id, updated_at
-                ) values (?, 1, 60, 120, 0, null, ?)
+                ) values (?, 1, 600, 25, 0, null, ?)
                 """,
                 (user_id, now),
             )
@@ -1087,15 +1088,15 @@ class PortalStore:
                 """
                 insert into user_preferences (
                     user_id, scan_enabled, idle_scan_seconds, active_scan_seconds, telegram_enabled, telegram_chat_id, updated_at
-                ) values (?, 1, 60, 300, 0, null, ?)
+                ) values (?, 1, 600, 25, 0, null, ?)
                 """,
                 (int(user_id), now),
             )
         return {
             "user_id": int(user_id),
             "scan_enabled": 1,
-            "idle_scan_seconds": 60,
-            "active_scan_seconds": 120,
+            "idle_scan_seconds": 600,
+            "active_scan_seconds": 25,
             "telegram_enabled": 0,
             "telegram_chat_id": None,
             "updated_at": now,
@@ -1119,8 +1120,8 @@ class PortalStore:
             "telegram_chat_id": (telegram_chat_id or current.get("telegram_chat_id") or None),
             "updated_at": _now_iso(),
         }
-        updates["idle_scan_seconds"] = max(30, min(1800, updates["idle_scan_seconds"]))
-        updates["active_scan_seconds"] = max(60, min(1800, updates["active_scan_seconds"]))
+        updates["idle_scan_seconds"] = max(600, min(1800, updates["idle_scan_seconds"]))
+        updates["active_scan_seconds"] = max(20, min(25, updates["active_scan_seconds"]))
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1200,9 +1201,9 @@ class PortalStore:
                 """
             ).fetchall()
         if not rows:
-            return int(default_idle_scan_seconds), int(default_active_scan_seconds)
-        idle_values = [max(30, min(1800, int(row["idle_scan_seconds"] or default_idle_scan_seconds))) for row in rows]
-        active_values = [max(60, min(1800, int(row["active_scan_seconds"] or default_active_scan_seconds))) for row in rows]
+            return max(600, min(1800, int(default_idle_scan_seconds))), max(20, min(25, int(default_active_scan_seconds)))
+        idle_values = [max(600, min(1800, int(row["idle_scan_seconds"] or default_idle_scan_seconds))) for row in rows]
+        active_values = [max(20, min(25, int(row["active_scan_seconds"] or default_active_scan_seconds))) for row in rows]
         return min(idle_values), min(active_values)
 
     def seed_pricing(self, defaults: dict[str, float]) -> None:

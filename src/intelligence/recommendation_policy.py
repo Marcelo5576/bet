@@ -20,30 +20,30 @@ PROFILES: dict[str, RiskProfile] = {
     "conservador": RiskProfile(
         name="conservador",
         label="Modo conservador",
-        min_ev=0.08,
-        min_confidence_score=0.75,
-        odd_min=1.60,
-        odd_max=2.50,
+        min_ev=0.07,
+        min_confidence_score=0.72,
+        odd_min=1.55,
+        odd_max=2.70,
         stake_cap_fraction=0.01,
         kelly_multiplier=0.25,
     ),
     "moderado": RiskProfile(
         name="moderado",
         label="Modo moderado",
-        min_ev=0.05,
-        min_confidence_score=0.65,
-        odd_min=1.60,
-        odd_max=3.00,
+        min_ev=0.03,
+        min_confidence_score=0.60,
+        odd_min=1.45,
+        odd_max=3.50,
         stake_cap_fraction=0.03,
         kelly_multiplier=0.50,
     ),
     "agressivo": RiskProfile(
         name="agressivo",
         label="Modo agressivo",
-        min_ev=0.03,
-        min_confidence_score=0.60,
-        odd_min=1.60,
-        odd_max=3.50,
+        min_ev=0.015,
+        min_confidence_score=0.52,
+        odd_min=1.35,
+        odd_max=4.25,
         stake_cap_fraction=0.03,
         kelly_multiplier=0.75,
     ),
@@ -96,12 +96,19 @@ def apply_recommendation_policy(
     market_quality_score = _market_quality_score(signal, odd)
     historical_market = _row_for_subject(learning_context.get("market_breakdown"), market_category)
     historical_league = _row_for_subject(learning_context.get("league_breakdown"), league_name)
-    historical_performance_score = _historical_score(historical_market, historical_league)
-    league_reliability_score = _league_reliability_score(historical_league)
+    historical_reference = signal.get("historical_context") if isinstance(signal.get("historical_context"), dict) else {}
+    historical_performance_score = _historical_score(signal, historical_market, historical_league)
+    league_reliability_score = _league_reliability_score(signal, historical_league)
     odds_validity_score = _odds_validity_score(odd, profile)
     model_agreement_score = _model_agreement_score(signal)
     odd_stability_score = _odd_stability_score(signal, odd)
     data_completeness = max(0.0, min(1.0, _safe_float(signal.get("data_quality")) / 100.0))
+    historical_sample = max(
+        _safe_int(historical_reference.get("league_sample_size")),
+        _safe_int(historical_reference.get("usable_training_matches")),
+    )
+    historical_fit_score = _safe_float(historical_reference.get("market_fit_score"), None)
+    historical_classification = str(historical_reference.get("league_classification") or "").strip().lower()
 
     confidence_score = (
         (data_completeness * 0.24)
@@ -114,16 +121,6 @@ def apply_recommendation_policy(
     confidence_score = max(0.0, min(1.0, confidence_score))
 
     ev_score = _ev_score(expected_value)
-    final_score = round(
-        (
-            (ev_score * 0.40)
-            + (confidence_score * 0.35)
-            + (market_quality_score * 0.15)
-            + (historical_performance_score * 0.10)
-        )
-        * 100.0,
-        1,
-    )
 
     reasons: list[str] = []
     entry_allowed = True
@@ -143,12 +140,12 @@ def apply_recommendation_policy(
         risk_level = "Sem valor"
         recommendation_order = 4
         reasons.append("EV ficou zerado ou negativo.")
-    elif expected_value < 0.03:
+    elif expected_value < 0.015:
         entry_allowed = False
         recommendation = "Valor baixo"
         risk_level = "Alto"
         recommendation_order = 4
-        reasons.append("EV abaixo de 3%.")
+        reasons.append("EV abaixo de 1.5%.")
     elif expected_value < profile.min_ev:
         entry_allowed = False
         recommendation = "Monitorar"
@@ -182,7 +179,7 @@ def apply_recommendation_policy(
             recommendation_order = 3
         reasons.append("Odd fora da faixa operacional.")
 
-    if _safe_int(signal.get("data_quality")) < 70:
+    if _safe_int(signal.get("data_quality")) < 60:
         entry_allowed = False
         if recommendation != "Ignorar":
             recommendation = "Aguardar"
@@ -199,6 +196,41 @@ def apply_recommendation_policy(
             entry_allowed = False
             recommendation = "Aguardar"
             recommendation_order = 3
+
+    if historical_classification.startswith("evitar") and historical_sample >= 25:
+        entry_allowed = False
+        recommendation = "Aguardar"
+        recommendation_order = 3
+        reasons.append("Base historica de 3 anos marca esta liga como evitar no momento.")
+    elif historical_classification.startswith("em observ") and historical_sample >= 20:
+        reasons.append("Base historica pede cautela extra para esta liga.")
+        confidence_score = max(0.0, confidence_score - 0.05)
+        if confidence_score < profile.min_confidence_score:
+            entry_allowed = False
+            recommendation = "Aguardar"
+            recommendation_order = 3
+
+    if historical_fit_score is not None:
+        if historical_fit_score < 0.35 and historical_sample >= 20:
+            entry_allowed = False
+            recommendation = "Monitorar"
+            recommendation_order = 3
+            reasons.append("Comparacao com a base historica nao confirmou este mercado.")
+        elif historical_fit_score >= 0.65 and historical_sample >= 20:
+            reasons.append("Comparacao historica reforcou a leitura do mercado.")
+    elif historical_sample and historical_sample < 10:
+        reasons.append("Base historica ainda curta para calibrar este confronto.")
+
+    final_score = round(
+        (
+            (ev_score * 0.40)
+            + (confidence_score * 0.35)
+            + (market_quality_score * 0.15)
+            + (historical_performance_score * 0.10)
+        )
+        * 100.0,
+        1,
+    )
 
     stake_value, stake_units, kelly_fraction = _stake_suggestion(
         bankroll=bankroll,
@@ -235,6 +267,7 @@ def apply_recommendation_policy(
         odd=odd,
         implied_probability=implied_probability,
         historical_league=historical_league,
+        historical_reference=historical_reference,
         reasons=reasons,
     )
 
@@ -321,10 +354,16 @@ def _build_explanation(
     odd: float | None,
     implied_probability: float | None,
     historical_league: dict[str, Any] | None,
+    historical_reference: dict[str, Any] | None,
     reasons: list[str],
 ) -> str:
     market = _market_name(signal)
     probability = _resolve_estimated_probability(signal)
+    historical_summary = ""
+    if historical_reference:
+        summary = str(historical_reference.get("comparison_summary") or "").strip()
+        if summary:
+            historical_summary = f" {summary}"
     if entry_allowed:
         league_note = ""
         if historical_league:
@@ -335,12 +374,12 @@ def _build_explanation(
         return (
             f"{recommendation} em {market} porque a probabilidade estimada foi {_pct(probability)}, "
             f"a probabilidade implicita da odd foi {_pct(implied_probability)}, "
-            f"o EV ficou em {_pct(expected_value)} e a confianca fechou em {confidence_score:.2f}.{league_note}"
+            f"o EV ficou em {_pct(expected_value)} e a confianca fechou em {confidence_score:.2f}.{league_note}{historical_summary}"
         )
     return (
         f"Entrada nao liberada porque o EV ficou em {_pct(expected_value)}, "
         f"a confianca foi {confidence_score:.2f}, a odd operacional ficou em {odd if odd is not None else '-'} "
-        f"e os filtros marcaram: {'; '.join(reasons)}"
+        f"e os filtros marcaram: {'; '.join(reasons)}{historical_summary}"
     )
 
 
@@ -376,9 +415,13 @@ def _market_quality_score(signal: dict[str, Any], odd: float | None) -> float:
 
 
 def _historical_score(
+    signal: dict[str, Any],
     market_row: dict[str, Any] | None,
     league_row: dict[str, Any] | None,
 ) -> float:
+    precomputed = _safe_float(signal.get("historical_performance_score"), None)
+    if precomputed is not None and precomputed > 0:
+        return max(0.0, min(1.0, precomputed))
     scores = []
     for row in (market_row, league_row):
         if not row:
@@ -394,7 +437,10 @@ def _historical_score(
     return max(0.0, min(1.0, sum(scores) / len(scores)))
 
 
-def _league_reliability_score(league_row: dict[str, Any] | None) -> float:
+def _league_reliability_score(signal: dict[str, Any], league_row: dict[str, Any] | None) -> float:
+    precomputed = _safe_float(signal.get("league_reliability_score"), None)
+    if precomputed is not None and precomputed > 0:
+        return max(0.0, min(1.0, precomputed))
     if not league_row:
         return 0.45
     entries = _safe_int(league_row.get("entries") or league_row.get("total"))

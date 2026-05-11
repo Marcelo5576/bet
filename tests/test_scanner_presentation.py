@@ -39,9 +39,9 @@ class ScannerPresentationTests(unittest.TestCase):
         self.assertEqual(decision["decision_status"], "DO_NOT_ENTER")
         self.assertEqual(decision["action_label"], "NÃO ENTRAR")
 
-    def test_does_not_show_entry_when_confidence_below_65(self):
+    def test_does_not_show_entry_when_confidence_below_monitor_cut(self):
         decision = build_decision_view_model(
-            _base_signal(confidence=52, confidence_score=0.52, entry_allowed=False)
+            _base_signal(confidence=42, confidence_score=0.42, entry_allowed=False)
         )
         self.assertEqual(decision["decision_status"], "DO_NOT_ENTER")
         self.assertEqual(decision["decision_label"], "NÃO ENTRAR")

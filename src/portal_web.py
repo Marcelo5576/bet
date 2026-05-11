@@ -1966,10 +1966,10 @@ def app_portal(request: Request, user: dict[str, Any] = Depends(_require_user)) 
     <div class='card'>
       <h3 class='title'>Preferencias de scanner/notificacao</h3>
       <label><input id='pref-scan-enabled' type='checkbox' {'checked' if int(prefs.get("scan_enabled") or 0) else ''} /> Scanner ativo para meu usuario</label>
-      <label>Scanner sem jogo ativo (segundos)</label>
-      <input id='pref-idle' type='number' min='30' max='1800' value='{int(prefs.get("idle_scan_seconds") or 60)}' />
-      <label>Scanner com jogo selecionado (segundos)</label>
-      <input id='pref-active' type='number' min='60' max='1800' value='{int(prefs.get("active_scan_seconds") or 120)}' />
+      <label>Mensagens sem jogo ativo (segundos)</label>
+      <input id='pref-idle' type='number' min='600' max='1800' value='{int(prefs.get("idle_scan_seconds") or 600)}' />
+      <label>Monitoramento com jogo selecionado (segundos)</label>
+      <input id='pref-active' type='number' min='20' max='25' value='{int(prefs.get("active_scan_seconds") or 25)}' />
       <label>Chat ID Telegram (para notificacoes)</label>
       <input id='pref-chatid' value='{_esc(prefs.get("telegram_chat_id") or "")}' placeholder='Ex: 123456789' />
       <label><input id='pref-enabled' type='checkbox' {'checked' if int(prefs.get("telegram_enabled") or 0) else ''} /> Quero notificacoes no Telegram</label>
@@ -2064,8 +2064,8 @@ async function savePrefs() {
   note.textContent = 'Salvando...';
   const payload = {
     scan_enabled: document.getElementById('pref-scan-enabled').checked,
-    idle_scan_seconds: Number(document.getElementById('pref-idle').value || 60),
-    active_scan_seconds: Number(document.getElementById('pref-active').value || 120),
+    idle_scan_seconds: Number(document.getElementById('pref-idle').value || 600),
+    active_scan_seconds: Number(document.getElementById('pref-active').value || 25),
     telegram_chat_id: document.getElementById('pref-chatid').value.trim(),
     telegram_enabled: document.getElementById('pref-enabled').checked
   };

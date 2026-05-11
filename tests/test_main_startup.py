@@ -44,6 +44,56 @@ class MainStartupTests(unittest.TestCase):
         passive_loop_mock.assert_called_once()
         asyncio_run_mock.assert_called_once()
 
+    def test_scanner_keeps_radar_fast_but_throttles_idle_telegram_messages(self) -> None:
+        settings = SimpleNamespace(idle_scan_interval_seconds=20, active_scan_interval_seconds=120)
+        idle_state = SimpleNamespace(active_game_id=None, active_signal=None)
+
+        self.assertEqual(app_main._scanner_cycle_seconds(idle_state, settings), 20)
+        self.assertEqual(
+            app_main._telegram_scan_delivery_interval_seconds(
+                idle_state,
+                idle_interval=20,
+                active_interval=120,
+            ),
+            600,
+        )
+
+    def test_selected_game_scanner_and_telegram_use_fast_interval(self) -> None:
+        settings = SimpleNamespace(idle_scan_interval_seconds=600, active_scan_interval_seconds=120)
+        active_state = SimpleNamespace(active_game_id="game-1", active_signal={"game": {"game_id": "game-1"}})
+
+        self.assertEqual(
+            app_main._scanner_cycle_seconds(
+                active_state,
+                settings,
+                idle_interval=600,
+                active_interval=120,
+            ),
+            25,
+        )
+        self.assertEqual(
+            app_main._telegram_scan_delivery_interval_seconds(
+                active_state,
+                idle_interval=600,
+                active_interval=120,
+            ),
+            25,
+        )
+
+    def test_signal_identity_is_stable_for_bet365_callbacks(self) -> None:
+        signal = {
+            "game": {"game_id": "g-1", "home": "Flamengo", "away": "Palmeiras"},
+            "market": "Total de Gols",
+            "team": "Over 1.5",
+        }
+
+        first = app_main._ensure_signal_identity(dict(signal))
+        second = app_main._ensure_signal_identity(dict(signal))
+
+        self.assertEqual(first["signal_id"], second["signal_id"])
+        self.assertEqual(first["analysis_id"], first["signal_id"])
+        self.assertTrue(first["signal_id"].startswith("sig-"))
+
     def test_scheduled_scan_updates_dashboard_even_without_telegram_chats(self) -> None:
         async def run_case() -> None:
             settings = SimpleNamespace(
