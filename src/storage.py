@@ -109,6 +109,19 @@ class StateStore:
             encoding="utf-8",
         )
 
+    def get_signal(self, signal_id: str) -> dict[str, Any] | None:
+        state = self.load()
+        target = str(signal_id or "").strip()
+        if not target:
+            return None
+        if state.active_signal and str(state.active_signal.get("signal_id")) == target:
+            return dict(state.active_signal)
+        for collection in (state.candidate_signals or [], state.history or []):
+            for item in collection:
+                if isinstance(item, dict) and str(item.get("signal_id")) == target:
+                    return dict(item)
+        return None
+
     def touch_scan(self) -> BotState:
         state = self.load()
         state.last_scan_at = datetime.now(timezone.utc).isoformat()
@@ -225,6 +238,61 @@ class StateStore:
         state.chat_ids = sorted(chat_ids)
         self.save(state)
         return state
+
+    def update_signal_fields(
+        self,
+        signal_id: str,
+        updates: dict[str, Any],
+        *,
+        activate: bool = False,
+    ) -> tuple[BotState, dict[str, Any] | None]:
+        state = self.load()
+        target = str(signal_id or "").strip()
+        if not target:
+            return state, None
+        payload = dict(updates or {})
+        updated: dict[str, Any] | None = None
+
+        def _merge(item: dict[str, Any]) -> dict[str, Any]:
+            record = dict(item or {})
+            record.update(payload)
+            return _freeze_signal_memory(record)
+
+        if isinstance(state.active_signal, dict) and str(state.active_signal.get("signal_id")) == target:
+            state.active_signal = _merge(state.active_signal)
+            updated = dict(state.active_signal)
+
+        candidates = list(state.candidate_signals or [])
+        for index, item in enumerate(candidates):
+            if not isinstance(item, dict) or str(item.get("signal_id")) != target:
+                continue
+            candidates[index] = _merge(item)
+            updated = dict(candidates[index])
+            break
+        state.candidate_signals = candidates[:10]
+
+        history = list(state.history or [])
+        history_updated = False
+        for index, item in enumerate(history):
+            if not isinstance(item, dict) or str(item.get("signal_id")) != target:
+                continue
+            history[index] = _merge(item)
+            updated = dict(history[index])
+            history_updated = True
+            break
+        if updated and not history_updated:
+            history.insert(0, dict(updated))
+        state.history = history[:500]
+
+        if activate and updated:
+            state.active_signal = dict(updated)
+            game = updated.get("game") if isinstance(updated.get("game"), dict) else {}
+            active_game_id = str(game.get("game_id") or updated.get("match_id") or "").strip()
+            if active_game_id:
+                state.active_game_id = active_game_id
+
+        self.save(state)
+        return state, updated
 
     def mark_active_outcome(self, outcome: str) -> BotState:
         state = self.load()
